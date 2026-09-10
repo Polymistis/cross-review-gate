@@ -75,8 +75,8 @@ function Assert-CrgCentralCapturedState {
 function Invoke-CrgCentralAuthorLint {
   param([object]$Operation, [object]$CapturedInput, [string]$Origin)
   $Runtime = $Operation.Runtime
-  $payload = $Runtime.Payloads['scripts/codex/author-lint.ps1']
-  if ($null -eq $payload -or $payload.Bytes -isnot [byte[]] -or $payload.Path -cne (Join-Path $Runtime.Root 'scripts\codex\author-lint.ps1')) { throw 'central author-lint payload is not retained' }
+  $payload = $Runtime.Payloads['scripts/shared/author-lint.ps1']
+  if ($null -eq $payload -or $payload.Bytes -isnot [byte[]] -or $payload.Path -cne (Join-Path $Runtime.Root 'scripts\shared\author-lint.ps1')) { throw 'central author-lint payload is not retained' }
   $arguments = @{}
   $name = if ($Origin -ceq 'paired-v1') { 'PairedInput' } else { 'FirstAttachmentInput' }
   $inputData = @{ Runtime = $Runtime; CapturedInput = $CapturedInput }

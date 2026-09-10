@@ -1177,7 +1177,7 @@ function Get-CodexConfigText {
 # the child PowerShell cannot load the runner -- every review then fails closed
 # on accounts/temp roots with spaces. Passing ONE pre-quoted string preserves
 # argument boundaries. Pure (kept byte-identical in intent
-# to scripts/codex/auto-merge.ps1's Convert-ToProcArgString).
+# to scripts/shared/auto-merge.ps1's Convert-ToProcArgString).
 function Convert-ToProcArgString {
   param([string[]]$ArgList)
   if ($null -eq $ArgList) { return '' }
@@ -3953,7 +3953,7 @@ function Build-CommitLogEvidence {
 # the prune must NEVER touch -- the name-shape guard that keeps a `-OutDir
 # docs` invocation (or any output dir with unrelated .md/.jsonl files) from
 # recycling non-review files; mirrors the defense
-# `scripts/codex/analyze-blocker-trends.ps1` applies via its $verdictNameRe
+# `scripts/shared/analyze-blocker-trends.ps1` applies via its $verdictNameRe
 # scan guard. Pure. 'forensics' (per-pass event
 # streams + stderr captures) ages fast; 'verdict' (the .md artifact -- durable
 # gate-decision evidence, not transient noise) ages on the long verdict cutoff.
@@ -4392,8 +4392,8 @@ function Get-CaptureHeaderLocatorField {
 }
 
 # The producer grammar for a verdict artifact filename, byte-identical to
-# `$verdictNameRe` in scripts/codex/analyze-blocker-trends.ps1 and
-# scripts/codex/dispatch-checklist.ps1 (mirror contract: every copy moves
+# `$verdictNameRe` in scripts/shared/analyze-blocker-trends.ps1 and
+# scripts/shared/dispatch-checklist.ps1 (mirror contract: every copy moves
 # together). A protection key is only ever minted for a name this prune could
 # actually be asked to delete; anything else is a claim it cannot honor.
 function Test-CaptureVerdictLeaf {
@@ -6873,7 +6873,7 @@ $stderrFile  = Join-Path $outDirAbs "review-$timestamp-$scopeTag.stderr.log"
 # costs the capture. The name-shape guard that keeps a `-OutDir docs` invocation
 # from recycling unrelated .md/.jsonl files now lives in Get-ReviewLogPruneClass,
 # which mirrors the same `^review-\d{8}-\d{6}-` producer grammar
-# `scripts/codex/analyze-blocker-trends.ps1` scans with.
+# `scripts/shared/analyze-blocker-trends.ps1` scans with.
 if (-not $isPreparedPair) {
 $pruneLock = Enter-PruneIndexLock -IndexPath $captureIndexPath -LogTag 'auto-review'
 try {

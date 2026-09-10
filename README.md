@@ -157,7 +157,7 @@ can be slotted in as a backend.
   The wrappers also pin `--no-relative` on every project-mode evidence diff
   (available since Git 2.28)
 - complete, unshallowed repository history for `-Scope Commit`,
-  `-Scope Branch`, and `scripts/codex/auto-merge.ps1`. A shallow clone
+  `-Scope Branch`, and `scripts/shared/auto-merge.ps1`. A shallow clone
   must be converted with `git fetch --unshallow` (or replaced by a full
   clone) before those operations. `-Scope Staged` remains available on
   both backends in a shallow clone; Codex `-Scope Uncommitted` remains
@@ -357,18 +357,20 @@ cross-review-gate/
 ├── scripts/
 │   ├── codex/
 │   │   ├── auto-review.ps1            (Codex backend review wrapper)
-│   │   ├── auto-merge.ps1             (Codex ff-merge gate)
+│   │   ├── auto-merge.ps1             (legacy launcher entrypoint; forwards to shared)
 │   │   ├── commit.ps1                 (cross-review commit wrapper, Codex implementer)
+│   │   └── review-prompt-template.md  (shared prompt with rendered project values)
+│   ├── shared/
+│   │   ├── auto-merge.ps1             (shared ff-merge gate; Codex or Claude review)
 │   │   ├── analyze-blocker-trends.ps1 (trend report over verdict logs)
 │   │   ├── author-lint.ps1            (author-side mechanical pre-pass linter)
 │   │   ├── dispatch-checklist.ps1     (recurrence-ranked dispatch checklist from verdict logs)
-│   │   ├── worker-audit.ps1           (per-landing process audit over the verdict logs;
+│   │   └── worker-audit.ps1           (per-landing process audit over the verdict logs;
 │   │                                   auto-merge runs a TRUSTED copy after a merge --
 │   │                                   the base's, else the manifest-verified local
 │   │                                   snapshot -- non-gating; skipped with a note when
 │   │                                   no trusted source holds it or the central
 │   │                                   review-log dirs do not resolve)
-│   │   └── review-prompt-template.md  (shared prompt with rendered project values)
 │   ├── claude/
 │   │   ├── auto-review.ps1            (Claude backend review wrapper)
 │   │   └── commit.ps1                 (cross-review commit wrapper, Claude implementer)

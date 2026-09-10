@@ -256,7 +256,7 @@ cross-review remain unchanged.
 - `scripts/codex/review-prompt-template.md` owns the reviewer-facing mode,
   campaign, invariant-surface, compatibility, evidence, and code-unit-test-ban
   rules.
-- `scripts/codex/auto-merge.ps1` supplies the pinned base OID. The wrappers
+- `scripts/shared/auto-merge.ps1` supplies the pinned base OID. The wrappers
   remain the declaration resolvers.
 - Candidate declaration content reaches the reviewer through the ordinary
   diff. No candidate block replaces the governing block.

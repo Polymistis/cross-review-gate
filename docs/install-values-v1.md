@@ -912,10 +912,15 @@ seal-then-replace recovery path. Eligibility is exact and non-fallback:
 1. The v1 values source satisfies LOCAL authority, and the shared core parses
    the source and every retained slot-bearing input and produces complete
    candidate outputs. Only candidate-versus-installed byte equality may fail.
-2. The present inventory contains every non-retired path in bootstrap's
-   independent `Get-CrgSealRecoveryFileList`, including
-   `scripts/render-project-values.ps1` and `docs/AGENTS.md.template`. Each present
-   retired fixture path from the historical inventory also enters the ordinary
+2. The present inventory contains every non-retired path in either the current
+   shared-layout `Get-CrgSealRecoveryFileList` or the frozen
+   `Get-CrgPreRelocationRecoveryFileList`, including
+   `scripts/render-project-values.ps1` and `docs/AGENTS.md.template`. The
+   pre-relocation v2.1/v2.2 shape also requires every shared-only path to be
+   positively absent. A partial shared layout cannot fall back to the old shape.
+   The current catalog preserves current installation order; the frozen catalog
+   preserves pre-relocation authorization-marker order. Each present
+   retired path from the selected historical inventory also enters the ordinary
    seal custody. With a strict prior manifest, only retired paths named by that
    manifest join the replacement baseline; surviving files omitted by a completed
    upgrade do not enlarge that baseline. Without metadata, every present retired
@@ -948,9 +953,9 @@ mismatch. An interruption between seal and replacement leaves only the exact
 held pre-recovery bytes under LOCAL authority.
 
 The subsequent full bootstrap distributes only `Get-CrgCurrentFileList` and
-publishes that reduced inventory. Retired fixture paths are never copied,
-restored, or executed; surviving historical files remain outside current
-distribution and are not deleted by this recovery operation.
+publishes that reduced inventory. Retired paths are never copied or restored;
+retired fixture paths are never executed. Surviving historical files remain
+outside current distribution and are not deleted by this recovery operation.
 
 ### Frozen legacy LOCAL recovery
 

@@ -783,11 +783,12 @@ function Get-CrgCurrentFileList {
   return @(
     @{ Src = 'scripts/codex/auto-review.ps1';            Dst = 'scripts/codex/auto-review.ps1' },
     @{ Src = 'scripts/codex/auto-merge.ps1';             Dst = 'scripts/codex/auto-merge.ps1' },
+    @{ Src = 'scripts/shared/auto-merge.ps1';            Dst = 'scripts/shared/auto-merge.ps1' },
     @{ Src = 'scripts/codex/commit.ps1';                 Dst = 'scripts/codex/commit.ps1' },
-    @{ Src = 'scripts/codex/analyze-blocker-trends.ps1'; Dst = 'scripts/codex/analyze-blocker-trends.ps1' },
-    @{ Src = 'scripts/codex/author-lint.ps1';            Dst = 'scripts/codex/author-lint.ps1' },
-    @{ Src = 'scripts/codex/dispatch-checklist.ps1';     Dst = 'scripts/codex/dispatch-checklist.ps1' },
-    @{ Src = 'scripts/codex/worker-audit.ps1';           Dst = 'scripts/codex/worker-audit.ps1' },
+    @{ Src = 'scripts/shared/analyze-blocker-trends.ps1'; Dst = 'scripts/shared/analyze-blocker-trends.ps1' },
+    @{ Src = 'scripts/shared/author-lint.ps1';            Dst = 'scripts/shared/author-lint.ps1' },
+    @{ Src = 'scripts/shared/dispatch-checklist.ps1';     Dst = 'scripts/shared/dispatch-checklist.ps1' },
+    @{ Src = 'scripts/shared/worker-audit.ps1';           Dst = 'scripts/shared/worker-audit.ps1' },
     @{ Src = 'scripts/codex/review-prompt-template.md';  Dst = 'scripts/codex/review-prompt-template.md' },
     @{ Src = 'scripts/claude/auto-review.ps1';           Dst = 'scripts/claude/auto-review.ps1' },
     @{ Src = 'scripts/claude/commit.ps1';                Dst = 'scripts/claude/commit.ps1' },
@@ -799,11 +800,42 @@ function Get-CrgCurrentFileList {
   )
 }
 
-# Recovery order is part of the prior authorization-marker identity. This
-# catalog retains the pre-retirement v2.1 order without making retired entries
-# package sources. An absent retired file cannot satisfy a prior manifest that
-# still names the path. Present entries require the ordinary seal custody.
+# Recovery order is part of the authorization-marker identity. The current
+# catalog follows Get-CrgCurrentFileList order after retired entries are
+# filtered, while retaining historical paths without making them package
+# sources. An absent retired file cannot satisfy a prior manifest that still
+# names the path. Present entries require the ordinary seal custody.
 function Get-CrgSealRecoveryFileList {
+  return @(
+    @{ Dst = 'scripts/codex/auto-review.ps1';            Retired = $false },
+    @{ Dst = 'scripts/codex/auto-merge.ps1';             Retired = $false },
+    @{ Dst = 'scripts/shared/auto-merge.ps1';            Retired = $false },
+    @{ Dst = 'scripts/codex/commit.ps1';                 Retired = $false },
+    @{ Dst = 'scripts/codex/analyze-blocker-trends.ps1'; Retired = $true },
+    @{ Dst = 'scripts/codex/author-lint.ps1';            Retired = $true },
+    @{ Dst = 'scripts/codex/dispatch-checklist.ps1';     Retired = $true },
+    @{ Dst = 'scripts/codex/worker-audit.ps1';           Retired = $true },
+    @{ Dst = 'scripts/shared/analyze-blocker-trends.ps1'; Retired = $false },
+    @{ Dst = 'scripts/shared/author-lint.ps1';            Retired = $false },
+    @{ Dst = 'scripts/shared/dispatch-checklist.ps1';     Retired = $false },
+    @{ Dst = 'scripts/shared/worker-audit.ps1';           Retired = $false },
+    @{ Dst = 'scripts/codex/review-prompt-template.md';  Retired = $false },
+    @{ Dst = 'scripts/claude/auto-review.ps1';           Retired = $false },
+    @{ Dst = 'scripts/claude/commit.ps1';                Retired = $false },
+    @{ Dst = 'scripts/git-hooks/pre-commit';             Retired = $false },
+    @{ Dst = 'scripts/run-gate.sh';                      Retired = $false },
+    @{ Dst = 'scripts/render-project-values.ps1';        Retired = $false },
+    @{ Dst = 'scripts/codex/selftest-fixtures/e2e-probe-base-1.rs'; Retired = $true },
+    @{ Dst = 'scripts/codex/selftest-fixtures/e2e-probe-base-2.rs'; Retired = $true },
+    @{ Dst = 'docs/audit-protocol.md';                   Retired = $false },
+    @{ Dst = 'docs/AGENTS.md.template';                  Retired = $false }
+  )
+}
+
+# Exact pre-relocation current recovery order. This frozen catalog admits a
+# complete v2.1/v2.2 LOCAL installation whose shared-layout paths are all
+# positively absent; it is never derived by subtracting today's paths.
+function Get-CrgPreRelocationRecoveryFileList {
   return @(
     @{ Dst = 'scripts/codex/auto-review.ps1';            Retired = $false },
     @{ Dst = 'scripts/codex/auto-merge.ps1';             Retired = $false },
@@ -8467,14 +8499,39 @@ if ($SealManifest) {
     $sealAgentsKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs 'docs/AGENTS.md.template')
     $sealRecoveryList = @(Get-CrgSealRecoveryFileList)
     if ($sealRendererKind -ceq 'file' -and $sealAgentsKind -ceq 'file') {
+      $sealPreRelocationList = @(Get-CrgPreRelocationRecoveryFileList)
+      $sealCurrentBad = @()
+      foreach ($sealCurrentFile in @($sealRecoveryList | Where-Object { -not $_.Retired })) {
+        $sealCurrentKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealCurrentFile.Dst)
+        if ($sealCurrentKind -cne 'file') { $sealCurrentBad += "$($sealCurrentFile.Dst) ($sealCurrentKind)" }
+      }
+      $sealPreRelocationBad = @()
+      foreach ($sealPreRelocationFile in @($sealPreRelocationList | Where-Object { -not $_.Retired })) {
+        $sealPreRelocationKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealPreRelocationFile.Dst)
+        if ($sealPreRelocationKind -cne 'file') { $sealPreRelocationBad += "$($sealPreRelocationFile.Dst) ($sealPreRelocationKind)" }
+      }
+      $sealPreRelocationPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+      foreach ($sealPreRelocationFile in $sealPreRelocationList) { [void]$sealPreRelocationPaths.Add($sealPreRelocationFile.Dst) }
+      $sealCurrentOnlyBad = @()
+      foreach ($sealCurrentFile in @($sealRecoveryList | Where-Object { -not $sealPreRelocationPaths.Contains($_.Dst) })) {
+        $sealCurrentOnlyKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealCurrentFile.Dst)
+        if ($sealCurrentOnlyKind -cne 'empty') { $sealCurrentOnlyBad += "$($sealCurrentFile.Dst) ($sealCurrentOnlyKind)" }
+      }
+      if ($sealCurrentBad.Count -eq 0) {
+        $sealInventoryName = 'complete current shared layout'
+      } elseif ($sealPreRelocationBad.Count -eq 0 -and $sealCurrentOnlyBad.Count -eq 0) {
+        $sealRecoveryList = $sealPreRelocationList
+        $sealInventoryName = 'complete pre-relocation v2.1/v2.2'
+      } else {
+        throw "current LOCAL recovery inventory is neither one complete shared layout nor one complete pre-relocation v2.1/v2.2 layout with every shared-only path positively absent (current: $($sealCurrentBad -join ', '); pre-relocation: $($sealPreRelocationBad -join ', '); shared-only occupants: $($sealCurrentOnlyBad -join ', '))"
+      }
       foreach ($sealRecoveryFile in $sealRecoveryList) {
         $sealRecoveryKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealRecoveryFile.Dst)
         if ($sealRecoveryKind -ceq 'file') { $sealSelectedList += $sealRecoveryFile }
         elseif (-not ($sealRecoveryFile.Retired -and $sealRecoveryKind -ceq 'empty')) {
-          throw "current v2.1 recovery path '$($sealRecoveryFile.Dst)' has unsupported occupant kind '$sealRecoveryKind'"
+          throw "current recovery path '$($sealRecoveryFile.Dst)' has unsupported occupant kind '$sealRecoveryKind'"
         }
       }
-      $sealInventoryName = 'complete current v2.1'
       $sealIsCurrent = $true
     } elseif ($sealRendererKind -ceq 'empty' -and $sealAgentsKind -ceq 'empty') {
       $sealLegacyCorePaths = @(Get-CrgLegacyV170Paths)
@@ -9284,7 +9341,7 @@ if ($fileCollisions.Count -gt 0 -and $Force -and $null -ne $crgGitDir) {
   # real v1.7 install. Partial inventories remain ordinary collision handling;
   # treating one path as an install would make unrelated files un-overwritable.
   $crgLegacyPaths = @(Get-CrgLegacyV170Paths)
-  $crgLegacyFileList = @($fileList | Where-Object { $crgLegacyPaths -ccontains $_.Dst })
+  $crgLegacyFileList = @($crgLegacyPaths | ForEach-Object { @{ Dst = $_ } })
   $crgCurrentShape = Test-CrgCompleteLeafInventory -RepoRoot $targetRepoAbs -FileList $fileList
   $crgLegacyShape = Test-CrgCompleteLeafInventory -RepoRoot $targetRepoAbs -FileList $crgLegacyFileList
   $crgUpManifestKind = $crgLockedManifestKind
@@ -11679,11 +11736,12 @@ crg_legacy_review_kernel_stage() {
 # would otherwise be a bypass.
 GATE_UNTRACK_LIST='scripts/codex/auto-review.ps1
 scripts/codex/auto-merge.ps1
+scripts/shared/auto-merge.ps1
 scripts/codex/commit.ps1
-scripts/codex/analyze-blocker-trends.ps1
-scripts/codex/author-lint.ps1
-scripts/codex/dispatch-checklist.ps1
-scripts/codex/worker-audit.ps1
+scripts/shared/analyze-blocker-trends.ps1
+scripts/shared/author-lint.ps1
+scripts/shared/dispatch-checklist.ps1
+scripts/shared/worker-audit.ps1
 scripts/codex/review-prompt-template.md
 scripts/claude/auto-review.ps1
 scripts/claude/commit.ps1

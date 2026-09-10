@@ -2057,11 +2057,12 @@ tree: $_crg_sl_tree"
 # cannot bypass it, and fails CLOSED on a failed staged-state probe.
 GATE_UNTRACK_LIST='scripts/codex/auto-review.ps1
 scripts/codex/auto-merge.ps1
+scripts/shared/auto-merge.ps1
 scripts/codex/commit.ps1
-scripts/codex/analyze-blocker-trends.ps1
-scripts/codex/author-lint.ps1
-scripts/codex/dispatch-checklist.ps1
-scripts/codex/worker-audit.ps1
+scripts/shared/analyze-blocker-trends.ps1
+scripts/shared/author-lint.ps1
+scripts/shared/dispatch-checklist.ps1
+scripts/shared/worker-audit.ps1
 scripts/codex/review-prompt-template.md
 scripts/claude/auto-review.ps1
 scripts/claude/commit.ps1
@@ -4286,7 +4287,7 @@ PROMO_APPEND_UNCERTAIN=0
 trap cleanup_trusted_dirs EXIT
 
 # ---- author-lint fail-fast pre-pass (mechanical, runs BEFORE the AI review) ----
-# scripts/codex/author-lint.ps1 in staged mode catches the mechanical,
+# scripts/shared/author-lint.ps1 in staged mode catches the mechanical,
 # script-detectable defect classes the AI gate repeatedly raises on
 # narrative/doc and staged source-comment content (the author-lint header and
 # the AGENTS.md Review-Infrastructure row are the authoritative class list) --
@@ -4317,7 +4318,7 @@ trap cleanup_trusted_dirs EXIT
 # CROSS_REVIEW_SKIP_AUTHOR_LINT=1 skips ONLY this pre-pass (logged) -- the escape
 # for a linter false positive; the AI gate still runs. CROSS_REVIEW_SKIP=1 (top of
 # script) skips everything including this.
-AUTHOR_LINT_REL="scripts/codex/author-lint.ps1"
+AUTHOR_LINT_REL="scripts/shared/author-lint.ps1"
 AUTHOR_LINT_RUN=""
 # ONE probe, ONE answer, reused by the branch AND its diagnostic. Probing
 # again inside the message let the two disagree: a transient failure took the

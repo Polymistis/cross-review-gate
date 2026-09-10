@@ -747,11 +747,16 @@ supported and still participates in the effective `core.hooksPath` check.
 
 The commit hook reviews Staged scope, which remains available in
 a shallow clone. Direct `-Scope Commit` and `-Scope Branch` review, plus
-`scripts/codex/auto-merge.ps1`, require complete, unshallowed repository
+`scripts/shared/auto-merge.ps1`, require complete, unshallowed repository
 history. A shallow or indeterminate history check fails closed before ancestry
 or range work. Run `git fetch --unshallow` (or use a full clone) before those
 operations. Codex `-Scope Uncommitted` also remains available in a shallow
 clone; the Claude wrapper does not support Uncommitted scope.
+
+Use `scripts/shared/auto-merge.ps1` for new merge commands. The legacy
+`scripts/codex/auto-merge.ps1` entrypoint remains a forwarding wrapper because
+installed launcher ABIs require that path. The forwarding entrypoint does not
+select a reviewer or change the shared implementation's review requirements.
 
 Confirm the ordinary commit's final process exit and the gate's own PASS
 outcome before reporting a successful landing. A review finding or tooling
@@ -1023,7 +1028,7 @@ After accumulating a few weeks of review verdicts in `logs/codex/reviews/`
 and/or `logs/claude/reviews/`, generate the trend report:
 
 ```powershell
-powershell scripts\codex\analyze-blocker-trends.ps1 -SinceDays 30 -OutPath docs/blocker-trends.md
+powershell scripts\shared\analyze-blocker-trends.ps1 -SinceDays 30 -OutPath docs/blocker-trends.md
 ```
 
 The default scans BOTH backend log directories so the report aggregates
@@ -1082,7 +1087,7 @@ value or unset it.
 does. For rebased landings, `git checkout <sha> -- <files>` then a direct
 `git commit`. `git merge --ff-only` creates no commit, so it does not fire the
 pre-commit hook — but base-branch landings still require the merge gate via
-`scripts/codex/auto-merge.ps1`. The sole exception is the identity-record-
+`scripts/shared/auto-merge.ps1`. The sole exception is the identity-record-
 attested pre-redesign review-kernel promotion described in “Upgrade a TRACKED
 pre-redesign project-mode install,” when the old merge gate cannot admit its
 own replacement. That exception covers only the exact kernel commit; the

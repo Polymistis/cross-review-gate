@@ -113,8 +113,8 @@ function Resolve-HooksPathGuard {
 # return the ordered, case-insensitively-deduped parts with the candidates
 # PREPENDED, then the current PATH's parts (skipping blanks and any already
 # contributed by a candidate). Byte-identical to the copies in
-# scripts/codex/commit.ps1, scripts/codex/auto-merge.ps1, and
-# scripts/codex/auto-review.ps1 and scripts/codex/author-lint.ps1.
+# scripts/codex/commit.ps1, scripts/shared/auto-merge.ps1, and
+# scripts/codex/auto-review.ps1 and scripts/shared/author-lint.ps1.
 function Get-PrependedToolPathParts {
   param([string[]]$CandidateDirs, [string]$CurrentPath)
   $parts = New-Object 'System.Collections.Generic.List[string]'
@@ -169,8 +169,8 @@ function Get-ProcessPathSpellings {
 # only ONE spelling would silently DROP the other's dirs. Delegates the dedup to
 # Get-PrependedToolPathParts.
 # Byte-identical to the copies in scripts/codex/commit.ps1,
-# scripts/codex/auto-merge.ps1, scripts/codex/auto-review.ps1, and
-# scripts/codex/author-lint.ps1.
+# scripts/shared/auto-merge.ps1, scripts/codex/auto-review.ps1, and
+# scripts/shared/author-lint.ps1.
 function Get-UnionProcessPathParts {
   param([string[]]$Spellings, [string[]]$CandidateDirs = @())
   $joined = (@($Spellings) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join [System.IO.Path]::PathSeparator

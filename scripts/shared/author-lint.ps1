@@ -412,7 +412,7 @@
   the report always prints to stdout regardless).
 
 .NOTES
-  PowerShell 5.1 compatible. Sibling of scripts/codex/dispatch-checklist.ps1;
+  PowerShell 5.1 compatible. Sibling of scripts/shared/dispatch-checklist.ps1;
   mirrors its UTF-8 (read UTF-8 / write UTF-8-no-BOM) conventions. Unlike its
   MoveFileEx atomic write, the optional -OutPath report uses a best-effort move
   (the report always prints to stdout, so the file copy is a convenience).
@@ -5095,12 +5095,12 @@ function Invoke-PairedAuthorLint {
       $null -eq $captured -or $captured.Schema -ne 1 -or $captured.HasChanges -isnot [bool] -or
       (-not $FirstAttachment -and -not $captured.HasChanges)) { throw 'paired author-lint requires a retained runtime and captured changed pair' }
   $modules = @('private-governance', 'paired-governance', 'paired-tree', 'review-preparation', 'project-preparation', 'paired-review-input')
-  $payloadNames = @('scripts/codex/author-lint.ps1', 'scripts/codex/review-prompt-template.md') + @($modules | ForEach-Object { 'scripts/' + $_ + '.psm1' })
+  $payloadNames = @('scripts/shared/author-lint.ps1', 'scripts/codex/review-prompt-template.md') + @($modules | ForEach-Object { 'scripts/' + $_ + '.psm1' })
   foreach ($relative in $payloadNames) {
     if ($relative -cnotin @($runtime.Payloads.Keys) -or $runtime.Payloads[$relative].Bytes -isnot [byte[]] -or
         $runtime.Payloads[$relative].Path -cne (Join-Path $runtime.Root $relative.Replace('/', '\'))) { throw 'paired author-lint requires exact retained payload paths and byte buffers' }
   }
-  if (-not [string]::Equals($ExecutingPath, $runtime.Payloads['scripts/codex/author-lint.ps1'].Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'paired author-lint must execute the selected runtime payload' }
+  if (-not [string]::Equals($ExecutingPath, $runtime.Payloads['scripts/shared/author-lint.ps1'].Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'paired author-lint must execute the selected runtime payload' }
   foreach ($module in $modules) {
     $loaded = @(Get-Module -Name $module)
     if ($loaded.Count -ne 1 -or -not [string]::Equals($loaded[0].Path, $runtime.Payloads['scripts/' + $module + '.psm1'].Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'paired author-lint requires the selected runtime dependency modules' }

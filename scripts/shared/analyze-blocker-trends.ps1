@@ -24,7 +24,7 @@
 # the most complete picture for the worker-discipline-improvement goal.
 # Pass -ReviewsDir to slice per-backend, or to name an explicit dir set.
 #
-# MIRROR CONTRACT (keep in lock-step): scripts/codex/dispatch-checklist.ps1
+# MIRROR CONTRACT (keep in lock-step): scripts/shared/dispatch-checklist.ps1
 # deliberately RE-EXPRESSES this analyzer's verdict filename-shape guard (the
 # `$verdictNameRe` review-<YYYYMMDD>-<HHMMSS>-<scope>.md pattern) and its
 # per-file dedupe primitive (normalize finding text via `($text -replace
@@ -85,13 +85,13 @@
 #     of the scanned dir) or repair the file, then re-run.
 #
 # Usage:
-#   scripts\codex\analyze-blocker-trends.ps1                                                     # both backends by default -> docs/blocker-trends.md
-#   scripts\codex\analyze-blocker-trends.ps1 -OutPath foo.md                                     # custom output path
-#   scripts\codex\analyze-blocker-trends.ps1 -SinceDays 30                                       # only verdicts whose mtime is within N days
-#   scripts\codex\analyze-blocker-trends.ps1 -ReviewsDir logs/codex/reviews                      # codex-only slice (explicit: strict)
-#   scripts\codex\analyze-blocker-trends.ps1 -ReviewsDir logs/claude/reviews                     # claude-only slice
-#   scripts\codex\analyze-blocker-trends.ps1 -ReviewsDir logs/codex/reviews,logs/claude/reviews  # explicit cross-backend (in-process array literal)
-#   powershell -File scripts\codex\analyze-blocker-trends.ps1 -ReviewsDirCsv logs/codex/reviews,logs/claude/reviews   # the same from a native shell
+#   scripts\shared\analyze-blocker-trends.ps1                                                     # both backends by default -> docs/blocker-trends.md
+#   scripts\shared\analyze-blocker-trends.ps1 -OutPath foo.md                                     # custom output path
+#   scripts\shared\analyze-blocker-trends.ps1 -SinceDays 30                                       # only verdicts whose mtime is within N days
+#   scripts\shared\analyze-blocker-trends.ps1 -ReviewsDir logs/codex/reviews                      # codex-only slice (explicit: strict)
+#   scripts\shared\analyze-blocker-trends.ps1 -ReviewsDir logs/claude/reviews                     # claude-only slice
+#   scripts\shared\analyze-blocker-trends.ps1 -ReviewsDir logs/codex/reviews,logs/claude/reviews  # explicit cross-backend (in-process array literal)
+#   powershell -File scripts\shared\analyze-blocker-trends.ps1 -ReviewsDirCsv logs/codex/reviews,logs/claude/reviews   # the same from a native shell
 #
 #   -ReviewsDir takes ONE OR MORE dirs as a real array (each element verbatim,
 #   never split -- a directory name may contain a comma); -ReviewsDirCsv takes
@@ -278,7 +278,7 @@ function Get-ArtifactBackend {
 # non-producer shape. (Open item: these checks are pinned to the producer
 # values so a producer change is the only thing that can require a recognizer change.)
 #
-# SHARED with scripts/codex/dispatch-checklist.ps1 (byte-identical there): the
+# SHARED with scripts/shared/dispatch-checklist.ps1 (byte-identical there): the
 # banner recognizer is a cross-script contract, same lock-step discipline as the
 # mirrored filename-shape / dedupe / UTF-8 primitives. Any change to the wrapper's
 # header block, value formats, or diagnostic grammar must be mirrored in BOTH
@@ -723,14 +723,14 @@ function Get-FindingArchetype {
 }
 
 # Max category-count the wrapper's `\d+` tail tolerates. Mirror of the same
-# constant in scripts/codex/dispatch-checklist.ps1 -- both scripts consume the
+# constant in scripts/shared/dispatch-checklist.ps1 -- both scripts consume the
 # same verdict logs and must apply the same category-tail bound so they agree on
 # which verdicts are trustworthy evidence.
 $script:CategoryCountMax = 10000
 
 # Classify a category line's tail as none|count|invalid, the SAME way the
 # wrapper's `:\s*(?<v>none|\d+)\s*$` regex matches it. BYTE-IDENTICAL to the
-# helper in scripts/codex/dispatch-checklist.ps1 -- keep the two copies in sync
+# helper in scripts/shared/dispatch-checklist.ps1 -- keep the two copies in sync
 # (the analyzer's suspect check and the checklist's trustworthiness gate must
 # classify tails identically).
 function Get-CategoryTailKind {
@@ -1071,7 +1071,7 @@ $cutoff = if ($SinceDays -gt 0) { (Get-Date).AddDays(-$SinceDays) } else { [Date
 # `VERDICT: CLEAN` lines, so a `-ReviewsDir scripts/codex` run would
 # otherwise overwrite the trend report with prompt examples masquerading as
 # verdicts. (Historical regression.) IDENTICAL to
-# scripts/codex/dispatch-checklist.ps1's $verdictNameRe (mirror contract).
+# scripts/shared/dispatch-checklist.ps1's $verdictNameRe (mirror contract).
 $verdictNameRe = [regex]'^review-\d{8}-\d{6}-.+\.md$'
 
 $sources = New-Object 'System.Collections.Generic.List[object]'   # @{ Display; Abs; Files }
@@ -1586,10 +1586,10 @@ $methodSources = ($sources | ForEach-Object { '`' + $_.Display + '`' }) -join ',
 [void]$sb.AppendLine('extracts finding lines matched by the regex')
 [void]$sb.AppendLine('`^(BLOCKER|QUALITY|NON-BLOCKER|NOTE):` and classifies the one-line summary')
 [void]$sb.AppendLine('into an archetype via a most-specific-first keyword list (see')
-[void]$sb.AppendLine('`scripts/codex/analyze-blocker-trends.ps1` for the keyword sets). Findings')
+[void]$sb.AppendLine('`scripts/shared/analyze-blocker-trends.ps1` for the keyword sets). Findings')
 [void]$sb.AppendLine('repeated across review passes within one file are deduped by normalized')
 [void]$sb.AppendLine('text (highest severity kept) -- the same filename-shape and per-file dedupe')
-[void]$sb.AppendLine('primitives as `scripts/codex/dispatch-checklist.ps1` (mirror contract).')
+[void]$sb.AppendLine('primitives as `scripts/shared/dispatch-checklist.ps1` (mirror contract).')
 [void]$sb.AppendLine('')
 if ($multiBackend) {
   [void]$sb.AppendLine('Cross-backend: every aggregate count carries a per-backend split and every')

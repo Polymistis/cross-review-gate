@@ -59,11 +59,11 @@
 # normalized-text dedupe (the two are mirrored, not forked).
 #
 # Usage:
-#   scripts\codex\dispatch-checklist.ps1                  # writes logs/dispatch-checklist.md, last 14 days
-#   scripts\codex\dispatch-checklist.ps1 -SinceDays 30    # widen the window
-#   scripts\codex\dispatch-checklist.ps1 -Top 12          # more exemplars per class
-#   scripts\codex\dispatch-checklist.ps1 -OutPath foo.md  # custom output path
-#   scripts\codex\dispatch-checklist.ps1 -ReviewsDir <path>
+#   scripts\shared\dispatch-checklist.ps1                  # writes logs/dispatch-checklist.md, last 14 days
+#   scripts\shared\dispatch-checklist.ps1 -SinceDays 30    # widen the window
+#   scripts\shared\dispatch-checklist.ps1 -Top 12          # more exemplars per class
+#   scripts\shared\dispatch-checklist.ps1 -OutPath foo.md  # custom output path
+#   scripts\shared\dispatch-checklist.ps1 -ReviewsDir <path>
 #
 # Exit codes:
 #   0 = report written. Covers: verdicts summarized; an empty window (loud
@@ -371,7 +371,7 @@ function Get-CategoryTailKind {
 # non-producer shape. (Open item: these checks are pinned to the producer
 # values so a producer change is the only thing that can require a recognizer change.)
 #
-# SHARED with scripts/codex/analyze-blocker-trends.ps1 (byte-identical there):
+# SHARED with scripts/shared/analyze-blocker-trends.ps1 (byte-identical there):
 # the banner recognizer is a cross-script contract, same lock-step discipline as
 # the mirrored filename-shape / dedupe / UTF-8 primitives. Any change to the
 # wrapper's header block, value formats, or diagnostic grammar must be mirrored in
@@ -1691,7 +1691,7 @@ foreach ($c in $zeroCats) {
 [void]$sb.AppendLine('eight reviewer categories the gate parses), deduped within each file by')
 [void]$sb.AppendLine('normalized finding text (keeping the highest severity) so a finding that')
 [void]$sb.AppendLine('repeats across review passes counts once. The verdict filename-shape guard')
-[void]$sb.AppendLine('AND this per-file text dedupe both mirror `scripts/codex/analyze-blocker-trends.ps1`')
+[void]$sb.AppendLine('AND this per-file text dedupe both mirror `scripts/shared/analyze-blocker-trends.ps1`')
 [void]$sb.AppendLine('(which dedupes the same way); this generator additionally ranks by the eight')
 [void]$sb.AppendLine('reviewer categories to surface distinct recurring exemplars.')
 [void]$sb.AppendLine('')

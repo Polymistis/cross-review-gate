@@ -317,7 +317,7 @@ $pairedHost = $null
 $pairedSnapshot = $null
 
 # UTF-8 for native command pipes so git diff/show output is not mojibaked
-# by Windows-1252 default. Same pattern as scripts/codex/auto-merge.ps1.
+# by Windows-1252 default. Same pattern as scripts/shared/auto-merge.ps1.
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -2460,7 +2460,7 @@ function Build-CommitLogEvidence {
 # the prune must NEVER touch -- the name-shape guard that keeps a `-OutDir
 # docs` invocation (or any output dir with unrelated .md files) from recycling
 # non-review files; mirrors the defense
-# `scripts/codex/analyze-blocker-trends.ps1` applies via its $verdictNameRe
+# `scripts/shared/analyze-blocker-trends.ps1` applies via its $verdictNameRe
 # scan guard. Mirrored with the Codex wrapper's copy.
 # 'forensics' (stderr captures and any event stream)
 # ages fast; 'verdict' (the .md artifact plus the `.exhaustion.json`
@@ -2897,8 +2897,8 @@ function Get-CaptureHeaderLocatorField {
 }
 
 # The producer grammar for a verdict artifact filename, byte-identical to
-# `$verdictNameRe` in scripts/codex/analyze-blocker-trends.ps1 and
-# scripts/codex/dispatch-checklist.ps1 (mirror contract: every copy moves
+# `$verdictNameRe` in scripts/shared/analyze-blocker-trends.ps1 and
+# scripts/shared/dispatch-checklist.ps1 (mirror contract: every copy moves
 # together). A protection key is only ever minted for a name this prune could
 # actually be asked to delete; anything else is a claim it cannot honor.
 function Test-CaptureVerdictLeaf {
