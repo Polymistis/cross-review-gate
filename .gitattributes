@@ -1,0 +1,12 @@
+# The sh-parsed gate surfaces ship LF-only, ENFORCED at checkout: under
+# core.autocrlf=true (the common Windows default) a fresh tracked
+# checkout would rewrite them to CRLF and sh would fail parsing the
+# gate-firing entry point before any guard or `git commit` runs. The
+# rules name the gate's own files rather than a repo-wide *.sh pattern
+# so an installed copy never rewrites checkout behavior for a consumer
+# repository's unrelated shell sources.
+scripts/run-gate.sh text eol=lf
+scripts/git-hooks/pre-commit text eol=lf
+CROSS-REVIEW-VALUES.md text eol=lf -filter -ident -working-tree-encoding
+scripts/codex/review-prompt-template.md text eol=lf -filter -ident -working-tree-encoding
+docs/AGENTS.md.template text eol=lf -filter -ident -working-tree-encoding
