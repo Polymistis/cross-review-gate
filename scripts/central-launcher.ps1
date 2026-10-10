@@ -23,10 +23,17 @@ param(
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($TargetRepo) -or $TargetRepo.Length -gt 32767 -or $TargetRepo -match '[\x00-\x1f\x7f]') { throw 'TargetRepo is invalid' }
 $script:CrgLaunchOperation = if ($Stage) { 'Stage' } else { $PSCmdlet.ParameterSetName }
+# ValidateSet matches by culture ('co'+U+00AD+'dex' passes); map to the exact canonical value.
+$canonicalAgent = [string]$AuthoringAgent
+if ($canonicalAgent.Length -ne 0) {
+  $agentMatch = @(@('codex', 'claude') | Where-Object { [string]::Equals($_, $canonicalAgent, [StringComparison]::OrdinalIgnoreCase) })
+  if ($agentMatch.Count -ne 1) { throw 'AuthoringAgent must be codex or claude' }
+  $canonicalAgent = $agentMatch[0]
+}
 $operation = [pscustomobject]@{
   Name = $script:CrgLaunchOperation; All = [bool]$All
   Paths = [string[]]@($Paths | Where-Object { $null -ne $_ })
-  MessageFile = $MessageFile; AuthoringAgent = ([string]$AuthoringAgent).ToLowerInvariant()
+  MessageFile = $MessageFile; AuthoringAgent = $canonicalAgent
   PrivateGitDir = $PrivateGitDir; PushInput = $null
   PushRemoteName = $PushRemoteName; PushRemoteLocation = $PushRemoteLocation
 }
@@ -51,7 +58,8 @@ if ($PushCheck) {
     $operation.PushInput = $inputBytes.ToArray()
   } finally { $inputBytes.Dispose(); $inputStream.Dispose() }
 }
-if ([IO.Path]::GetFileName($PSCommandPath) -cne 'launcher.ps1') { throw 'Invoke the operator-installed <runtime-store>/launcher.ps1, not a source checkout.' }
+# Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
+if (-not [string]::Equals([IO.Path]::GetFileName($PSCommandPath), 'launcher.ps1', [StringComparison]::Ordinal)) { throw 'Invoke the operator-installed <runtime-store>/launcher.ps1, not a source checkout.' }
 
 # Read-only subset of bootstrap's handle-relative boundary: no mutation,
 # rename, disposition, or general rooted-I/O registry.
@@ -98,7 +106,7 @@ public static Microsoft.Win32.SafeHandles.SafeFileHandle OpenDrive(string path) 
 }
 public static Microsoft.Win32.SafeHandles.SafeFileHandle OpenChild(Microsoft.Win32.SafeHandles.SafeFileHandle parent, string leaf, bool directory, bool protectDirectory, bool lockFile) {
     if (parent == null || parent.IsInvalid || System.String.IsNullOrWhiteSpace(leaf) || leaf == "." || leaf == ".." ||
-        leaf.IndexOfAny(new char[] {'\\','/',':','\0','*','?','"','<','>','|'}) >= 0 || leaf.EndsWith(".") || leaf.EndsWith(" ") ||
+        leaf.IndexOfAny(new char[] {'\\','/',':','\0','*','?','"','<','>','|'}) >= 0 || leaf.EndsWith(".", System.StringComparison.Ordinal) || leaf.EndsWith(" ", System.StringComparison.Ordinal) ||
         (lockFile && (directory || leaf != "runtime.lock"))) { throw new System.ArgumentException("invalid central read-lease child"); }
     FILE_INFO parentInfo;
     if (!GetFileInformationByHandle(parent, out parentInfo) || (parentInfo.Attributes & 0x410u) != 0x10u) { throw new System.IO.IOException("central lease parent lost ordinary directory shape"); }
@@ -159,7 +167,7 @@ function Open-CrgLaunchDirectory {
   foreach ($part in @($full.Substring(3) -split '\\', 0 | Where-Object { $_.Length -gt 0 })) {
     $parent = $script:CrgLaunchDirectories[$cursor].Handle
     $cursor = [IO.Path]::Combine($cursor, $part)
-    $protect = $ProtectedRoot.Length -gt 0 -and ($cursor -ieq $ProtectedRoot -or $cursor.StartsWith($ProtectedRoot + '\', [StringComparison]::OrdinalIgnoreCase))
+    $protect = $ProtectedRoot.Length -gt 0 -and ([string]::Equals($cursor, $ProtectedRoot, [StringComparison]::OrdinalIgnoreCase) -or $cursor.StartsWith($ProtectedRoot + '\', [StringComparison]::OrdinalIgnoreCase))
     if (-not $script:CrgLaunchDirectories.ContainsKey($cursor) -or ($protect -and -not $script:CrgLaunchDirectories[$cursor].Protected)) {
       $directory = [CrgCentralLaunch.ReadLeaseV1]::OpenChild($parent, $part, $true, $protect, $false)
       $script:CrgLaunchOwners.Add($directory) | Out-Null
@@ -217,15 +225,16 @@ function Read-CrgRuntimeManifestBytes {
     $rtLength = [int]$Matches['n']; $rtPath = $Matches['p']; $rtHash = $Matches['h']
     $rtTotal += $rtLength
     if ($rtLength -gt 16777216 -or $rtTotal -gt 268435456 -or $rtPath.Length -gt 240 -or
-        $rtPath -ieq 'runtime-manifest' -or -not $rtSeen.Add($rtPath) -or
+        [string]::Equals($rtPath, 'runtime-manifest', [System.StringComparison]::OrdinalIgnoreCase) -or -not $rtSeen.Add($rtPath) -or
         [System.StringComparer]::Ordinal.Compare($rtPrevious, $rtPath) -ge 0) { throw "runtime manifest payload '$rtPath' has an invalid length, path, or order" }
     foreach ($rtPart in @($rtPath.Split([char]'/'))) {
-      if ($rtPart.Length -eq 0 -or $rtPart -in @('.', '..') -or $rtPart.EndsWith('.') -or
+      if ($rtPart.Length -eq 0 -or [string]::Equals($rtPart, '.', [System.StringComparison]::Ordinal) -or
+          [string]::Equals($rtPart, '..', [System.StringComparison]::Ordinal) -or $rtPart.EndsWith('.', [System.StringComparison]::Ordinal) -or
           $rtPart -match '\A(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|\z)') { throw "runtime manifest payload '$rtPath' has an unsupported component" }
     }
     $rtParent = $rtPath
     while ($rtParent.Contains('/')) {
-      $rtParent = $rtParent.Substring(0, $rtParent.LastIndexOf('/'))
+      $rtParent = $rtParent.Substring(0, $rtParent.LastIndexOf([char]'/'))
       if ($rtSeen.Contains($rtParent)) { throw "runtime manifest payload '$rtPath' conflicts with a file parent" }
     }
     $rtPrevious = $rtPath
@@ -269,11 +278,11 @@ function Open-CrgLaunchRelease {
   $root = Join-Path $Store "releases\$Id"
   $record = Read-CrgLaunchFile -Path (Join-Path $root 'runtime-manifest') -Maximum 65536 -ProtectedRoot $root
   $manifest = Read-CrgRuntimeManifestBytes -Bytes $record.Bytes
-  if ($manifest.Id -cne $Id) { throw 'selected runtime manifest digest mismatch' }
+  if (-not [string]::Equals($manifest.Id, $Id, [StringComparison]::Ordinal)) { throw 'selected runtime manifest digest mismatch' }
   $payloads = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
   foreach ($entry in $manifest.Entries) {
     $file = Read-CrgLaunchFile -Path (Join-Path $root $entry.Path.Replace('/', '\')) -Maximum 16777216 -ProtectedRoot $root
-    if ($file.Bytes.Length -ne $entry.Length -or (Get-CrgSha256HexOfBytes -Bytes $file.Bytes) -cne $entry.Hash) { throw "selected runtime payload mismatch: '$($entry.Path)'" }
+    if ($file.Bytes.Length -ne $entry.Length -or -not [string]::Equals((Get-CrgSha256HexOfBytes -Bytes $file.Bytes), $entry.Hash, [StringComparison]::Ordinal)) { throw "selected runtime payload mismatch: '$($entry.Path)'" }
     $payloads.Add($entry.Path, $file)
   }
   foreach ($required in @('scripts/central-launcher.ps1', 'scripts/central-context.psm1', 'scripts/private-governance.psm1')) {
@@ -335,12 +344,12 @@ try {
   if ($installationRecord.LauncherAbi -ne 2) { throw 'ABI 2 launcher requires completed ABI 2 installation provenance' }
   $installedReleaseId = $installationRecord.ReleaseId; $installedLauncherHash = $installationRecord.Hash
   $installedLauncher = Read-CrgLaunchFile -Path $PSCommandPath -Maximum 16777216
-  if ((Get-CrgSha256HexOfBytes -Bytes $installedLauncher.Bytes) -cne $installedLauncherHash) { throw 'stable launcher bytes differ from recorded first installation' }
+  if (-not [string]::Equals((Get-CrgSha256HexOfBytes -Bytes $installedLauncher.Bytes), $installedLauncherHash, [StringComparison]::Ordinal)) { throw 'stable launcher bytes differ from recorded first installation' }
   $originRoot = Join-Path $store "releases\$installedReleaseId"
   $originRecord = Read-CrgLaunchFile -Path (Join-Path $originRoot 'runtime-manifest') -Maximum 65536 -ProtectedRoot $originRoot
   $originManifest = Read-CrgRuntimeManifestBytes -Bytes $originRecord.Bytes
   $originLauncher = @($originManifest.Entries | Where-Object { $_.Path -ceq 'scripts/central-launcher.ps1' })
-  if ($originManifest.Id -cne $installedReleaseId -or $originManifest.LauncherAbi -ne $installationRecord.LauncherAbi -or
+  if (-not [string]::Equals($originManifest.Id, $installedReleaseId, [StringComparison]::Ordinal) -or $originManifest.LauncherAbi -ne $installationRecord.LauncherAbi -or
       $originLauncher.Count -ne 1 -or $originLauncher[0].Hash -cne $installedLauncherHash) { throw 'stable launcher provenance differs from the recorded approved manifest' }
   $lock = [CrgCentralLaunch.ReadLeaseV1]::OpenChild($storeHandle, 'runtime.lock', $false, $false, $true)
   $active = Read-CrgLaunchFile -Path (Join-Path $store 'active-release') -Maximum 95

@@ -18,8 +18,7 @@ function Open-CrgPairedProjectOperation {
   $readLine = & $capture.Module { Get-Command Get-CrgStatusGitLine -CommandType Function }
   $assertPath = & $capture.Module { Get-Command Assert-CrgContextAbsolutePath -CommandType Function }
   & $assertPath -Path $TargetRepo
-  $gitExe = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
-  & $assertPath -Path $gitExe
+  $gitExe = & $capture.Module { Get-CrgCentralGitExecutable }
   $publicArguments = @('-C', $TargetRepo)
   $commands = @{}
   foreach ($item in @(
@@ -65,8 +64,10 @@ function Open-CrgPairedProjectOperation {
       $pendingCapture = Get-CrgProjectOperationCommand -Module first-attachment-context -Name Get-CrgCentralFirstAttachmentProjectContext
       $project = & $pendingCapture -TargetRepo $TargetRepo -Context $reads.Runtime -AttachmentBytes $attachmentFile.Bytes -PendingRecovery
     } else { $project = & $capture -TargetRepo $TargetRepo -Context $reads.Runtime }
-    if ($project.Domains.public.GitDir -cne $gitDir -or $project.Domains.public.CommonDir -cne $commonDir -or
-        $project.Domains.private.GitDir -cne $attachment.PrivateGitDir) { throw 'captured project namespace differs from the held operation roots' }
+    # Ordinal: -cne compares by culture and ignores characters such as U+00AD.
+    if (-not [string]::Equals($project.Domains.public.GitDir, $gitDir, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($project.Domains.public.CommonDir, $commonDir, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($project.Domains.private.GitDir, $attachment.PrivateGitDir, [StringComparison]::Ordinal)) { throw 'captured project namespace differs from the held operation roots' }
     $pending = & $reads.Runtime.ReadFile -Path (Join-Path $gitDir 'crg-handoff') -Maximum 16384 -AllowAbsent
     if ($Recovery) {
       if ($null -eq $pending -or -not $pending.Present -or $Runtime.ResumeHandoffSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'recovery admission requires the selected exact handoff' }
@@ -103,13 +104,13 @@ function Open-CrgPairedProjectOperation {
         'private-ref' = $ProjectContext.Domains.private.Ref }
       # Attachment bytes can survive a worktree move. Match receipt namespace
       # fields separately; matching the attachment digest alone does not bind them.
-      foreach ($name in $expected.Keys) { if ($Fields[$name] -cne $expected[$name]) { throw "preceding receipt association differs at '$name'" } }
+      foreach ($name in $expected.Keys) { if (-not [string]::Equals($Fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "preceding receipt association differs at '$name'" } }
       foreach ($domain in @('public', 'private')) {
         $selected = $ProjectContext.Domains[$domain]
-        if ($Fields[$domain + '-result'] -cne $selected.Parent -or $Fields[$domain + '-tree'] -cne $selected.ParentTree -or
-            (Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain $domain -Ref $selected.Ref) -cne $selected.Parent) { throw 'project branches do not match the preceding completed pair' }
+        if (-not [string]::Equals($Fields[$domain + '-result'], $selected.Parent, [StringComparison]::Ordinal) -or -not [string]::Equals($Fields[$domain + '-tree'], $selected.ParentTree, [StringComparison]::Ordinal) -or
+            -not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain $domain -Ref $selected.Ref), $selected.Parent, [StringComparison]::Ordinal)) { throw 'project branches do not match the preceding completed pair' }
       }
-      if ((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref ('refs/crg-results/' + $Fields['public-result'])) -cne $Fields['public-result']) { throw 'preceding public result retention is absent or conflicting' }
+      if (-not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref ('refs/crg-results/' + $Fields['public-result'])), $Fields['public-result'], [StringComparison]::Ordinal)) { throw 'preceding public result retention is absent or conflicting' }
     } $project $record.Receipt.Fields $pointer.Origin
     & $commands['Assert-CrgPairedOperationReads'] -Owner $reads
     $complete = $true

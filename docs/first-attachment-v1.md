@@ -239,7 +239,8 @@ authority.
 
 Admission retains the actual public-worktree operation lock, installed Git
 executable, project directory/read owners and independent hook custody. Existing
-attachment, completed-pair or handoff records refuse a new Attach. Effective
+attachment or completed-pair records refuse a new Attach. A handoff also refuses
+ordinary Attach except for the published instruction correction below. Effective
 `core.hooksPath` must be positively unset before index initialization or migration;
 absent or exact recognized CRG hooks are admitted, while foreign hooks are
 preserved and refused. Publication repeats the guard validation.
@@ -335,6 +336,44 @@ Pending staging performs no broad migration, initialization, adoption, review,
 publication or activation. A subsequent ordinary Attach revalidates the proposal
 and runs the complete mandatory first review.
 
+### Published instruction correction
+
+An unactivated first attachment can require an instruction correction after both
+result refs have already published. A later Resume review can block the recorded
+candidate even though an earlier review permitted publication. Repeating an
+unchanged review is not a correction path; rewriting the old receipt or results
+would lose transaction identity.
+
+The active approved release admits a bounded successor through the existing
+`Stage -Paths` and `Attach` operations. Admission requires the exact pending
+proposal and association, no active attachment or completed-pair pointer, a
+strict first-origin handoff and retained receipt, and both refs exactly at the
+recorded results. The receipt, retention refs, result commits, parents, trees
+and message identities are validated as a preservation baseline. The old runtime
+identity must agree across handoff and receipt; old prepared input is not
+recompiled with a new compiler, and no historical PASS supplies review credit.
+
+Correction staging accepts only explicit literal `AGENTS.md` and `CLAUDE.md`
+paths. Each selected entry must remain a regular file with unchanged mode. The
+public tree and every other private entry, including project configuration,
+values and mode, must remain unchanged. Existing staged instruction corrections
+are allowed so a blocked correction can be revised; unrelated staged changes,
+deletions, directory expansion and `-All` refuse. Staging does not change refs,
+handoff, receipts or activation state.
+
+Attach revalidates that boundary and captures the complete corrected pair under
+the active approved release. A changed instruction candidate and fresh complete
+first-attachment review are required. The already-published results are real
+parents, not rewritten history. Only after PASS and new immutable retention may
+publication replace the exact old handoff using the normal expected-byte writer.
+The original receipt remains retained. Normal expected-old publication and
+activation then apply; interruption after replacement uses ordinary Resume under
+the new handoff's recorded release. A blocked review leaves the old handoff and
+refs unchanged, with the staged correction available for another correction.
+
+Other recovery states remain Resume-only. This exception provides no general
+abandonment, provider override, public-software correction or policy-change path.
+
 New-database admission records initialization intent before creating the private
 directory at `<public-git-dir>/crg-attachment-initialization`. The exact bytes are:
 
@@ -404,6 +443,6 @@ Close releases handles, not persistent initialization metadata, and does not clo
 the original retained runtime owned by the launcher.
 
 Verification uses source inspection, parser/build checks, mandatory code review,
-ordinary program operation, and applicable functional testing. Code unit tests
-and unit-test-only support are banned; other testing categories are not prohibited
-merely by category.
+ordinary program operation, and functional validation. Code unit tests and
+unit-test-only support are banned; live testing, manual checks, ordinary program
+runs, and functional validation remain permitted.

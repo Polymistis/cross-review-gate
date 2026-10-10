@@ -23,7 +23,8 @@ function Get-CrgPairedSessionDigest {
 
 function Get-CrgPairedSessionPolicy {
   param([object]$CapturedInput, [string]$AuthoringAgent)
-  if ($AuthoringAgent -cnotin @('codex', 'claude')) { throw 'paired dispatch requires the canonical authoring agent, not a reviewer override' }
+  # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
+  if (-not ([string]::Equals($AuthoringAgent, 'codex', [StringComparison]::Ordinal) -or [string]::Equals($AuthoringAgent, 'claude', [StringComparison]::Ordinal))) { throw 'paired dispatch requires the canonical authoring agent, not a reviewer override' }
   $protectedChange = $false
   foreach ($domain in @('public', 'private')) {
     $bytes = $CapturedInput.Bundle.Buffers[$domain + '.name-status']
@@ -38,18 +39,19 @@ function Get-CrgPairedSessionPolicy {
       foreach ($path in $columns[1..($columns.Count - 1)]) {
         # These are the existing mandatory both-mode paths. Both
         # rename endpoints participate; unrelated filenames are not heuristics.
-        if ($path -cin @('scripts/codex/commit.ps1', 'scripts/claude/commit.ps1', 'scripts/run-gate.sh')) { $protectedChange = $true }
+        if ([string]::Equals($path, 'scripts/codex/commit.ps1', [StringComparison]::Ordinal) -or [string]::Equals($path, 'scripts/claude/commit.ps1', [StringComparison]::Ordinal) -or
+            [string]::Equals($path, 'scripts/run-gate.sh', [StringComparison]::Ordinal)) { $protectedChange = $true }
       }
     }
   }
-  [string[]]$providers = if ($protectedChange) { @('codex', 'claude') } elseif ($AuthoringAgent -ceq 'codex') { @('claude') } else { @('codex') }
+  [string[]]$providers = if ($protectedChange) { @('codex', 'claude') } elseif ([string]::Equals($AuthoringAgent, 'codex', [StringComparison]::Ordinal)) { @('claude') } else { @('codex') }
   $legs = for ($i = 0; $i -lt $providers.Count; $i++) {
     [pscustomobject]@{ Leg = ($i + 1); PreferredProvider = $providers[$i]; RequiredPassCount = 1 }
   }
   $readConfig = @(Get-Command Read-CrgProjectConfigBytes -Module private-governance -CommandType Function -ListImported)
   if ($readConfig.Count -ne 1 -or $CapturedInput.PreparationSources.governing.ConfigBytes -isnot [byte[]]) { throw 'paired routing requires the captured governing configuration' }
   $configuration = & $readConfig[0] -Bytes $CapturedInput.PreparationSources.governing.ConfigBytes
-  $maximumAttempts = if ($configuration.ReviewerPolicy -ceq 'grok-fallback') { 3 } else { 2 }
+  $maximumAttempts = if ([string]::Equals($configuration.ReviewerPolicy, 'grok-fallback', [StringComparison]::Ordinal)) { 3 } else { 2 }
   return [pscustomobject]@{ Legs = @($legs); CodexEffort = 'high'; Grok = $configuration.Grok; MaximumAttempts = $maximumAttempts }
 }
 
@@ -93,10 +95,10 @@ namespace CrgPairedSession {
   if ([string]::IsNullOrEmpty($effectivePath)) { throw 'paired dispatch requires a nonempty executable search path' }
   $entries = New-Object 'System.Collections.Generic.List[string]'
   foreach ($entry in [CrgPairedSession.EnvironmentV1]::Capture()) {
-    $separator = if ($entry[0] -ceq '=') { $entry.IndexOf('=', 1) } else { $entry.IndexOf('=') }
+    $separator = if ($entry.StartsWith('=', [StringComparison]::Ordinal)) { $entry.IndexOf([char]'=', 1) } else { $entry.IndexOf([char]'=') }
     if ($separator -le 0) { throw 'paired raw environment entry has invalid name/value grammar' }
     $name = $entry.Substring(0, $separator)
-    if ($name -imatch '\A(?:GIT_|CROSS_REVIEW_)' -or $name -ieq 'Path') { continue }
+    if ($name -imatch '\A(?:GIT_|CROSS_REVIEW_)' -or [string]::Equals($name, 'Path', [StringComparison]::OrdinalIgnoreCase)) { continue }
     $entries.Add($entry)
   }
   $entries.Add('Path=' + $effectivePath)
@@ -108,7 +110,7 @@ namespace CrgPairedSession {
 function Open-CrgPairedSessionOutput {
   param([object]$Runtime, [string]$PrivateGitDir, [string]$OperationId)
   if ($PrivateGitDir -cnotmatch '\A[A-Za-z]:\\' -or $PrivateGitDir.Contains('/') -or
-      [IO.Path]::GetFullPath($PrivateGitDir) -cne $PrivateGitDir -or $OperationId -cnotmatch '\A[0-9a-f]{32}\z') {
+      -not [string]::Equals([IO.Path]::GetFullPath($PrivateGitDir), $PrivateGitDir, [StringComparison]::Ordinal) -or $OperationId -cnotmatch '\A[0-9a-f]{32}\z') {
     throw 'paired output requires the captured private database and operation identity'
   }
   $command = Get-CrgPairedSessionCommand -Runtime $Runtime -Module paired-diff -Name New-CrgPairedInputSnapshot
@@ -194,12 +196,12 @@ function Invoke-CrgPairedReviewSessionCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$Runtime,
     [Parameter(Mandatory = $true)][object]$CapturedInput,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$AuthoringAgent,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   if ($null -eq $Runtime -or $Runtime.Id -cnotmatch '\A[0-9a-f]{64}\z' -or
       $Runtime.Payloads -isnot [System.Collections.IDictionary] -or
       $null -eq $CapturedInput -or $CapturedInput.HasChanges -isnot [bool] -or
-      ($Origin -ceq 'paired-v1' -and -not $CapturedInput.HasChanges)) {
+      ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal) -and -not $CapturedInput.HasChanges)) {
     throw 'paired dispatch requires one retained runtime and captured input for the explicit origin'
   }
   $firstNames = @{
@@ -218,13 +220,13 @@ function Invoke-CrgPairedReviewSessionCore {
   )) {
     foreach ($name in $item.Names) {
       $selectedName = $name
-      if ($Origin -ceq 'first-attachment-v1' -and $firstNames.ContainsKey($name)) { $selectedName = $firstNames[$name] }
+      if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -and $firstNames.ContainsKey($name)) { $selectedName = $firstNames[$name] }
       $commands[$name] = Get-CrgPairedSessionCommand -Runtime $Runtime -Module $item.Module -Name $selectedName
     }
   }
-  foreach ($relative in @('scripts/codex/auto-review.ps1', 'scripts/claude/auto-review.ps1', 'scripts/codex/review-prompt-template.md')) {
+  foreach ($relative in @('scripts/codex/auto-review.ps1', 'scripts/claude/auto-review.ps1', 'scripts/codex/review-prompt-template.md', 'scripts/review-liveness.psm1', 'scripts/review-common.ps1')) {
     if ($relative -cnotin @($Runtime.Payloads.Keys) -or $Runtime.Payloads[$relative].Bytes -isnot [byte[]] -or
-        $Runtime.Payloads[$relative].Path -cne (Join-Path $Runtime.Root $relative.Replace('/', '\'))) {
+        -not [string]::Equals($Runtime.Payloads[$relative].Path, (Join-Path $Runtime.Root $relative.Replace('/', '\')), [StringComparison]::Ordinal)) {
       throw 'paired dispatch lacks an exact retained provider or template payload'
     }
   }
@@ -240,7 +242,7 @@ function Invoke-CrgPairedReviewSessionCore {
     $formats = @{ PublicObjectFormat = $descriptor.Fields['public-object-format']; PrivateObjectFormat = $descriptor.Fields['private-object-format'] }
     $unitBytes = $CapturedInput.Bundle.Buffers['review-unit.txt']
     $unit = & $commands['Read-CrgReviewUnitBytes'] -Bytes $unitBytes @formats
-    if ($unit.Fields['runtime-manifest-sha256'] -cne $Runtime.Id) { throw 'paired input differs from the retained runtime' }
+    if (-not [string]::Equals($unit.Fields['runtime-manifest-sha256'], $Runtime.Id, [StringComparison]::Ordinal)) { throw 'paired input differs from the retained runtime' }
     $snapshot = & $commands['New-CrgPairedInputSnapshot'] -CapturedInput $CapturedInput -RuntimeTemplateBytes $template -TempParent $unit.Fields['private-git-dir'] -PreparedOrigin $Origin
     $pins = @{
       ReviewUnitBytes = $unitBytes; PublicObjectFormat = $formats.PublicObjectFormat; PrivateObjectFormat = $formats.PrivateObjectFormat
@@ -250,7 +252,7 @@ function Invoke-CrgPairedReviewSessionCore {
     if ($null -ne $policy.Grok) {
       $relative = 'scripts/grok/auto-review.ps1'
       if ($relative -cnotin @($Runtime.Payloads.Keys) -or $Runtime.Payloads[$relative].Bytes -isnot [byte[]] -or
-          $Runtime.Payloads[$relative].Path -cne (Join-Path $Runtime.Root $relative.Replace('/', '\'))) { throw 'configured Grok route requires the exact retained adapter payload' }
+          -not [string]::Equals($Runtime.Payloads[$relative].Path, (Join-Path $Runtime.Root $relative.Replace('/', '\')), [StringComparison]::Ordinal)) { throw 'configured Grok route requires the exact retained adapter payload' }
     }
     $environmentEntries = Get-CrgPairedSessionEnvironment
     $output = Open-CrgPairedSessionOutput -Runtime $Runtime -PrivateGitDir $unit.Fields['private-git-dir'] -OperationId $unit.Fields['operation-id']
@@ -317,7 +319,7 @@ function Invoke-CrgPairedReviewSessionCore {
           $offset += $count
         }
         if ($observation.ExitCode -notin @(0, 4)) { throw "paired review did not pass (exit $($observation.ExitCode)); private attempt evidence: $($attempt.Path)" }
-        $scopePrefix = if ($Origin -ceq 'paired-v1') { 'paired-' } else { 'first-attachment-' }
+        $scopePrefix = if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) { 'paired-' } else { 'first-attachment-' }
         $stemPattern = '\Areview-[0-9]{8}-[0-9]{6}-' + $scopePrefix + $unit.ReviewUnitSha256.Substring(0, 12)
         $leaves = @([IO.Directory]::EnumerateFileSystemEntries($attempt.Path) | ForEach-Object { [IO.Path]::GetFileName($_) })
         $verdicts = @($leaves | Where-Object { $_ -cmatch ($stemPattern + '\.md\z') })
@@ -331,8 +333,9 @@ function Invoke-CrgPairedReviewSessionCore {
         if ($observation.ExitCode -eq 0) {
           if ($verdicts.Count -ne 1 -or $exhaustions.Count -ne 0) { throw 'paired success requires one current verdict and no exhaustion sidecar' }
           $successful = & $commands['Read-CrgSuccessfulPairArtifactBytes'] -Bytes $verdictBytes @pins -ExpectedBackend $backend -ScheduledPassCount $leg.RequiredPassCount
-          if ($backend -ceq 'codex' -and $successful.Effort -cne $policy.CodexEffort) { throw 'paired successful effort differs from the scheduled effort' }
-          if ($backend -ceq 'grok' -and $successful.Effort -cne $policy.Grok.Effort) { throw 'paired Grok request effort differs from the configured maximum effort' }
+          if ([string]::Equals($backend, 'codex', [StringComparison]::Ordinal) -and -not [string]::Equals($successful.Effort, $policy.CodexEffort, [StringComparison]::Ordinal)) { throw 'paired successful effort differs from the scheduled effort' }
+          if ([string]::Equals($backend, 'grok', [StringComparison]::Ordinal) -and -not [string]::Equals($successful.Effort, $policy.Grok.Effort, [StringComparison]::Ordinal)) { throw 'paired Grok request effort differs from the governing profile' }
+          if ([string]::Equals($backend, 'grok', [StringComparison]::Ordinal) -and -not [string]::Equals($successful.RequestedModel, $policy.Grok.Model, [StringComparison]::Ordinal)) { throw 'paired Grok requested model differs from the governing profile' }
         } else {
           if ($attemptNumber -ge $policy.MaximumAttempts -or $backend -ceq 'grok' -or $exhaustions.Count -ne 1) { throw 'paired exhausted attempt cannot satisfy this review leg' }
           if ($backend -ceq 'codex' -and $verdicts.Count -ne 1) { throw 'paired Codex exhaustion is missing the producer-required forensic verdict' }
@@ -355,7 +358,7 @@ function Invoke-CrgPairedReviewSessionCore {
         $backend = if ($attemptNumber -eq 2) { 'grok' } elseif ($backend -ceq 'claude') { 'codex' } else { 'claude' }
       }
     }
-    Write-Host '[paired-review] captured-pair review PASS; publication guards remain required.'
+    Write-Host '[paired-review] captured-pair review PASS - covers this source diff only, not target execution or deployment readiness; publication guards remain required.'
     return [pscustomobject]@{
       ReviewUnitSha256 = $unit.ReviewUnitSha256; DescriptorSha256 = $snapshot.PreparedPairSha256
       ReviewLegs = $policy.Legs; ReviewAttempts = $attemptRecords.ToArray(); OutputRoot = $output.Root
@@ -424,7 +427,7 @@ function Invoke-CrgPairedReviewSession {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$Runtime,
     [Parameter(Mandatory = $true)][object]$CapturedInput,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$AuthoringAgent)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent)
   return Invoke-CrgPairedReviewSessionCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -432,7 +435,7 @@ function Invoke-CrgFirstAttachmentReviewSession {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$Runtime,
     [Parameter(Mandatory = $true)][object]$CapturedInput,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$AuthoringAgent)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent)
   return Invoke-CrgPairedReviewSessionCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 

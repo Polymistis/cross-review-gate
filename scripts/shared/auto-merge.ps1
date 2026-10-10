@@ -136,267 +136,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Live process state must come from the native Windows block. Managed
-# environment dictionaries can collapse case-distinct names under PowerShell
-# Core, while native Git consumes the raw ordered block.
-function Initialize-CrgProcessNoReplaceEnvironmentNative {
-  if ('CrgProcessNoReplaceEnvironment.NativeV1' -as [type]) { return }
-  Add-Type -TypeDefinition @'
-namespace CrgProcessNoReplaceEnvironment {
-  using System;
-  using System.Collections.Generic;
-  using System.ComponentModel;
-  using System.Runtime.InteropServices;
-
-  public static class NativeV1 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr GetEnvironmentStringsW();
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool FreeEnvironmentStringsW(IntPtr environmentBlock);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetEnvironmentVariableW(string name, string value);
-
-    public static string[] ReadProcessEntries() {
-      IntPtr block = GetEnvironmentStringsW();
-      if (block == IntPtr.Zero) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "GetEnvironmentStringsW failed");
-      }
-      Exception pending = null;
-      try {
-        List<string> entries = new List<string>();
-        IntPtr cursor = block;
-        while (true) {
-          string entry = Marshal.PtrToStringUni(cursor);
-          if (entry == null) {
-            throw new InvalidOperationException("raw environment block contained an unreadable entry");
-          }
-          if (entry.Length == 0) { break; }
-          entries.Add(entry);
-          cursor = IntPtr.Add(cursor, checked((entry.Length + 1) * 2));
-        }
-        return entries.ToArray();
-      } catch (Exception ex) {
-        pending = ex;
-        throw;
-      } finally {
-        if (!FreeEnvironmentStringsW(block) && pending == null) {
-          throw new Win32Exception(Marshal.GetLastWin32Error(), "FreeEnvironmentStringsW failed");
-        }
-      }
-    }
-
-    private static void ValidateName(string name) {
-      if (String.IsNullOrEmpty(name) || name.IndexOf('\0') >= 0 || name.IndexOf('=') >= 0) {
-        throw new ArgumentException("environment variable names must be non-empty, NUL-free, and '='-free", "name");
-      }
-    }
-
-    private static void ValidateValue(string value) {
-      if (value == null || value.IndexOf('\0') >= 0) {
-        throw new ArgumentException("environment variable values must be non-null and NUL-free", "value");
-      }
-    }
-
-    public static void SetProcessVariable(string name, string value) {
-      ValidateName(name);
-      ValidateValue(value);
-      if (!SetEnvironmentVariableW(name, value)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetEnvironmentVariableW failed for " + name);
-      }
-    }
-
-    public static void RemoveProcessVariable(string name) {
-      ValidateName(name);
-      if (!SetEnvironmentVariableW(name, null)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetEnvironmentVariableW removal failed for " + name);
-      }
-    }
-  }
-}
-'@ -Language CSharp -ErrorAction Stop
-  if (-not ('CrgProcessNoReplaceEnvironment.NativeV1' -as [type])) {
-    throw [System.PlatformNotSupportedException]::new('raw Windows replacement-suppression environment support is unavailable')
-  }
-}
-
-function Get-CrgRawProcessEnvironmentEntries {
-  Initialize-CrgProcessNoReplaceEnvironmentNative
-  $entries = [CrgProcessNoReplaceEnvironment.NativeV1]::ReadProcessEntries()
-  if ($null -eq $entries) {
-    throw [System.InvalidOperationException]::new('raw Windows environment enumeration returned null')
-  }
-  return [string[]]$entries
-}
-
-function ConvertFrom-CrgRawEnvironmentEntry {
-  param([Parameter(Mandatory = $true)][string]$Entry)
-  if ([string]::IsNullOrEmpty($Entry) -or $Entry.IndexOf([char]0) -ge 0) {
-    throw [System.InvalidOperationException]::new('raw environment entries must be non-empty and NUL-free')
-  }
-  $separator = if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) {
-    $Entry.IndexOf('=', 1)
-  } else {
-    $Entry.IndexOf('=')
-  }
-  $minimum = if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) { 1 } else { 0 }
-  if ($separator -le $minimum) {
-    throw [System.InvalidOperationException]::new('raw environment entry does not use name=value grammar')
-  }
-  return [pscustomobject]@{
-    Name = $Entry.Substring(0, $separator)
-    Value = $Entry.Substring($separator + 1)
-  }
-}
-
-function Get-CrgNoReplaceRawEntries {
-  param([AllowEmptyCollection()][string[]]$Entries)
-  $matches = New-Object 'System.Collections.Generic.List[object]'
-  foreach ($entry in @($Entries)) {
-    $parsed = ConvertFrom-CrgRawEnvironmentEntry -Entry ([string]$entry)
-    if ([string]::Equals($parsed.Name, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::OrdinalIgnoreCase)) {
-      $matches.Add($parsed) | Out-Null
-    }
-  }
-  return $matches.ToArray()
-}
-
-# Return raw environment NAMES for Git selectors that can redirect the target
-# repository, object/ref/index domain, effective config, history, or attribute
-# semantics. Values are deliberately never read: only presence has authority,
-# and Windows process blocks can carry case-variant spellings that named lookups
-# miss. GIT_CONFIG_KEY_n / VALUE_n are carriers whenever a matching COUNT is
-# supplied, so every digit-suffixed carrier is refused independently rather
-# than interpreting COUNT or any carrier value here.
-function Get-CrgGitSelectorEnvironmentKeys {
-  $EnvEntries = [Environment]::GetEnvironmentVariables('Process')
-  $exactNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($canonicalName in @(
-      'GIT_GRAFT_FILE', 'GIT_SHALLOW_FILE',
-      'GIT_ATTR_SOURCE', 'GIT_ATTR_NOSYSTEM',
-      'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
-      'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
-      'GIT_REFERENCE_BACKEND',
-      'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM',
-      'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'
-    )) {
-    [void]$exactNames.Add($canonicalName)
-  }
-  $names = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($rawName in @($EnvEntries.Keys)) {
-    $name = [string]$rawName
-    if ($exactNames.Contains($name) -or
-        [regex]::IsMatch($name, '\AGIT_CONFIG_(KEY|VALUE)_[0-9]+\z',
-          [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
-          [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
-      [void]$names.Add($name)
-    }
-  }
-  return $names.ToArray()
-}
-
-# Discover every spelling in an explicit child-environment map. Live process
-# state uses Get-CrgRawProcessEnvironmentEntries instead; projecting that state
-# through a managed dictionary can collapse case-distinct names.
-function Get-CrgNoReplaceObjectsEnvironmentKeys {
-  param([Parameter(Mandatory=$true)][object]$EnvEntries)
-  if ([object]::ReferenceEquals($null, $EnvEntries) -or
-      $null -eq $EnvEntries.PSObject.Properties['Keys']) {
-    throw [System.InvalidOperationException]::new('raw environment enumeration is unavailable')
-  }
-  try { $rawNames = @($EnvEntries.Keys) }
-  catch { throw [System.InvalidOperationException]::new("raw environment enumeration failed: $($_.Exception.Message)") }
-  $names = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($rawName in $rawNames) {
-    $name = [string]$rawName
-    if ([string]::Equals($name, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::OrdinalIgnoreCase)) {
-      [void]$names.Add($name)
-    }
-  }
-  return $names.ToArray()
-}
-
-function Assert-CrgNoReplaceObjectsEnvironment {
-  param([Parameter(Mandatory=$true)][object]$EnvEntries)
-  $names = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-  if ($names.Count -ne 1 -or
-      -not [string]::Equals([string]$names[0], 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::Ordinal)) {
-    throw [System.InvalidOperationException]::new("replacement-suppression singleton postcondition failed (raw spelling count=$($names.Count))")
-  }
-  $value = $null
-  try { $value = [string]$EnvEntries[$names[0]] }
-  catch { throw [System.InvalidOperationException]::new("replacement-suppression value verification failed: $($_.Exception.Message)") }
-  if (-not [string]::Equals($value, '1', [System.StringComparison]::Ordinal)) {
-    throw [System.InvalidOperationException]::new('the canonical replacement-suppression value did not verify as exactly 1')
-  }
-}
-
-function Set-CrgNoReplaceObjectsInChildEnvironment {
-  param([Parameter(Mandatory=$true)][object]$EnvEntries)
-  if ([object]::ReferenceEquals($null, $EnvEntries)) {
-    throw [System.InvalidOperationException]::new('child environment is unavailable')
-  }
-  while ($true) {
-    $before = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-    if ($before.Count -eq 0) { break }
-    $exactName = [string]$before[0]
-    try { [void]$EnvEntries.Remove($exactName) }
-    catch { throw [System.InvalidOperationException]::new("could not remove child environment spelling '$exactName': $($_.Exception.Message)") }
-    $after = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-    if ($after.Count -ge $before.Count) {
-      throw [System.InvalidOperationException]::new("child environment removal made no progress for spelling '$exactName'")
-    }
-  }
-  $remaining = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-  if ($remaining.Count -ne 0) {
-    throw [System.InvalidOperationException]::new("replacement-suppression spelling(s) survived child-environment removal: $($remaining -join ', ')")
-  }
-  try { $EnvEntries.Set_Item('GIT_NO_REPLACE_OBJECTS', '1') }
-  catch { throw [System.InvalidOperationException]::new("could not install canonical child replacement suppression: $($_.Exception.Message)") }
-  Assert-CrgNoReplaceObjectsEnvironment -EnvEntries $EnvEntries
-}
-
-
-function Set-CrgNoReplaceObjects {
-  while ($true) {
-    try { [string[]]$beforeEntries = @(Get-CrgRawProcessEnvironmentEntries) }
-    catch { throw [System.InvalidOperationException]::new("raw process-environment enumeration failed: $($_.Exception.Message)") }
-    $before = @(Get-CrgNoReplaceRawEntries -Entries $beforeEntries)
-    if ($before.Count -eq 0) { break }
-    $exactName = [string]$before[0].Name
-    try {
-      Initialize-CrgProcessNoReplaceEnvironmentNative
-      [CrgProcessNoReplaceEnvironment.NativeV1]::RemoveProcessVariable($exactName)
-    }
-    catch { throw [System.InvalidOperationException]::new("could not remove process environment spelling '$exactName': $($_.Exception.Message)") }
-    try { [string[]]$afterEntries = @(Get-CrgRawProcessEnvironmentEntries) }
-    catch { throw [System.InvalidOperationException]::new("raw process-environment enumeration failed: $($_.Exception.Message)") }
-    $after = @(Get-CrgNoReplaceRawEntries -Entries $afterEntries)
-    if ($after.Count -ge $before.Count) {
-      throw [System.InvalidOperationException]::new("process environment removal made no progress for spelling '$exactName'")
-    }
-  }
-  try { [string[]]$remainingEntries = @(Get-CrgRawProcessEnvironmentEntries) }
-  catch { throw [System.InvalidOperationException]::new("raw process-environment enumeration failed: $($_.Exception.Message)") }
-  $remaining = @(Get-CrgNoReplaceRawEntries -Entries $remainingEntries)
-  if ($remaining.Count -ne 0) {
-    throw [System.InvalidOperationException]::new("replacement-suppression spelling(s) survived process-environment removal: $(@($remaining | ForEach-Object { $_.Name }) -join ', ')")
-  }
-  try {
-    Initialize-CrgProcessNoReplaceEnvironmentNative
-    [CrgProcessNoReplaceEnvironment.NativeV1]::SetProcessVariable('GIT_NO_REPLACE_OBJECTS', '1')
-  } catch { throw [System.InvalidOperationException]::new("could not install canonical GIT_NO_REPLACE_OBJECTS=1: $($_.Exception.Message)") }
-  try { [string[]]$finalEntries = @(Get-CrgRawProcessEnvironmentEntries) }
-  catch { throw [System.InvalidOperationException]::new("raw process-environment enumeration failed: $($_.Exception.Message)") }
-  $final = @(Get-CrgNoReplaceRawEntries -Entries $finalEntries)
-  if ($final.Count -ne 1 -or
-      -not [string]::Equals([string]$final[0].Name, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::Ordinal) -or
-      -not [string]::Equals([string]$final[0].Value, '1', [System.StringComparison]::Ordinal)) {
-    throw [System.InvalidOperationException]::new("replacement-suppression singleton postcondition failed (raw spelling count=$($final.Count))")
-  }
+# Functions shared with the review wrappers, dot-sourced so they run in this
+# script's own scope (the file's
+# header gives the reason). Every layout that carries this gate carries that
+# file too: both are in the bootstrap install inventory, which the runtime
+# payload list includes.
+try {
+  . (Join-Path (Split-Path -Parent $PSScriptRoot) 'review-common.ps1')
+} catch {
+  Write-Host "[auto-merge] ERROR: the shared review functions could not be loaded ($($_.Exception.Message)) - merge ABORTED (fail closed)."
+  exit 3
 }
 
 # Repository-default info/grafts remains active even with replacement refs
@@ -515,77 +264,8 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 # ---------------------------------------------------------------------------
-# Helpers. No codex/network. MOST are pure in-memory
-# functions; the I/O exceptions in THIS section are clearly marked in their own
-# headers -- Start-ReviewChild (writes child args/exit/runner/capture files + launches a
-# local powershell child), Resolve-ReviewChildExit / Test-ChildExitConsistency
-# (read a file / a process handle), and Get-GitObjectKind (shells out to
-# `git cat-file -t`).
-# None of these touch codex/network. The git-probing copy/centralization helpers
-# (Resolve-CentralLogDir, Copy-RunArtifactsToCentralLogs) live in the separate
-# "Non-pure runtime helpers" section below; each per-function header states PURE
-# vs NON-pure explicitly.
+# Helpers.
 # ---------------------------------------------------------------------------
-
-# Resolve the EFFECTIVE codex reasoning-effort so the merge gate pins the
-# branch review to the SAME tier it resolves here. Formerly byte-identical
-# to the codex wrapper's Resolve-EffectiveCodexEffort
-# (scripts/codex/auto-review.ps1); the copies DIVERGE DELIBERATELY at the
-# tier list: P5 scoped the `max` tier to commit-gate surfaces only, because
-# this gate forwards the resolved tier to a BASE-EXTRACTED wrapper that may
-# predate the tier -- the known-debt register requires merge-side `max` to
-# land only together with an attribute-complete capability probe
-# (docs/known-debt.md). Until then a `max` config resolves `unknown` here
-# (do-not-pin; the child inherits codex's default), never a crash or a
-# param-bind failure on an older wrapper. `unknown` means "do not pin".
-# PURE.
-function Resolve-EffectiveCodexEffort {
-  param([string]$ExplicitEffort, [string]$ConfigText)
-  # Canonical codex reasoning-effort tiers. Any resolved value outside this set
-  # (a typo in config, a future tier this gate does not know) collapses to
-  # `unknown`, which means the child is not pinned (inherits codex default).
-  # This list deliberately OMITS `max` (see the function header) and
-  # otherwise mirrors the codex wrapper's accepted tiers (minus the empty
-  # string, which means "no explicit override" here, handled before this).
-  $validTiers = @('minimal', 'low', 'medium', 'high', 'xhigh')
-  if (-not [string]::IsNullOrWhiteSpace($ExplicitEffort)) {
-    $e = $ExplicitEffort.Trim().ToLowerInvariant()
-    if ($validTiers -contains $e) { return $e } else { return 'unknown' }
-  }
-  if ([string]::IsNullOrWhiteSpace($ConfigText)) { return 'unknown' }
-  # Only consider the top-level table: cut the text at the first TOML section
-  # header line (`[...]`). A key inside a profile/table is not the global default.
-  $topLevel = $ConfigText
-  $secMatch = [regex]::Match($ConfigText, '(?m)^\s*\[')
-  if ($secMatch.Success) { $topLevel = $ConfigText.Substring(0, $secMatch.Index) }
-  # Accept the documented TOML value forms: double-quoted ("xhigh"), single-
-  # quoted ('xhigh'), or bare (xhigh), each with BALANCED quotes, plus optional
-  # trailing whitespace and an optional inline `# comment`. The bare alternative's
-  # [A-Za-z]+ cannot start on a `"`/`'`, so a MISMATCHED quote (e.g. `"xhigh` with
-  # no closing quote) matches nothing here -> `unknown` (fail safe; do not pin).
-  $m = [regex]::Match($topLevel, '(?m)^\s*model_reasoning_effort\s*=\s*(?:"(?<v>[A-Za-z]+)"|''(?<v>[A-Za-z]+)''|(?<v>[A-Za-z]+))\s*(?:#.*)?$')
-  if (-not $m.Success) { return 'unknown' }
-  $v = $m.Groups['v'].Value.Trim().ToLowerInvariant()
-  if ($validTiers -contains $v) { return $v } else { return 'unknown' }
-}
-
-# Read ~/.codex/config.toml text for Resolve-EffectiveCodexEffort. NON-pure; any
-# failure returns '' so the resolver yields `unknown`. BYTE-IDENTICAL to the
-# codex wrapper's Get-CodexConfigText.
-function Get-CodexConfigText {
-  # Join-Path is INSIDE the try: if $env:USERPROFILE is unset/empty (malformed
-  # environment), Join-Path throws under $ErrorActionPreference='Stop' and would
-  # abort the review over a config-effort lookup that is meant to fail SAFE. Any
-  # failure (bad USERPROFILE, missing file, read error) returns '' so the
-  # resolver yields `unknown` (do-not-pin), never a crash.
-  try {
-    $cfg = Join-Path $env:USERPROFILE '.codex\config.toml'
-    if (Test-Path -LiteralPath $cfg -PathType Leaf) {
-      return [System.IO.File]::ReadAllText($cfg, [System.Text.UTF8Encoding]::new($false))
-    }
-  } catch { }
-  return ''
-}
 
 # Project-mode capability (docs/project-mode-doctrine-v1.md; token:
 # crg-project-mode-capability-v1). The merge gate's project-mode duties are
@@ -601,14 +281,14 @@ function Get-CodexConfigText {
 # in-script (not a param [ValidateSet]) because binding-time validation
 # terminates with the RETIRED exit 1 before the exit-code contract applies;
 # the runtime maps a failed selection to a stable diagnostic + exit 3. The
-# explicit ToLowerInvariant is load-bearing even though the -contains match
-# is case-insensitive: every provider dispatch and slot/run-dir name below
-# consumes the canonical lowercase form.
+# explicit ToLowerInvariant is load-bearing: the match is ordinal (PS 5.1
+# culture compares ignore characters such as U+00AD), and every provider
+# dispatch and slot/run-dir name below consumes the canonical lowercase form.
 function Resolve-BackendSelection {
   param([string]$Raw)
   if ([string]::IsNullOrWhiteSpace($Raw)) { return @{ Ok = $false; Reason = 'required' } }
   $norm = $Raw.ToLowerInvariant()
-  if (@('codex', 'claude') -contains $norm) { return @{ Ok = $true; Backend = $norm } }
+  if ([Array]::IndexOf([string[]]@('codex', 'claude'), [string]$norm) -ge 0) { return @{ Ok = $true; Backend = $norm } }
   return @{ Ok = $false; Reason = 'invalid' }
 }
 
@@ -627,7 +307,7 @@ function Resolve-PanelSlotSpec {
   param([string]$Backend, [string]$Slot, [string]$RunDir)
   $name = if ([string]::IsNullOrEmpty($Slot)) { $Backend } else { "$Backend-$Slot" }
   $dir = Join-Path $RunDir $name
-  $extra = if ($Backend -eq 'claude' -and -not [string]::IsNullOrEmpty($Slot)) { @('-ArtifactTag', $Slot) } else { @() }
+  $extra = if ([string]::Equals($Backend, 'claude', [System.StringComparison]::Ordinal) -and -not [string]::IsNullOrEmpty($Slot)) { @('-ArtifactTag', $Slot) } else { @() }
   return @{ Name = $name; Dir = $dir; Pending = (Join-Path $dir 'followups.pending.md'); ExtraArgs = $extra }
 }
 
@@ -657,7 +337,7 @@ function Resolve-MergePanelPlan {
     [bool]$ConsistencyDocInBranch,
     [string]$ClaudeTagDeclaration   # Get-WrapperParameterDeclaration: declared|absent|unknown
   )
-  if ($Backend -eq 'claude') {
+  if ([string]::Equals($Backend, 'claude', [System.StringComparison]::Ordinal)) {
     if ($ConsistencyDocInBranch) { return @{ Action = 'refuse-consistency' } }
     if ($ClaudeTagDeclaration -ne 'declared') { return @{ Action = 'refuse-tag' } }
     return @{ Action = 'run'; Slots = @(1..$script:PanelPassCount | ForEach-Object { "p$_" }) }
@@ -738,7 +418,7 @@ function Resolve-MergeFallbackPlan {
     [bool]$ConsistencyDocInBranch,
     [string]$ClaudeTagDeclaration
   )
-  if ($ChosenBackend -eq 'codex') {
+  if ([string]::Equals($ChosenBackend, 'codex', [System.StringComparison]::Ordinal)) {
     if ($ConsistencyDocInBranch) { return @{ Action = 'refuse-consistency' } }
     if ($ClaudeTagDeclaration -ne 'declared') { return @{ Action = 'refuse-tag' } }
     return @{ Action = 'fallback-claude' }
@@ -857,7 +537,7 @@ function Resolve-CrgExactLocalBranchCommit {
   foreach ($rawRow in $rows) {
     $row = [string]$rawRow
     $tab = $row.IndexOf("`t", [System.StringComparison]::Ordinal)
-    if ($tab -le 0 -or $row.IndexOf("`t", $tab + 1) -ge 0) {
+    if ($tab -le 0 -or $row.IndexOf([char]9, $tab + 1) -ge 0) {
       return [pscustomobject]@{ State = 'indeterminate'; RefName = $refName; CommitOid = '' }
     }
     $storedRef = $row.Substring(0, $tab)
@@ -895,335 +575,6 @@ function Resolve-CrgExactLocalBranchCommit {
     return [pscustomobject]@{ State = 'not-commit'; RefName = $refName; CommitOid = '' }
   }
   return [pscustomobject]@{ State = 'valid'; RefName = $refName; CommitOid = $commitOid }
-}
-
-# Decide whether the configured consistency doc is in a branch's
-# `git diff --name-status` output. The Claude merge wrapper
-# (scripts/claude/auto-review.ps1) FAILS CLOSED (exit 3) whenever the configured
-# consistency doc is in the changed-path set -- its Get-PlanConsistencyReport
-# precompute is not ported -- so a claude panel would ABORT an otherwise-valid
-# doc-touching branch. The merge gate detects the doc here, REFUSES -Backend
-# claude up front for such a branch (naming -Backend codex as the remedy), and
-# refuses the codex->claude exhaustion fallback for it, so the documented
-# consistency-doc path completes under Codex review alone.
-# This mirrors the Claude wrapper's OWN detection EXACTLY: NAME-STATUS
-# lines have the shape `<status>\t<path>` (e.g. `M\tPLAN.md`) or
-# `R<score>\t<old>\t<new>` for renames, so every tab-separated column AFTER the
-# first (status) column is a path column and BOTH rename path columns are checked.
-# (Matching by raw diff text would false-positive on this script's own comments
-# mentioning the doc.)
-#
-# $DocName defaults to PLAN.md; the runtime caller passes the NORMALIZED canonical git-path form of
-# $env:CROSS_REVIEW_CONSISTENCY_DOC (from Resolve-ConsistencyDocConfig, i.e.
-# $cfgMergeDoc.Doc), never the raw env value, and only invokes this when that env
-# var resolved to State='valid' (a fresh install imposes no doc routing; an
-# invalid config already aborted the merge upstream). The backslash normalization
-# retained below is belt-and-suspenders for any direct caller.
-# Configuration validation guarantees one raw, tab-safe path column. Matching is
-# ordinal and exact so case-distinct names and leading/trailing path whitespace
-# cannot alias the configured document. PURE.
-function Test-PlanInNameStatus {
-  param(
-    [string]$NameStatus,
-    [string]$DocName = 'PLAN.md'
-  )
-  if ([string]::IsNullOrWhiteSpace($NameStatus)) { return $false }
-  # Normalize $DocName to git path form: name-status path columns use forward
-  # slashes, but on Windows the configured doc (from CROSS_REVIEW_CONSISTENCY_DOC)
-  # may carry backslashes (`docs\PLAN.md`). Without this, a backslash value would
-  # never equal a `docs/PLAN.md` path column and a doc-touching branch would
-  # dodge the documented -Backend claude refusal and fallback routing.
-  $docNorm = $DocName -replace '\\', '/'
-  foreach ($line in ($NameStatus -split "`r?`n")) {
-    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-    $parts = $line -split "`t"
-    for ($pi = 1; $pi -lt $parts.Length; $pi++) {
-      if ([string]::Equals($parts[$pi], $docNorm, [System.StringComparison]::Ordinal)) { return $true }
-    }
-  }
-  return $false
-}
-
-# Remove a directory tree WITHOUT `Remove-Item -Recurse`. Package cleanup policy
-# bans the recursive force-delete (the dangerous footgun) even for the gate's own
-# scratch dirs; this is the package's canonical no-Recurse cleanup.
-# Enumerates files (-Force so HIDDEN/system entries -- e.g. a scratch repo's `.git`
-# tree -- and read-only git loose objects are included), deletes them individually
-# (per-file -Force), then deletes the now-empty dirs bottom-up (longest path first),
-# then the root. Without -Force on the enumeration, a hidden `.git` is skipped and
-# the non-empty root removal throws. Best-effort (SilentlyContinue): scratch cleanup
-# must never abort the run. Safe on $null / nonexistent paths. (Byte-identical
-# across the three wrapper copies.)
-function Remove-TreeNoRecurse {
-  param([string]$Path)
-  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
-  Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-  }
-  Get-ChildItem -LiteralPath $Path -Directory -Recurse -Force -ErrorAction SilentlyContinue |
-    Sort-Object { $_.FullName.Length } -Descending |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-  Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-}
-
-# Normalize + validate the raw CROSS_REVIEW_CONSISTENCY_DOC env value. The value,
-# IF consumed RAW elsewhere, WOULD fail OPEN: a whitespace-only or whitespace-
-# PADDED value (e.g. "PLAN.md ") is truthy but never EQUALS a trimmed
-# name-status path column, so the consistency gating silently disables while
-# review proceeds -- a fail-OPEN in a fail-CLOSED gate. This helper is the single
-# normalization+validation point; every consistency-doc site (codex
-# auto-review precompute, claude fail-closed routing, auto-merge backend
-# routing) calls a BYTE-IDENTICAL copy of it (there is no shared module to
-# import, so the copies are kept identical by hand).
-#
-# Returns @{ State = 'off' | 'valid' | 'invalid'; Doc = <normalized>; Reason = <string> }:
-#   off     - env var UNSET (or $null): the legitimate default; no special-casing.
-#   valid   - non-empty after trim, repo-relative (not absolute, no `..` escape);
-#             Doc is the trimmed + `\`->`/`-normalized git-path form to match.
-#   invalid - SET but whitespace-only / absolute / contains a `..` escape segment,
-#             a control character, DEL, or a double quote.
-#             A deliberately-SET-but-invalid value is a BROKEN GATE CONFIG and the
-#             caller FAILS CLOSED (never silently disables); Reason explains why.
-# PURE (takes the raw value as a param). NOTE: $RawValue is
-# DELIBERATELY untyped (no `[string]`) so a $null (env var UNSET) stays $null and
-# is distinguished from an empty string '' (env var SET to empty, an invalid
-# config). A `[string]` annotation would coerce $null -> '' and conflate the two.
-function Resolve-ConsistencyDocConfig {
-  param($RawValue)
-  if ($null -eq $RawValue) { return @{ State = 'off'; Doc = ''; Reason = '' } }
-  $trimmed = ([string]$RawValue).Trim()
-  if ($trimmed.Length -eq 0) {
-    return @{ State = 'invalid'; Doc = ''; Reason = 'CROSS_REVIEW_CONSISTENCY_DOC is set to an empty or whitespace-only value' }
-  }
-  $norm = $trimmed -replace '\\', '/'
-  # POSIX-absolute (leading `/`) is detected PRE-collapse: the segment-collapse
-  # below drops the leading empty segment, which would otherwise turn `/etc/x`
-  # into the relative `etc/x`. A `.`-prefix cannot express a posix-absolute
-  # (`.//etc` collapses to `etc`), so a leading `/` on $norm is unambiguously
-  # absolute.
-  if ($norm.StartsWith('/', [System.StringComparison]::Ordinal)) {
-    return @{ State = 'invalid'; Doc = ''; Reason = "CROSS_REVIEW_CONSISTENCY_DOC='$norm' is an absolute path; it must be a repo-relative path" }
-  }
-  # CANONICALIZE to git-name-status form, then validate the canonical result. git
-  # name-status / diff headers emit canonical paths (no `.` segments, no redundant
-  # `//` or trailing `/`), but a consumer may set `./PLAN.md`, `docs/./PLAN.md`,
-  # `PLAN.md/`, etc. -- without canonicalization those reach State=valid yet never
-  # equal the exact name-status column, so the gate silently skips (a fail-OPEN).
-  # The DRIVE-absolute check runs on the CANONICAL result (AFTER collapse): a
-  # value like `./C:/PLAN.md` PASSES a pre-collapse drive check (it starts with
-  # `.`), then collapses to the drive-absolute `C:/PLAN.md`, so it must be
-  # re-checked post-collapse. Split on `/`, drop empty (`//`, trailing `/`) and
-  # `.` segments, reject `..` escapes, rejoin, THEN reject if drive-rooted.
-  $segs = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($seg in ($norm -split '/')) {
-    if ($seg -eq '' -or $seg -eq '.') { continue }   # collapse `//`, trailing `/`, and `.` segments
-    if ($seg -eq '..') {
-      return @{ State = 'invalid'; Doc = ''; Reason = "CROSS_REVIEW_CONSISTENCY_DOC='$norm' contains a '..' path-escape segment; it must stay within the repo" }
-    }
-    $segs.Add($seg) | Out-Null
-  }
-  if ($segs.Count -eq 0) {
-    # All segments were `.`/empty (e.g. `./` or `.`): no actual file path.
-    return @{ State = 'invalid'; Doc = ''; Reason = "CROSS_REVIEW_CONSISTENCY_DOC='$norm' does not name a file (only '.'/separator segments)" }
-  }
-  $canon = $segs -join '/'
-  # The current non-NUL name-status grammar deliberately consumes raw path
-  # columns. `core.quotePath=false` exposes ordinary UTF-8, but Git still
-  # C-quotes every control character and double quote. Backslashes have already
-  # become separators above. Reject the remaining always-quoted spellings so
-  # every valid configured path round-trips as one tab-safe, line-safe column.
-  if ($canon -match '[\x00-\x1F\x7F"]') {
-    return @{ State = 'invalid'; Doc = ''; Reason = 'CROSS_REVIEW_CONSISTENCY_DOC contains a control character or double quote that cannot round-trip through the exact name-status path grammar' }
-  }
-  # Validate Git-path syntax lexically. System.IO.Path.IsPathRooted is not a
-  # valid parser here: Windows PowerShell throws on Git-valid characters such
-  # as `<`, `>`, and `|` instead of returning a rooted-path classification.
-  if ($canon -match '^[A-Za-z]:' -or $canon.StartsWith('/', [System.StringComparison]::Ordinal)) {
-    return @{ State = 'invalid'; Doc = ''; Reason = "CROSS_REVIEW_CONSISTENCY_DOC='$norm' resolves to the absolute path '$canon'; it must be a repo-relative path" }
-  }
-  return @{ State = 'valid'; Doc = $canon; Reason = '' }
-}
-
-# The configured consistency doc must resolve to a git BLOB (a tracked FILE) in
-# the reviewed tree. `git cat-file -e` is NOT enough -- it succeeds for a TREE
-# (directory) too, so a directory-valued config (e.g. `docs/`) would pass and
-# then silently skip / mis-route. Callers resolve the object KIND (`git cat-file
-# -t`, or 'missing' on a nonzero exit) and pass it here; only 'blob' is valid.
-# PURE. (Codex BLOCKER, merge gate.)
-function Test-ConsistencyDocKind {
-  param([string]$Kind)
-  return ($Kind -eq 'blob')
-}
-
-# Resolve the git OBJECT KIND of a repo-relative path within a tree-ish:
-# 'blob' (tracked file), 'tree' (directory), 'missing' (path absent / bad ref),
-# or the raw `cat-file -t` kind otherwise.
-function Get-GitObjectKind {
-  param([string]$TreeRef, [string]$Path)
-  # 2>&1 + SilentlyContinue: a missing path makes `git cat-file -t` write to
-  # stderr and exit nonzero; capture+discard it (return 'missing') so a typo/dir
-  # config resolves cleanly instead of surfacing a NativeCommandError mid-gate.
-  $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
-  try {
-    $t = (& git cat-file -t "${TreeRef}:${Path}" 2>&1)
-    if ($LASTEXITCODE -ne 0) { return 'missing' }
-    return "$t".Trim()
-  } finally { $ErrorActionPreference = $prev }
-}
-
-# Build a single Windows command-line string from an argument array, quoting
-# each element per the CommandLineToArgvW rules so multi-word values (notably
-# the multi-word `-Title`) survive the `Start-Process -ArgumentList` boundary.
-# `Start-Process -ArgumentList <array>` joins elements with spaces WITHOUT
-# quoting, which splits a multi-word value into several args and breaks the
-# child wrapper's parameter binding (wrapper startup failure before any
-# verdict). Passing ONE pre-quoted string instead preserves argument boundaries.
-# PURE.
-function Convert-ToProcArgString {
-  param([string[]]$ArgList)
-  if ($null -eq $ArgList) { return '' }
-  $quoted = foreach ($a in $ArgList) {
-    if ($null -eq $a) { $a = '' }
-    if ($a.Length -gt 0 -and ($a.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0)) {
-      # No space/tab/quote -> emit verbatim.
-      $a
-    } else {
-      # Wrap in double-quotes; escape per CommandLineToArgvW: a run of
-      # backslashes immediately before a quote (or the closing quote) is
-      # doubled, and each embedded quote is backslash-escaped.
-      $sb = [System.Text.StringBuilder]::new()
-      [void]$sb.Append('"')
-      $backslashes = 0
-      foreach ($ch in $a.ToCharArray()) {
-        if ($ch -eq '\') {
-          $backslashes++
-        } elseif ($ch -eq '"') {
-          [void]$sb.Append('\' * ($backslashes * 2 + 1))
-          [void]$sb.Append('"')
-          $backslashes = 0
-        } else {
-          if ($backslashes -gt 0) { [void]$sb.Append('\' * $backslashes); $backslashes = 0 }
-          [void]$sb.Append($ch)
-        }
-      }
-      if ($backslashes -gt 0) { [void]$sb.Append('\' * ($backslashes * 2)) }
-      [void]$sb.Append('"')
-      $sb.ToString()
-    }
-  }
-  return ($quoted -join ' ')
-}
-
-# PURE PATH-assembly helper (shared with the commit wrappers): given
-# (existence-filtered) candidate dirs + the current PATH, return the ordered,
-# case-insensitively-deduped parts with candidates PREPENDED, then the current
-# parts (skipping blanks / already-seen). No env mutation, no I/O.
-# Byte-identical to the copies in scripts/codex/commit.ps1,
-# scripts/claude/commit.ps1, scripts/codex/auto-review.ps1, and
-# scripts/shared/author-lint.ps1; Normalize below passes no candidates.
-function Get-PrependedToolPathParts {
-  param([string[]]$CandidateDirs, [string]$CurrentPath)
-  $parts = New-Object 'System.Collections.Generic.List[string]'
-  $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-  if ($CandidateDirs) {
-    foreach ($c in $CandidateDirs) {
-      if (-not [string]::IsNullOrWhiteSpace($c) -and $seen.Add($c)) { [void]$parts.Add($c) }
-    }
-  }
-  foreach ($p in (($CurrentPath -split [System.IO.Path]::PathSeparator))) {
-    if (-not [string]::IsNullOrWhiteSpace($p) -and $seen.Add($p)) { [void]$parts.Add($p) }
-  }
-  return ,$parts.ToArray()
-}
-
-# Collect EVERY PATH-spelling VALUE from the process environment BLOCK. A Windows
-# process can inherit a DUPLICATE surface with both 'Path' and 'PATH' as distinct
-# case-variant entries holding DIFFERENT dirs; [Environment]::GetEnvironmentVariable
-# is case-INSENSITIVE and returns only ONE of them (Path == PATH at runtime), so a
-# two-lookup read cannot see both -- enumerate the raw block instead.
-# [Environment]::GetEnvironmentVariables('Process') returns a case-SENSITIVE
-# Hashtable, so both keys survive when present.
-# The effective case-insensitive lookup value is emitted FIRST because that is
-# the executable-search order the caller observes before normalization. Remaining
-# distinct raw values follow in ordinal key-name order so no extra dirs are lost.
-function Get-ProcessPathSpellings {
-  $EnvEntries = [Environment]::GetEnvironmentVariables('Process')
-  $EffectivePath = [Environment]::GetEnvironmentVariable('PATH', [EnvironmentVariableTarget]::Process)
-  $out = New-Object 'System.Collections.Generic.List[string]'
-  $seenValues = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-  if (-not [string]::IsNullOrEmpty($EffectivePath) -and $seenValues.Add($EffectivePath)) {
-    [void]$out.Add($EffectivePath)
-  }
-  $rawMatches = New-Object 'System.Collections.Generic.SortedDictionary[string,string]' ([System.StringComparer]::Ordinal)
-  foreach ($k in @($EnvEntries.Keys)) {
-    $name = [string]$k
-    if ([string]::Equals($name, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)) {
-      $rawMatches[$name] = [string]$EnvEntries[$k]
-    }
-  }
-  foreach ($entry in $rawMatches.GetEnumerator()) {
-    $v = [string]$entry.Value
-    if (-not [string]::IsNullOrEmpty($v) -and $seenValues.Add($v)) { [void]$out.Add($v) }
-  }
-  return ,$out.ToArray()
-}
-
-# PURE: union the given process PATH-spelling VALUES (0..N of them -- see
-# Get-ProcessPathSpellings; a duplicate surface yields two DIFFERING strings) into
-# the ordered, case-insensitively-deduped parts, candidates PREPENDED. The
-# effective lookup spelling precedes deterministic raw-only additions; reading
-# only ONE spelling would silently DROP the other's dirs. Delegates the dedup to
-# Get-PrependedToolPathParts; no env mutation / no I/O.
-# Byte-identical to the copies in scripts/codex/commit.ps1,
-# scripts/claude/commit.ps1, scripts/codex/auto-review.ps1, and
-# scripts/shared/author-lint.ps1.
-function Get-UnionProcessPathParts {
-  param([string[]]$Spellings, [string[]]$CandidateDirs = @())
-  $joined = (@($Spellings) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join [System.IO.Path]::PathSeparator
-  return Get-PrependedToolPathParts -CandidateDirs $CandidateDirs -CurrentPath $joined
-}
-
-function Set-CanonicalProcessPathEnvironment {
-  param([Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string]$Value)
-  while ($true) {
-    $before = [Environment]::GetEnvironmentVariables('Process')
-    $beforeKeys = @($before.Keys | Where-Object {
-      [string]::Equals([string]$_, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)
-    })
-    if ($beforeKeys.Count -eq 0) { break }
-    $removeName = [string]$beforeKeys[0]
-    [Environment]::SetEnvironmentVariable($removeName, $null, [EnvironmentVariableTarget]::Process)
-    $afterRemoval = [Environment]::GetEnvironmentVariables('Process')
-    $afterCount = @($afterRemoval.Keys | Where-Object {
-      [string]::Equals([string]$_, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)
-    }).Count
-    if ($afterCount -ge $beforeKeys.Count) {
-      throw [System.InvalidOperationException]::new("could not remove inherited PATH spelling '$removeName'")
-    }
-  }
-  [Environment]::SetEnvironmentVariable('Path', $Value, [EnvironmentVariableTarget]::Process)
-  $final = [Environment]::GetEnvironmentVariables('Process')
-  $finalKeys = @($final.Keys | Where-Object {
-    [string]::Equals([string]$_, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)
-  })
-  if ($finalKeys.Count -ne 1 -or [string]$finalKeys[0] -cne 'Path' -or
-      -not [string]::Equals([string]$final['Path'], $Value, [System.StringComparison]::Ordinal)) {
-    throw [System.InvalidOperationException]::new("canonical Path postcondition failed (raw spelling count=$($finalKeys.Count))")
-  }
-}
-
-function Normalize-ProcessPathEnvForStartProcess {
-  # PowerShell 5.1 can inherit both Path and PATH in the process environment.
-  # Start-Process builds a case-insensitive dictionary from that block and
-  # throws before launch when both spellings are present. Collapse to one Path
-  # entry so child-runner tests and production review launches share the same
-  # reliable process boundary.
-  # Keep the effective lookup order first, append deterministic raw-only additions,
-  # then collapse every raw case variant to one verified canonical Path entry. No
-  # candidates -- dedup only.
-  $pathParts = Get-UnionProcessPathParts -Spellings (Get-ProcessPathSpellings)
-  if ($pathParts.Count -eq 0) { throw [System.InvalidOperationException]::new('no non-empty process PATH value is available to normalize') }
-  Set-CanonicalProcessPathEnvironment -Value ([string]::Join([System.IO.Path]::PathSeparator, $pathParts))
 }
 
 # Launch ONE review-wrapper child and make its exit code DETERMINISTIC to read
@@ -1409,8 +760,8 @@ namespace CrgProcessNoReplaceEnvironment {
         throw 'raw environment entry is empty or contains NUL'
       }
       $runnerSeparator = if ($runnerEntry.StartsWith('=', [System.StringComparison]::Ordinal)) {
-        $runnerEntry.IndexOf('=', 1)
-      } else { $runnerEntry.IndexOf('=') }
+        $runnerEntry.IndexOf('=', 1, [System.StringComparison]::Ordinal)
+      } else { $runnerEntry.IndexOf('=', [System.StringComparison]::Ordinal) }
       $runnerMinimum = if ($runnerEntry.StartsWith('=', [System.StringComparison]::Ordinal)) { 1 } else { 0 }
       if ($runnerSeparator -le $runnerMinimum) { throw 'raw environment entry does not use name=value grammar' }
       $runnerName = $runnerEntry.Substring(0, $runnerSeparator)
@@ -1597,205 +948,6 @@ function Test-ChildExitConsistency {
 # centralization with preservation on failure, and follow-up promotion.
 # ---------------------------------------------------------------------------
 
-# Promote a child wrapper's STAGED QUALITY follow-ups to the durable
-# logs/review-followups.md index. Called ONLY after the ff-merge has
-# succeeded (merge-gate BLOCKER 2026-07-10: a child that appended on its own
-# pass could record follow-ups for a merge that subsequently aborted on the
-# exit union, the branch pin, or the ff-merge -- so the children stage to
-# CROSS_REVIEW_FOLLOWUPS_PENDING paths and THIS single post-merge point promotes).
-# NON-pure I/O twin of the wrappers' direct-append mode: same main-repo
-# resolution (git common-dir parent, two-step probe), same header, same
-# exclusive-handle retry against concurrent writers. Any failure warns and
-# degrades -- the merge is already applied, so a lost follow-up record must
-# not fail the gate.
-# The follow-up index's capture doctrine, emitted verbatim by every writer of
-# that index, so a reader of the file sees one contract regardless of which gate
-# wrote it. Version and frame bytes must remain identical across writers.
-# Explicit `n concatenation, NOT a here-string: the sh writer emits the same
-# bytes via printf, and a here-string would embed this file's line endings.
-#
-# FRAMED: a leading blank line + BEGIN marker (so an unterminated legacy file
-# cannot absorb the block onto its last line), and a VERSIONED terminal marker
-# that is the ONLY completion signal. An append interrupted anywhere leaves no
-# terminal marker, so the next writer re-appends the whole frame and the
-# complete copy supersedes the partial one below it -- append-only, never a
-# rewrite that could clobber a concurrent writer.
-
-# The doctrine VERSION this writer speaks. Supersession is monotonic by version
-# (the frame text states the rule for readers), so writer and reader alike
-# compare versions before positions.
-#
-# WHAT IT NUMBERS IS THE FRAME'S STATED CONTRACT, not the reader that honors
-# it. A change to what the frame PROMISES -- a new exempt state, a narrowed
-# duty, a different locator grammar -- bumps this and rewords the frame in
-# lockstep. A reader-side change that makes a scanner conform to what the frame
-# already says does NOT: the test is whether the frame's text would have to
-# change to describe the new behavior truthfully. See the reconciliation
-# contract's doctrine-version semantics.
-function Get-FollowupCaptureDoctrineVersion {
-  return 6
-}
-
-function Get-FollowupCaptureDoctrine {
-  return "`n<!-- review-followups: capture-doctrine v6 BEGIN -->`n" +
-         "SUPERSESSION IS MONOTONIC BY VERSION: among this file's capture-doctrine`n" +
-         "frames, the HIGHEST version's last COMPLETE frame is authoritative wherever it`n" +
-         "sits, so a complete OLDER frame appended below a newer one is superseded, never`n" +
-         "a reinstatement of its guidance (an older frame's prune-on-a-live-slug wording`n" +
-         "included). A frame whose version you do not know supersedes this one: prune`n" +
-         "NOTHING and leave every row at ordinary duty until a reader that knows that`n" +
-         "version handles the file.`n" +
-         "An entry tagged [scoped: <slug> tree: <oid> diff: <sha256> find: <sha256>]`n" +
-         "carries an`n" +
-         "UNTRUSTED ROUTING HINT, never a clearance -- nothing is pruned on the tag`n" +
-         "alone (operator ruling`n" +
-         "2026-07-30). The row's slug + tree OID + diff SHA + FINDING DIGEST bind it to`n" +
-         "the content it came from, which defeats ACCIDENTAL misattribution: a reused`n" +
-         "or overwritten basename, a same-tree different-base race, and an edited`n" +
-         "finding body each mismatch a part and leave the row at ordinary duty. The`n" +
-         "binding does NOT establish authenticity. This index is workspace-writable --`n" +
-         "a local writer can edit or delete any row, and the verdict artifacts it`n" +
-         "names are equally local -- so these records carry framing, never proof. The`n" +
-         "gated tracked tree is the only trusted layer; check every claim there.`n" +
-         "A row names its artifact by a LOCATOR in its block header. A run whose output`n" +
-         "is centralized -- the default, and a merge-panel child whose run dir the merge`n" +
-         "gate consolidates -- names logs/<backend>/reviews/<file>; a run that centralizes`n" +
-         "nothing names the path it actually wrote, repo-relative when it sits under the`n" +
-         "repo and absolute otherwise. The field is whitespace-delimited, so the value is`n" +
-         "VERSIONED and ESCAPED: v1:<path>, where the path percent-encodes every byte`n" +
-         "outside the unreserved set A-Za-z0-9._/\:- as UTF-8 %XX triplets. A value`n" +
-         "WITHOUT that prefix is a pre-locator row's bare basename; an unprefixed value that`n" +
-         "carries a separator or a percent matches no shape any writer emitted and is`n" +
-         "left unresolved rather than guessed at. An EXACT (v1:) locator identifies one`n" +
-         "directory and file, so the age-prune honors it whoever wrote the row, keyed by`n" +
-         "DIRECTORY AND stem -- a shared stem in another directory is not protected by`n" +
-         "proxy, while sidecars sharing the stem beside it are. A BARE name is`n" +
-         "location-AMBIGUOUS: the writers that emitted those rows basenamed every path,`n" +
-         "including runs that wrote outside the central dir, so its directory cannot be`n" +
-         "recovered. Such a row therefore retains its STEM in every directory the prune`n" +
-         "scans -- over-retention rather than a guess. That exemption persists until the`n" +
-         "bare ROW is removed: this index is append-only, so a later exact row for the`n" +
-         "same finding is added BESIDE it and does not retire it.`n" +
-         "That prune deletes only under a byte-valid frame of ITS OWN doctrine version: a`n" +
-         "legacy frame, an unreadable index, a corrupted frame, or a version from the`n" +
-         "future all stop it entirely, and a legacy index resumes pruning once the next`n" +
-         "write migrates it AND a valid legacy seal admits its unverifiable tail.`n" +
-         "COMPLETION IS POSITIVE FROM THIS VERSION ON. Every append a writer makes under`n" +
-         "THIS doctrine version is ONE TRANSACTION, bracketed by marker lines: it begins`n" +
-         "with ``<!-- review-followups: transaction v1 OPEN -->`` written before any other`n" +
-         "byte -- this file's title and this frame included, when the append carries`n" +
-         "them -- and its block -- a header, its rows -- is closed by a TRANSACTION`n" +
-         "RECORD on its own line, spelled`n" +
-         "``<!-- review-followups: transaction v1 rows=<n> sha256=<hex> -->``, where <n>`n" +
-         "counts the block's rows and the digest is SHA-256 over the block's exact bytes`n" +
-         "from the first byte of its header line through the line break ending its last`n" +
-         "row -- its header line, when it has no rows. Below the first OPEN marker or`n" +
-         "complete, byte-valid frame of THIS version, every transaction is EXACTLY one`n" +
-         "OPEN, its prefix -- in order: this file's title exactly as written, only when`n" +
-         "the OPEN begins the file; the doctrine frame, in the region's first`n" +
-         "transaction or one raising the file's version; a legacy seal, only over a`n" +
-         "legacy region -- and ONE record-closed block, complete at its record line's`n" +
-         "line break (the blank line after it is presentation, not proof). A block that`n" +
-         "lacks a valid record -- absent or malformed, a count differing from the rows`n" +
-         "above it, or a digest that does not match -- an OPEN whose interval, running`n" +
-         "to the next OPEN or the end of the file, holds no record-closed block, holds`n" +
-         "prefix content beyond that admitted order, or holds anything past that`n" +
-         "block's record other than a single blank line (a second block included) -- a`n" +
-         "frame whose OWN interval holds no such block, completion never being borrowed`n" +
-         "across an OPEN -- and a frame or block with no OPEN above it at all -- are`n" +
-         "each an INCOMPLETE transaction: a write was cut off, or something rewrote or`n" +
-         "appended over it without recomputing the record, and either way the record`n" +
-         "that would vouch for the content does not. Like the scoped-tag binding above,`n" +
-         "these markers defeat ACCIDENTAL damage and establish no authenticity, and`n" +
-         "they vouch only for content that STANDS: a transaction removed whole at its`n" +
-         "boundaries leaves no incomplete shape behind -- the gated tracked tree is the`n" +
-         "only trusted layer, as stated above. While any incomplete transaction stands,`n" +
-         "NOTHING in this file is pruned, and every affected row carries ordinary duty.`n" +
-         "Content ABOVE the first OPEN marker or complete, byte-valid frame of this`n" +
-         "version predates these markers, and nothing can PROVE its final write ran to`n" +
-         "completion. While such content is PRESENT and this file carries no LEGACY`n" +
-         "SEAL -- the line`n" +
-         "``<!-- review-followups: legacy-seal v1 bytes=<len> sha256=<hex> -->`` in a`n" +
-         "transaction's prefix, added only on the operator's explicit go-ahead after`n" +
-         "inspecting that legacy tail, its length and digest matching the legacy bytes`n" +
-         "EXACTLY AS INSPECTED -- the nonempty legacy region is an unresolved state and`n" +
-         "NOTHING in this file is pruned. A file whose every byte sits inside a`n" +
-         "transaction has no legacy region and needs no seal. Under a MATCHING seal the`n" +
-         "legacy content keeps every duty rule stated here; a seal the current legacy`n" +
-         "bytes no longer match is INERT and the quarantine holds again. The seal, like`n" +
-         "every marker here, proves no authenticity. Writers REFUSE to append onto any`n" +
-         "tail whose last OPEN interval is not a COMPLETE transaction under every test`n" +
-         "above -- and equally onto a file with no OPEN at all that holds a byte-valid`n" +
-         "frame of this version or a complete frame of a higher one. (A CORRUPT copy of`n" +
-         "this version's frame with no OPEN beside it leaves a file that is still`n" +
-         "legacy: the migration append, whose canonical frame is the repair, is how`n" +
-         "such a file heals.) Appending onto anything less would terminate a torn write`n" +
-         "and bury the evidence.`n" +
-         "DEREFERENCE IS A PRIVILEGE, NOT A CONSEQUENCE OF READING A ROW. This index is`n" +
-         "workspace-writable, so a row's locator is attacker-supplied text. Canonicalize`n" +
-         "it FIRST, then AUTOMATICALLY open it only when it resolves inside the trusted`n" +
-         "review-log roots -- logs/<backend>/reviews under the resolved main repo. A`n" +
-         "locator outside those roots (UNC, device, extended-length, any external`n" +
-         "directory) is NEVER opened automatically. It may still serve as an exemption KEY`n" +
-         "-- keying compares strings and opens nothing -- but ONLY when it is canonical`n" +
-         "and path-safe: a shape the validator rejects (a reserved device segment refused`n" +
-         "by its NAME, a segment ending in a dot or a space, a dot segment) is an`n" +
-         "unlocatable claim, which DENIES the`n" +
-         "prune rather than keying anything. A human who wants to inspect any of them does`n" +
-         "so only with the operator's explicit go-ahead and the full path shown. No gate`n" +
-         "CODE reads bytes at a row-supplied locator today; the prune keys on locators and`n" +
-         "never opens them.`n" +
-         "Before any prune, establish first-hand against the tree:`n" +
-         "(0) PROVENANCE: read the row's verdict artifact AT ITS LOCATOR -- subject to the`n" +
-         "    dereference rule above -- and compare its`n" +
-         "    REVIEW-TREE-OID and DIFF-SHA256 headers against the row's pair, then RECOMPUTE`n" +
-         "    the finding digest over that artifact's matching finding (its column-one`n" +
-         "    line plus the blank-or-indented body below it, trailing whitespace stripped,`n" +
-         "    trailing blank lines dropped, LF-joined, SHA-256) and require equality`n" +
-         "    BEFORE any gap-match reasoning. ARTIFACT ABSENT AT THE LOCATOR is its own`n" +
-         "    state, and its causes differ: a consolidation copy that never materialized`n" +
-         "    (the gate preserves that run's output dir and says so loudly in its log --`n" +
-         "    recover it from there), a run-dir path from a route that centralizes`n" +
-         "    nothing, or a record deleted by hand. Absent, mismatched, or`n" +
-         "    unreadable all leave the row at ORDINARY DUTY. When`n" +
-         "    they match but that reviewed content never landed in the integration`n" +
-         "    history, the row is NOT ACTIONABLE YET -- a statement about when it can`n" +
-         "    be worked, never an exemption: it RETAINS ordinary uncaptured duty (never`n" +
-         "    cleared, never pruned), and once the content lands or its line is`n" +
-         "    abandoned it is actioned as ordinary duty.`n" +
-         "(1) CAPTURE RE-AUDIT: locate the live registry entry by slug and re-run the`n" +
-         "    review prompt's CANONICAL numbered declaration audit against it -- live`n" +
-         "    placement and identity, field set, gap match against this row's citation`n" +
-         "    and the finding text in its verdict artifact, authority, and SEPARABILITY`n" +
-         "    verified against the reviewed tree and diff. Only a PASSING full audit`n" +
-         "    clears the row for pruning; a partial check (gap match alone) can erase`n" +
-         "    duty for an inseparable, runtime-breaking gap. A slug resolving to an`n" +
-         "    entry whose gap does not cover the finding -- a reused slug included --`n" +
-         "    is MISMATCHED: capture never applied, so the row carries ordinary duty.`n" +
-         "(2) Entry gone AND the deferred work landed -> delivered; prune as obsolete.`n" +
-         "(3) Entry gone AND the work never landed -> capture withdrawn; ordinary duty.`n" +
-         "FAIL TOWARD DUTY: a row is cleared ONLY by a passing full audit. Every other`n" +
-         "row -- unbindable, ambiguous, mismatched, or merely not yet actionable --`n" +
-         "carries ordinary repair duty. There is no exempt state.`n" +
-         "<!-- review-followups: capture-doctrine v6 END -->`n`n"
-}
-
-function Get-FollowupIndexTitle {
-  return "# Review follow-ups (non-blocking QUALITY findings)`n`n" +
-         "Append-only index of QUALITY findings from completed passing adversarial-review verdicts and`n" +
-         "of seal-audit stamps (zero-row blocks recording the operator's legacy-seal`n" +
-         "operation). Under the 2026-07 severity contract QUALITY does NOT block (only`n" +
-         "BLOCKER does), so a follow-up session works findings as CLASSES in one pass:`n" +
-         "an UNTAGGED row carries ordinary repair duty, while a [scoped: <slug> tree:`n" +
-         "<oid> diff: <sha256> find: <sha256>] row is a capture CLAIM the doctrine`n" +
-         "below resolves before anything is pruned. Gitignored execution-state.`n"
-}
-
-function Get-FollowupIndexHeader {
-  return (Get-FollowupIndexTitle) +
-         (Get-FollowupCaptureDoctrine)
-}
-
 # Local-install shape verification (docs/local-install-v1.md): a gate
 # file that is UNTRACKED and deliberately IGNORED verifies against the
 # operator-written install manifest in the per-worktree git dir instead of a
@@ -1823,7 +975,7 @@ function Get-CrgLocalInstallVerifiedBytes {
   # CWD -- a subdirectory invocation would probe <subdir>/$RelPath (or
   # an ignored decoy there) while the byte read below hashes the root
   # file. The top level resolves FIRST and every probe runs -C there.
-  $lvTop = ("$(& git rev-parse --show-toplevel 2>$null)").Trim()
+  $lvTop = [string]@(& git rev-parse --show-toplevel 2>$null)[0]
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($lvTop)) { return $null }
   $lvTracked = @(& git -C $lvTop ls-files --cached -- $RelPath 2>$null)
   if ($LASTEXITCODE -ne 0 -or $lvTracked.Count -gt 0) { return $null }
@@ -1833,7 +985,7 @@ function Get-CrgLocalInstallVerifiedBytes {
   # verified gate files are worktree-local, so a common-dir manifest
   # would let one worktree's reseal or refresh silently invalidate
   # every sibling worktree's baseline.
-  $lvGitDir = ("$(& git -C $lvTop rev-parse --absolute-git-dir 2>$null)").Trim()
+  $lvGitDir = [string]@(& git -C $lvTop rev-parse --absolute-git-dir 2>$null)[0]
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($lvGitDir)) { return $null }
   $lvManifest = Join-Path $lvGitDir 'crg-install-manifest'
   if (-not (Test-Path -LiteralPath $lvManifest -PathType Leaf)) { return $null }
@@ -2084,7 +1236,10 @@ function Invoke-PostMergeAuditChild {
   $proc = $null
   try {
     Set-CrgNoReplaceObjects
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $Command) -NoNewWindow -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+    # Quoted as one argv element: an unquoted -Command text would be re-split
+    # by the child's argv parser and rejoined with single spaces, collapsing
+    # whitespace runs inside the quoted path literals.
+    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList (Convert-ToProcArgString -ArgList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $Command)) -NoNewWindow -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
       $timedOut = $true
       $killed = $true
@@ -2237,9 +1392,9 @@ function Get-AuditCaptureRead {
         # The head's last line and the tail's first line are both cut mid-line
         # by the byte boundary; a truncated protocol line would parse as a
         # complete one that simply said less.
-        $capHeadCut = $capHeadText.LastIndexOf("`n")
+        $capHeadCut = $capHeadText.LastIndexOf([char]10)
         $capHeadText = if ($capHeadCut -ge 0) { $capHeadText.Substring(0, $capHeadCut) } else { '' }
-        $capTailCut = $capTailText.IndexOf("`n")
+        $capTailCut = $capTailText.IndexOf([char]10)
         $capTailText = if ($capTailCut -ge 0) { $capTailText.Substring($capTailCut + 1) } else { '' }
       }
     } finally { $capStream.Dispose() }
@@ -2468,7 +1623,7 @@ function Get-CrgSuccessfulReviewProjection {
     if (($dirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return (& $refuse 'review-dir') }
     $expectedBackend = ''
     $expectedTag = ''
-    if ($dirItem.Name -ceq 'codex' -or $dirItem.Name -ceq 'codex-fb1') {
+    if ([string]::Equals($dirItem.Name, 'codex', [System.StringComparison]::Ordinal) -or [string]::Equals($dirItem.Name, 'codex-fb1', [System.StringComparison]::Ordinal)) {
       $expectedBackend = 'codex'
     } elseif ($dirItem.Name -cmatch '\Aclaude-(p[1-3]|fb[1-3])\z') {
       $expectedBackend = 'claude'
@@ -2554,16 +1709,16 @@ function Get-CrgSuccessfulReviewProjection {
     $effortOk = if ($expectedBackend -ceq 'codex') {
       $rows.Count -ge 4 -and $rows[3] -cmatch '\AREVIEW-EFFORT: (?:unknown|minimal|low|medium|high|xhigh|max)\z'
     } else {
-      $rows.Count -ge 4 -and $rows[3] -ceq 'REVIEW-EFFORT: n/a'
+      $rows.Count -ge 4 -and [string]::Equals($rows[3], 'REVIEW-EFFORT: n/a', [System.StringComparison]::Ordinal)
     }
     if ($rows.Count -lt 8 -or
-        $rows[0] -cne "DIFF-SHA256: $ExpectedDiffSha" -or
-        $rows[1] -cne "REVIEW-TREE-OID: $ExpectedTreeOid" -or
-        $rows[2] -cne "REVIEW-BACKEND: $expectedBackend" -or
+        -not [string]::Equals($rows[0], "DIFF-SHA256: $ExpectedDiffSha", [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($rows[1], "REVIEW-TREE-OID: $ExpectedTreeOid", [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($rows[2], "REVIEW-BACKEND: $expectedBackend", [System.StringComparison]::Ordinal) -or
         -not $effortOk -or
-        $rows[4] -cne 'REVIEW-SEVERITY-CONTRACT: blocker-only' -or
+        -not [string]::Equals($rows[4], 'REVIEW-SEVERITY-CONTRACT: blocker-only', [System.StringComparison]::Ordinal) -or
         $rows[5] -cnotmatch '\AREVIEW-DURATION-SECS: (?:0|[1-9][0-9]*)\z' -or
-        $rows[6] -cne '') {
+        -not [string]::Equals($rows[6], '', [System.StringComparison]::Ordinal)) {
       return (& $refuse 'artifact-identity')
     }
     $verdictCount = 0
@@ -2575,8 +1730,8 @@ function Get-CrgSuccessfulReviewProjection {
         return (& $refuse 'artifact-duplicate-identity')
       }
       if ($row -cmatch '\AVERDICT:') {
-        if ($row -ceq 'VERDICT: CLEAN') { }
-        elseif ($row -ceq 'VERDICT: NON-BLOCKING') { $nonBlockingVerdictCount++ }
+        if ([string]::Equals($row, 'VERDICT: CLEAN', [System.StringComparison]::Ordinal)) { }
+        elseif ([string]::Equals($row, 'VERDICT: NON-BLOCKING', [System.StringComparison]::Ordinal)) { $nonBlockingVerdictCount++ }
         else { return (& $refuse 'artifact-verdict') }
         $verdictCount++
         continue
@@ -2603,6 +1758,58 @@ function Get-CrgSuccessfulReviewProjection {
   foreach ($warning in $warnings) { [void]$lines.Add($warning) }
   foreach ($finding in $findings) { [void]$lines.Add($finding) }
   return @{ Ok = $true; Code = ''; Lines = $lines.ToArray() }
+}
+
+# Review-feedback warnings (Write-ReviewFeedbackStatus in
+# scripts/review-common.ps1) for a passed merge: without them a passed merge
+# hid feedback work left undone (merge review, 2026-10-09). Kept apart from
+# Get-CrgSuccessfulReviewProjection on purpose. It reads EVERY launched
+# child, not only the panel that supplied the verdict, because a passing
+# child of a replaced panel may still have written records. It never fails
+# the merge: a line it cannot show becomes a fixed notice instead of a
+# refusal. (Folding these lines into the strict projection was tried and
+# dropped the same day: it read only the accepting panel and could refuse a
+# passed merge.) A child log is whatever the wrapper and its provider tools
+# printed, CRLF endings, escape codes and all, so it is read line by line
+# with invalid bytes replaced and only the matched lines checked; the strict
+# Read-CrgSuccessfulReviewEvidence would drop a whole child's warnings for
+# one stray control character elsewhere in its log. The text is only shown,
+# never acted on, so no handle identity check is needed. The writer's
+# messages name no provider; the tag naming the wrapper is removed. Count
+# lines are not shown: the merge PASS line counts after every child. At most
+# 32 warnings, the rest counted.
+function Get-CrgReviewFeedbackStatusLines {
+  param([string[]]$ChildDirs)
+  $found = New-Object 'System.Collections.Generic.SortedSet[string]' ([System.StringComparer]::Ordinal)
+  $seenDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  foreach ($dir in @($ChildDirs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $seenDirs.Add([string]$_) })) {
+    # The launcher creates the log before launch, so even a missing one is a
+    # child whose warnings cannot be shown. The size limit is the strict
+    # reader's.
+    $stream = $null
+    $reader = $null
+    try {
+      $stream = [System.IO.FileStream]::new((Join-Path $dir 'child-stdout.log'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite, 65536, [System.IO.FileOptions]::SequentialScan)
+      $reader = [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::new($false, $false), $false)
+      if ($stream.Length -gt 67108864) { throw 'the log is too large' }
+      while ($null -ne ($line = $reader.ReadLine())) {
+        if ($line -cnotmatch '\A\[auto-review(?::claude)?\] (review-feedback WARN: .*)\z') { continue }
+        $warning = $Matches[1]
+        if ([System.Text.Encoding]::UTF8.GetByteCount($warning) -gt 4096 -or $warning -cmatch '[\x00-\x1F\x7F]' -or $warning -cnotmatch '\Areview-feedback WARN: \S(?:.*\S)?\z') {
+          $warning = 'review-feedback WARN: a review-feedback line was not in the expected form and is not shown'
+        }
+        [void]$found.Add($warning)
+      }
+    } catch {
+      [void]$found.Add('review-feedback WARN: the review-feedback lines of one review child could not be read')
+    } finally {
+      if ($null -ne $reader) { $reader.Dispose() } elseif ($null -ne $stream) { $stream.Dispose() }
+    }
+  }
+  $lines = @($found | Select-Object -First 32)
+  if ($found.Count -gt 32) { $lines += "review-feedback WARN: $($found.Count - 32) further review-feedback warnings are not shown" }
+  return $lines
 }
 
 function Publish-CrgSuccessfulReviewProjection {
@@ -2635,7 +1842,7 @@ function Get-CrgBranchReviewExpectedIdentity {
     $objectRows = @(& git -C $RepoRoot rev-parse --git-path objects 2>$null)
     $objectExit = $LASTEXITCODE
     if ($objectExit -ne 0 -or $objectRows.Count -ne 1) { return (& $bad 'objects') }
-    $sourceObjectsRaw = ([string]$objectRows[0]).Trim()
+    $sourceObjectsRaw = [string]$objectRows[0]
     if ([string]::IsNullOrWhiteSpace($sourceObjectsRaw) -or $sourceObjectsRaw.IndexOfAny([char[]]@("`r", "`n")) -ge 0) { return (& $bad 'objects') }
     $sourceObjects = if ([System.IO.Path]::IsPathRooted($sourceObjectsRaw)) {
       [System.IO.Path]::GetFullPath($sourceObjectsRaw)
@@ -2727,7 +1934,7 @@ function Get-CrgBranchReviewExpectedIdentity {
 
     $probePath = 'nested/crg-success-projection-probe.txt'
     $probe = & $invokePrivate @('-c', "core.attributesFile=$canary", 'check-attr', '--cached', 'diff', '--', $probePath)
-    if ($probe.Exit -ne 0 -or $probe.Out.Trim() -cne "$probePath`: diff: unspecified") { return (& $bad 'attribute-reset') }
+    if ($probe.Exit -ne 0 -or -not [string]::Equals($probe.Out.Trim(), "$probePath`: diff: unspecified", [System.StringComparison]::Ordinal)) { return (& $bad 'attribute-reset') }
     $patchPath = Join-Path $root 'DIFF.patch'
     $patch = & $invokePrivate @('-c', "core.attributesFile=$canary", '-c', 'core.quotePath=false',
       'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--ignore-submodules=none',
@@ -2791,10 +1998,10 @@ function Publish-ReviewFailureTranscripts {
 }
 
 function Get-CrgGateUntrackList {
-  return @('scripts/codex/auto-review.ps1', 'scripts/codex/auto-merge.ps1', 'scripts/shared/auto-merge.ps1', 'scripts/codex/commit.ps1', 'scripts/shared/analyze-blocker-trends.ps1', 'scripts/shared/author-lint.ps1', 'scripts/shared/dispatch-checklist.ps1', 'scripts/shared/worker-audit.ps1', 'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1', 'scripts/claude/commit.ps1', 'scripts/git-hooks/pre-commit', 'scripts/run-gate.sh', 'scripts/render-project-values.ps1', 'docs/AGENTS.md.template', 'docs/audit-protocol.md')
+  return @('scripts/codex/auto-review.ps1', 'scripts/codex/auto-merge.ps1', 'scripts/shared/auto-merge.ps1', 'scripts/codex/commit.ps1', 'scripts/shared/analyze-blocker-trends.ps1', 'scripts/shared/author-lint.ps1', 'scripts/shared/dispatch-checklist.ps1', 'scripts/shared/worker-audit.ps1', 'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1', 'scripts/claude/commit.ps1', 'scripts/git-hooks/pre-commit', 'scripts/run-gate.sh', 'scripts/render-project-values.ps1', 'scripts/review-liveness.psm1', 'scripts/review-common.ps1', 'docs/AGENTS.md.template', 'docs/audit-protocol.md')
 }
 function Test-CrgGateUntrackSanctioned {
-  return ($env:CROSS_REVIEW_ALLOW_GATE_UNTRACK -eq '1')
+  return [string]::Equals($env:CROSS_REVIEW_ALLOW_GATE_UNTRACK, '1', [System.StringComparison]::Ordinal)
 }
 # Range scan for a gate-component removal (deletion or rename-away)
 # across base..tip -- the aggregate diff is the landing's net effect.
@@ -2812,7 +2019,7 @@ function Get-CrgRangeGateRemoval {
   foreach ($guLine in $guNs) {
     $guCols = "$guLine" -split "`t"
     if ($guCols.Count -lt 2) { continue }
-    if ((($guCols[0] -clike 'D*') -or ($guCols[0] -clike 'R*')) -and ($guList -ccontains $guCols[1])) { return @{ Ok = $true; Removed = $guCols[1] } }
+    if ((($guCols[0].StartsWith('D', [System.StringComparison]::Ordinal)) -or ($guCols[0].StartsWith('R', [System.StringComparison]::Ordinal))) -and ([Array]::IndexOf([string[]]$guList, [string]$guCols[1]) -ge 0)) { return @{ Ok = $true; Removed = $guCols[1] } }
   }
   return @{ Ok = $true; Removed = $null }
 }
@@ -2848,344 +2055,6 @@ function Resolve-CrgTrustedInfraSource {
   $tiLines = & git show "${BaseSha}:$RelPath"
   if ($LASTEXITCODE -ne 0) { return $null }
   return @{ Kind = 'base'; Text = (($tiLines -join "`n") + "`n") }
-}
-
-# Highest COMPLETE frame version present, plus the LAST complete frame at that
-# version -- the pair the monotonic rule decides on. A marker counts only as a
-# COMPLETE LINE: text before or after it means the line is prose mentioning the
-# marker, not a frame boundary (the sh writer scans line-oriented for the same
-# reason).
-function Get-FollowupDoctrineFrameState {
-  param([string]$ExistingText)
-  # WinnerIndex is the winning frame's BEGIN position: admissibility of a
-  # lower-version frame depends on whether the winner sits ABOVE it, so the
-  # version alone is not enough.
-  $state = @{ MaxVersion = [System.Numerics.BigInteger]::Zero; Frame = ''; WinnerIndex = -1 }
-  if ([string]::IsNullOrEmpty($ExistingText)) { return $state }
-  $open = @{}
-  foreach ($m in [regex]::Matches($ExistingText, '(?m)^<!-- review-followups: capture-doctrine v(?<v>[0-9]+) (?<kind>BEGIN|END) -->\r?$')) {
-    $v = [System.Numerics.BigInteger]::Parse($m.Groups['v'].Value, [System.Globalization.CultureInfo]::InvariantCulture)
-    if ($m.Groups['kind'].Value -eq 'BEGIN') { $open[$v] = $m.Index; continue }
-    if (-not $open.ContainsKey($v)) { continue }
-    if ($v -ge $state.MaxVersion) {
-      $state.MaxVersion = $v
-      # $m.Length spans the optional CR, so a CRLF index yields the frame's RAW
-      # bytes -- the sh validator compares the same bytes, so both sides reach
-      # the same verdict on the same file.
-      $state.Frame = $ExistingText.Substring($open[$v], $m.Index + $m.Length - $open[$v])
-      $state.WinnerIndex = $open[$v]
-    }
-    [void]$open.Remove($v)
-  }
-  return $state
-}
-
-# Appends the current frame unless the file already carries it as the WINNING
-# frame under the monotonic rule. Deciding on the validator rather than on
-# marker presence is what makes a torn or superseded write self-healing: the old
-# text stays, the complete frame lands below it, and version-then-position
-# decides which one a reader honors -- append-only, never a rewrite that could
-# clobber a concurrent writer.
-function Test-FollowupDoctrineCurrent {
-  param([string]$ExistingText)
-  $state = Get-FollowupDoctrineFrameState -ExistingText $ExistingText
-  if ($state.MaxVersion -eq 0) { return $false }
-  # A version this writer does not know already governs the file: an older frame
-  # appended below could not supersede it, and a reader that does not know that
-  # version must not act on this one either.
-  if ($state.MaxVersion -gt (Get-FollowupCaptureDoctrineVersion)) { return $true }
-  if ($state.MaxVersion -lt (Get-FollowupCaptureDoctrineVersion)) { return $false }
-  return ($state.Frame -ceq ((Get-FollowupCaptureDoctrine).Trim("`r", "`n")))
-}
-
-function Get-FollowupDoctrineMigration {
-  param([string]$ExistingText)
-  if ([string]::IsNullOrEmpty($ExistingText)) { return '' }
-  # Emission keys on REGION PRESENCE, not on the winning frame's byte
-  # currency: once any v6 presence exists -- an OPEN, a byte-valid current
-  # frame, or a paired future frame -- the frame is admissible only in the
-  # transaction that OPENED the region, so re-emitting it here would land a
-  # same-version frame in a non-opening interval the validator rejects and
-  # wedge every later append. A buried corrupt current frame is DAMAGE for
-  # the prune to deny, never a migration trigger.
-  if ((Get-FollowupRegionState -Text $ExistingText).Present) { return '' }
-  if (Test-FollowupDoctrineCurrent -ExistingText $ExistingText) { return '' }
-  return (Get-FollowupCaptureDoctrine)
-}
-
-# CROSS-WRITER APPEND LOCK, the same sidecar-directory protocol the pre-commit
-# hook uses (`<index>.lock`: a directory whose CREATION is the test-and-set).
-# The exclusive FileStream below still serializes THIS process's write; the lock
-# is what a POSIX-sh writer can also honor, so the atomicity unit -- the whole
-# transaction of header, doctrine frame and rows -- holds across every writer of
-# this index rather than only the .NET ones.
-# Acquisition writes an owner marker naming the holder; a lock that cannot be
-# taken within the retry budget DROPS this record with a WARN naming the lock,
-# its marker and its age. An operator clears crash residue; nothing reclaims it
-# automatically.
-#
-# NO AUTOMATIC TAKEOVER. Aging a lock out and reclaiming it was built and taken
-# back out: the pre-commit hook is a co-equal writer of this index, and in
-# portable sh every step of a reclaim is a PATH check (`test`, `mkdir`, `mv`),
-# which reports what was true at some past instant, never what holds during the
-# write that follows. A holder that resumes mid-reclaim cannot be fenced there,
-# so the reclaim could let two writers append at once. Since the runtimes must
-# agree, .NET does not reclaim either. Do not rebuild takeover without an
-# OS-fenced primitive every runtime can honor.
-
-# The acquire is a DIRECT CreateDirectoryW, not New-Item and not `cmd /c mkdir`.
-# Both alternatives were measured and both are unusable here:
-#   * `New-Item -ItemType Directory` is NOT a test-and-set -- the provider raises
-#     "already exists" from a PRE-CHECK while the underlying create is
-#     idempotent, so under contention it hands the lock to every contender.
-#   * `cmd /c mkdir` is atomic, but re-parses its argument as a COMMAND LINE: a
-#     lock path containing `&` ran the tail as a second command in the probe.
-# CreateDirectoryW has neither defect -- one syscall, no shell parsing, and
-# ERROR_ALREADY_EXISTS distinguishable from every other failure.
-# The Add-Type NAME is process-global, so it is identical in every writer: two
-# copies under one name would collide, and two names would be two shims for one
-# protocol.
-$script:CrgLockNativeState = ''
-function Initialize-CrgLockNative {
-  if ($script:CrgLockNativeState) { return $script:CrgLockNativeState }
-  if ('CrgLockNative' -as [type]) { $script:CrgLockNativeState = 'ok'; return 'ok' }
-  try {
-    Add-Type -Namespace '' -Name 'CrgLockNative' -ErrorAction Stop -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool CreateDirectory(string lpPathName, IntPtr lpSecurityAttributes);
-'@
-    $script:CrgLockNativeState = 'ok'
-  } catch {
-    $script:CrgLockNativeState = 'unavailable'
-  }
-  return $script:CrgLockNativeState
-}
-
-# 'created' | 'exists' | 'unavailable' | 'error:<win32>'. Anything but 'created'
-# leaves the caller without the lock; only 'created' is exclusive ownership.
-function New-ExclusiveDirectory {
-  param([string]$Path)
-  if ((Initialize-CrgLockNative) -ne 'ok') { return 'unavailable' }
-  if ([CrgLockNative]::CreateDirectory($Path, [IntPtr]::Zero)) { return 'created' }
-  $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-  # ERROR_ALREADY_EXISTS: someone else holds it, or a foreign object sits there.
-  if ($code -eq 183) { return 'exists' }
-  return "error:$code"
-}
-
-# The marker names the holder for diagnostics, and the release compares it
-# byte-for-byte against the token this writer wrote. That catches a release whose
-# token DIFFERS from the standing marker -- another process, or this one from a
-# different second -- and stops exactly there. It is not an authenticity check
-# and cannot be one: the marker sits at a workspace-readable path and its bytes
-# are deterministic, so any process that can read it can reproduce it.
-#
-# BOTH LEVELS ARE CLASSIFIED, the lock directory before the marker inside it. A
-# reparse point at `<index>.lock` redirects resolution before `owner` is ever
-# examined, so checking the leaf alone secures nothing. Non-regular nodes are
-# refused before any open, because a byte cap is no defence against a node that
-# BLOCKS on open. The refusal is NOT absolute: the classification and the open
-# are separate calls, so a node swapped between them is still opened -- closing
-# that needs a no-follow open neither runtime has. The POSIX writer refuses the
-# same node classes at both levels, so the two accept sets move together.
-function Read-FollowupLockMarker {
-  param([string]$LockDir)
-  $result = @{ State = 'unreadable'; Bytes = (New-Object byte[] 0); Count = 0 }
-  try {
-    $markerPath = Join-Path $LockDir 'owner'
-    $lockAttrs = [System.IO.File]::GetAttributes($LockDir)
-    if ((($lockAttrs -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
-        (($lockAttrs -band [System.IO.FileAttributes]::Directory) -eq 0)) {
-      $result.State = 'nonregular'
-      return $result
-    }
-    $attrs = [System.IO.File]::GetAttributes($markerPath)
-    if ((($attrs -band [System.IO.FileAttributes]::Directory) -ne 0) -or
-        (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
-      $result.State = 'nonregular'
-      return $result
-    }
-    # FileShare must include Delete: without it this read DENIES the holder's own
-    # cleanup, so a diagnostic peek by any process could block the release that
-    # frees the index for everyone.
-    $fs = [System.IO.File]::Open($markerPath, [System.IO.FileMode]::Open,
-                                 [System.IO.FileAccess]::Read,
-                                 ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
-    try {
-      $buf = New-Object byte[] 512
-      $read = 0
-      while ($read -lt $buf.Length) {
-        # A short read is not end-of-file; treating it as one would report a slow
-        # writer's marker as truncated.
-        $n = $fs.Read($buf, $read, $buf.Length - $read)
-        if ($n -le 0) { break }
-        $read += $n
-      }
-      $result.Bytes = $buf
-      $result.Count = $read
-      $result.State = 'ok'
-    } finally { $fs.Dispose() }
-  } catch {
-    # PowerShell wraps a .NET method fault in MethodInvocationException, so the
-    # innermost exception is what carries the distinction worth reporting.
-    $ex = $_.Exception
-    while ($ex.InnerException) { $ex = $ex.InnerException }
-    if ($ex -is [System.IO.FileNotFoundException] -or $ex -is [System.IO.DirectoryNotFoundException]) {
-      $result.State = 'missing'
-    } else {
-      $result.State = 'unreadable'
-    }
-  }
-  return $result
-}
-
-
-# The release compares the WHOLE marker against what acquisition wrote: the token
-# plus its single LF terminator. STATUS IS STRUCTURED, not collapsed to a
-# boolean: a node this reader refuses and a read it could not complete are NOT
-# the claim "these bytes differ", and only the last one says anything about
-# ownership.
-function Get-FollowupLockMarkerMatch {
-  param([string]$LockDir, [string]$Token)
-  if ([string]::IsNullOrEmpty($Token)) { return 'mismatch' }
-  $expected = [System.Text.Encoding]::UTF8.GetBytes("$Token`n")
-  $read = Read-FollowupLockMarker -LockDir $LockDir
-  # An absent marker is a genuine non-match; every other non-ok state is a read
-  # this writer could not complete and must not describe as ownership.
-  if ($read.State -ceq 'missing') { return 'mismatch' }
-  if ($read.State -ne 'ok') { return $read.State }
-  # A token the bounded read cannot confirm -- one that reaches or passes the
-  # read's own size -- leaves no room to prove the marker has no tail behind it,
-  # so it is refused rather than compared against a truncation.
-  if ($expected.Length -ge $read.Bytes.Length) { return 'uncomparable' }
-  if ($read.Count -ne $expected.Length) { return 'mismatch' }
-  for ($i = 0; $i -lt $expected.Length; $i++) {
-    if ($read.Bytes[$i] -ne $expected[$i]) { return 'mismatch' }
-  }
-  return 'match'
-}
-
-
-# Display form, ASCII WHITELIST: printable ASCII passes through and EVERYTHING
-# else renders as an escape. Another process's bytes reach an operator's terminal
-# through here, and a blacklist keeps losing to the next character class nobody
-# enumerated.
-function Get-FollowupLockMarkerDisplay {
-  param([string]$LockDir)
-  $read = Read-FollowupLockMarker -LockDir $LockDir
-  # The non-regular wording matches what the POSIX writer prints, so an operator
-  # reading either runtime's WARN meets one phrase for one state.
-  if ($read.State -eq 'nonregular') { return '[unreadable marker: not a regular file]' }
-  if ($read.State -eq 'unreadable') { return '[unreadable marker]' }
-  if ($read.Count -le 0) { return 'no marker' }
-  $raw = [System.Text.Encoding]::UTF8.GetString($read.Bytes, 0, $read.Count)
-  $out = New-Object System.Text.StringBuilder
-  foreach ($ch in $raw.ToCharArray()) {
-    if ($ch -eq "`n" -or $ch -eq "`r") { break }
-    $code = [int][char]$ch
-    $piece = if ($code -ge 32 -and $code -le 126) { [string]$ch } else { '\u{0:x4}' -f $code }
-    # Checked BEFORE appending so the cap never truncates an escape mid-sequence.
-    if ($out.Length + $piece.Length -gt 120) { break }
-    [void]$out.Append($piece)
-  }
-  if ($out.Length -eq 0) { return 'no marker' }
-  return $out.ToString()
-}
-
-function Get-FollowupLockAgeDisplay {
-  param([string]$LockDir)
-  try {
-    $item = Get-Item -LiteralPath $LockDir -Force -ErrorAction Stop
-    return ('{0}s' -f [long]((Get-Date) - $item.CreationTime).TotalSeconds)
-  } catch { return 'unknown' }
-}
-
-# Returns the marker this writer wrote, or the empty string when the lock could
-# not be taken; the caller passes it back to the release so a writer cannot
-# remove a lock it does not hold.
-function Enter-FollowupIndexLock {
-  param([string]$IndexPath, [int]$MaxTries = 10, [string]$LogTag = 'auto-merge',
-        [string]$DropConsequence = 'dropping this follow-up record, the merge still stands')
-  $lock = "$IndexPath.lock"
-  $markerPath = Join-Path $lock 'owner'
-  $self = "$LogTag`:$PID`:$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-  for ($i = 0; $i -lt $MaxTries; $i++) {
-    $made = New-ExclusiveDirectory -Path $lock
-    if ($made -eq 'unavailable') {
-      # A shim that would not compile says nothing about the lock directory: a
-      # POSIX writer or a crashed writer's residue can already be sitting there.
-      # The holder and age are therefore REPORTED rather than denied, and only
-      # the arbitration itself is named as unavailable.
-      Write-Host "[$LogTag] WARN: this host cannot arbitrate the follow-up index lock at $lock - the CreateDirectory shim would not compile (Add-Type failed), so this writer cannot take the lock whatever its state (holder: '$(Get-FollowupLockMarkerDisplay -LockDir $lock)', age $(Get-FollowupLockAgeDisplay -LockDir $lock)); $DropConsequence. If that names a holder and no writer is alive, remove that directory by hand: nothing reclaims it automatically."
-      return ''
-    }
-    if ($made -eq 'created') {
-      $mine = "$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $self"
-      # A marker the release could never verify must not be written: the
-      # comparison reads a bounded prefix, so an over-long LogTag would take a
-      # lock this writer could not afterwards give back.
-      if ([System.Text.Encoding]::UTF8.GetByteCount("$mine`n") -ge 512) {
-        Write-Host "[$LogTag] WARN: this log tag produces an owner marker the release cannot confirm inside its bounded read, so the lock could not be given back - $DropConsequence."
-        try { [System.IO.Directory]::Delete($lock) } catch {
-          Write-Host "[$LogTag] WARN: could not remove $lock after refusing to mark it - remove it by hand"
-        }
-        return ''
-      }
-      try {
-        [System.IO.File]::WriteAllText($markerPath, "$mine`n")
-        return $mine
-      } catch {
-        Write-Host "[$LogTag] WARN: could not write the owner marker in $lock - releasing the markerless lock and retrying"
-        try { [System.IO.File]::Delete($markerPath) } catch { }
-        try { [System.IO.Directory]::Delete($lock) } catch {
-          Write-Host "[$LogTag] WARN: could not remove $lock after a failed acquisition - remove it by hand"
-        }
-      }
-    } elseif ($made -ne 'exists') {
-      Write-Host "[$LogTag] WARN: could not create $lock ($made) - retrying"
-    }
-    Start-Sleep -Milliseconds 200
-  }
-  Write-Host "[$LogTag] WARN: could not take the follow-up index lock at $lock (holder: '$(Get-FollowupLockMarkerDisplay -LockDir $lock)', age $(Get-FollowupLockAgeDisplay -LockDir $lock)) - $DropConsequence. If no writer is alive, remove that directory by hand: nothing reclaims it automatically."
-  return ''
-}
-
-function Exit-FollowupIndexLock {
-  param([string]$IndexPath, [string]$Token, [string]$LogTag = 'auto-merge')
-  $lock = "$IndexPath.lock"
-  if ([string]::IsNullOrEmpty($Token)) {
-    Write-Host "[$LogTag] WARN: release of $lock called without a marker - removing nothing"
-    return $false
-  }
-  # Only a byte MISMATCH licenses the ownership wording. A refused node or a
-  # failed read means this writer never learned whose lock it is, and saying
-  # otherwise sends an operator hunting a holder the reader never saw.
-  $markerState = Get-FollowupLockMarkerMatch -LockDir $lock -Token $Token
-  if ($markerState -cne 'match') {
-    if ($markerState -ceq 'mismatch') {
-      Write-Host "[$LogTag] WARN: $lock does not carry this writer's marker - removing nothing"
-    } else {
-      Write-Host "[$LogTag] WARN: the owner marker in $lock could not be read for comparison ($markerState) - removing nothing; the lock stays until a reader can confirm it or an operator clears it"
-    }
-    return $false
-  }
-  # The directory removal can fail transiently while another process still holds
-  # the marker open (the delete-pending window, where a deleted name survives
-  # until the last handle closes). That window is host- and filesystem-dependent
-  # rather than universal, so the retry is here for the hosts that keep it and
-  # falls straight through on the hosts that do not. A failure that outlasts the
-  # retries is REPORTED, never swallowed.
-  $lastFailure = 'unknown'
-  for ($attempt = 0; $attempt -lt 20; $attempt++) {
-    try { [System.IO.File]::Delete((Join-Path $lock 'owner')) } catch { $lastFailure = $_.Exception.GetType().Name }
-    try {
-      [System.IO.Directory]::Delete($lock)
-      return $true
-    } catch { $lastFailure = $_.Exception.GetType().Name }
-    Start-Sleep -Milliseconds 50
-  }
-  Write-Host "[$LogTag] WARN: could not release the follow-up index lock at $lock ($lastFailure) - appends stay blocked until it is removed by hand"
-  return $false
 }
 
 # Does a wrapper script DECLARE a given parameter? Answered from the PARSED
@@ -3232,7 +2101,7 @@ function Get-WrapperParameterDeclaration {
     if ($null -eq $ast) { return 'unknown' }
     if ($null -eq $ast.ParamBlock) { return 'absent' }
     foreach ($p in $ast.ParamBlock.Parameters) {
-      if ($p.Name.VariablePath.UserPath -ieq $ParamName) { return 'declared' }
+      if ([string]::Equals($p.Name.VariablePath.UserPath, $ParamName, [System.StringComparison]::OrdinalIgnoreCase)) { return 'declared' }
     }
     return 'absent'
   } catch {
@@ -3307,459 +2176,6 @@ function Get-ReviewChildArgs {
   return $childArgs
 }
 
-# Is the index's last transaction COMPLETE? Every writer ends its transaction with
-# a line break, so a nonempty index whose final byte is not one was cut off
-# mid-write. PURE, and the test is on BYTES: the decode this file applies
-# elsewhere is deliberately tolerant, and a tolerant decode can turn a damaged
-# tail into a well-formed string, which is the one answer that must not be
-# reachable here. Only LF counts -- a CRLF index still ends in LF, and no writer
-# emits a bare CR -- so both runtimes' checks accept exactly the same tails. An
-# EMPTY index holds no transaction that could have been cut off, so it is
-# appendable, and the sh helper carries the matching arm for it.
-function Test-FollowupIndexTerminated {
-  param([byte[]]$Existing)
-  if ($null -eq $Existing -or $Existing.Length -eq 0) { return $true }
-  return ($Existing[$Existing.Length - 1] -eq 10)
-}
-
-# ---- capture-doctrine v6 transaction machinery ----
-# ONE completeness specification (docs/capture-doctrine-v6.md), asked at every
-# boundary: the append gate on the final OPEN interval, the promoter on a
-# pending payload, the destructive reader on every interval. Each runtime
-# implements the same accept set separately.
-
-function Get-FollowupTransactionOpenMarker {
-  return '<!-- review-followups: transaction v1 OPEN -->'
-}
-
-# Lowercase-hex SHA-256 over the string's UTF-8 (no BOM) bytes: the digest side
-# of transaction records and legacy seals alike.
-function Get-FollowupSha256Hex {
-  param([string]$Text)
-  $enc = New-Object System.Text.UTF8Encoding($false)
-  $sha = [System.Security.Cryptography.SHA256]::Create()
-  try { $bytes = $sha.ComputeHash($enc.GetBytes($Text)) } finally { $sha.Dispose() }
-  return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
-}
-
-# Strict decode for v6 validation: invalid UTF-8 REFUSES rather than being
-# repaired into replacement characters -- bytes the record's digest never
-# covered, which would re-encode differently than they arrived.
-function Get-FollowupStrictText {
-  param([byte[]]$Bytes)
-  $strict = New-Object System.Text.UTF8Encoding($false, $true)
-  try { return @{ Ok = $true; Text = $strict.GetString($Bytes) } } catch { return @{ Ok = $false; Text = '' } }
-}
-
-# One-byte-per-char decode (ISO-8859-1) for MARKER scanning over arbitrary
-# bytes: char offsets equal byte offsets, the ASCII marker lines match
-# exactly, and an invalid-UTF-8 byte can never fabricate or hide one. The
-# scan may run over legacy bytes the doctrine does not require to be valid
-# UTF-8; only the bytes needing STRUCTURAL validation are decoded strictly.
-function Get-FollowupScanText {
-  param([byte[]]$Bytes)
-  return ([System.Text.Encoding]::GetEncoding(28591)).GetString($Bytes)
-}
-
-# SHA-256 over raw bytes: the legacy region is hashed AS BYTES -- it need not
-# be valid UTF-8, so a string round-trip could change what was hashed.
-function Get-FollowupSha256HexBytes {
-  param([byte[]]$Bytes)
-  $sha = [System.Security.Cryptography.SHA256]::Create()
-  try { $h = $sha.ComputeHash($Bytes) } finally { $sha.Dispose() }
-  return (($h | ForEach-Object { $_.ToString('x2') }) -join '')
-}
-
-
-# Anchored, byte-exact record grammar. rows= rides as a DIGIT STRING: an
-# oversized value must fail its equality test, never overflow a parse.
-function Test-FollowupRecordLine {
-  param([string]$Line)
-  $m = [regex]::Match($Line, '^<!-- review-followups: transaction v1 rows=(0|[1-9][0-9]*) sha256=([0-9a-f]{64}) -->$')
-  if (-not $m.Success) { return @{ Ok = $false } }
-  return @{ Ok = $true; Rows = $m.Groups[1].Value; Sha = $m.Groups[2].Value }
-}
-
-# Anchored, byte-exact legacy-seal grammar. bytes=0 is excluded by grammar: a
-# seal exists only over a nonempty legacy region, so the zero shape is a
-# near-miss, not a production.
-function Test-FollowupSealLine {
-  param([string]$Line)
-  $m = [regex]::Match($Line, '^<!-- review-followups: legacy-seal v1 bytes=([1-9][0-9]*) sha256=([0-9a-f]{64}) -->$')
-  if (-not $m.Success) { return @{ Ok = $false } }
-  return @{ Ok = $true; Bytes = $m.Groups[1].Value; Sha = $m.Groups[2].Value }
-}
-
-# Where the v6 region begins in the RAW text, per the reader-relative frame
-# states: the first OPEN marker or complete, byte-valid frame of THIS version,
-# whichever comes first. A corrupt current frame and every legacy frame trigger
-# nothing; a FUTURE frame never starts a region this reader could validate, but
-# its presence is reported -- it stops the prune outright and routes the append
-# gate to arm 3. Marker matches are strict single lines: a CR-bearing line is a
-# foreign terminator, not a marker.
-function Get-FollowupRegionState {
-  param([string]$Text)
-  $openIdx = -1; $lastOpen = -1; $openCount = 0
-  foreach ($om in [regex]::Matches($Text, '(?m)^' + [regex]::Escape((Get-FollowupTransactionOpenMarker)) + '$')) {
-    $openCount++
-    if ($openIdx -lt 0) { $openIdx = $om.Index }
-    $lastOpen = $om.Index
-  }
-  # A byte-valid current frame is the canonical BEGIN..END lines exactly, at a
-  # line start. Core = the doctrine constant minus its leading separator and
-  # trailing blank line (both are the APPEND's framing, not the frame's).
-  $doctrine = Get-FollowupCaptureDoctrine
-  $core = $doctrine.Substring(1, $doctrine.Length - 2)
-  $frameIdx = -1
-  $searchFrom = 0
-  while ($true) {
-    $i = $Text.IndexOf($core, $searchFrom, [System.StringComparison]::Ordinal)
-    if ($i -lt 0) { break }
-    if ($i -eq 0 -or $Text[$i - 1] -eq "`n"[0]) { $frameIdx = $i; break }
-    $searchFrom = $i + 1
-  }
-  # Future presence requires a COMPLETE (paired) frame: a stray future BEGIN
-  # line is damage, not governance by a later doctrine.
-  $fstate = Get-FollowupDoctrineFrameState -ExistingText $Text
-  $future = ($fstate.MaxVersion -gt ([System.Numerics.BigInteger](Get-FollowupCaptureDoctrineVersion)))
-  $regionStart = -1
-  if ($openIdx -ge 0 -and $frameIdx -ge 0) { $regionStart = [Math]::Min($openIdx, $frameIdx) }
-  elseif ($openIdx -ge 0) { $regionStart = $openIdx }
-  elseif ($frameIdx -ge 0) { $regionStart = $frameIdx }
-  return @{
-    Present = (($openIdx -ge 0) -or ($frameIdx -ge 0) -or $future)
-    OpenCount = $openCount; FirstOpenIndex = $openIdx; LastOpenIndex = $lastOpen
-    FrameIndex = $frameIdx; RegionStart = $regionStart; FuturePresent = $future
-    FutureIndex = $(if ($future) { $fstate.WinnerIndex } else { -1 })
-  }
-}
-
-# One OPEN interval judged COMPLETE or not -- the shared predicate. The interval
-# starts at its OPEN line's first byte and runs to the next OPEN or the end of
-# the text. AtFileStart gates title admissibility, FrameAdmissible gates a
-# current-version frame in the prefix (the region's first transaction), and
-# LegacyLen (a digit string) gates seal admissibility. Reasons are fixed,
-# display-safe strings -- interval bytes are workspace-writable and are never
-# echoed.
-function Test-FollowupIntervalComplete {
-  param([string]$IntervalText, [bool]$AtFileStart, [bool]$FrameAdmissible, [bool]$FrameRequired, [string]$LegacyLen)
-  if ($IntervalText.Contains("`r")) {
-    return @{ Ok = $false; Reason = 'a carriage return inside a transaction, a terminator no writer emits' }
-  }
-  $openLine = (Get-FollowupTransactionOpenMarker) + "`n"
-  if (-not $IntervalText.StartsWith($openLine, [System.StringComparison]::Ordinal)) {
-    return @{ Ok = $false; Reason = 'an interval that does not begin at an OPEN marker line' }
-  }
-  $rest = $IntervalText.Substring($openLine.Length)
-  # The prefix production, in order, each element at most once (§2) -- and the
-  # REQUIRED elements are enforced, not merely admitted: the title whenever
-  # the OPEN begins the file, the frame in the region-opening transaction.
-  $title = Get-FollowupIndexTitle
-  $doctrine = Get-FollowupCaptureDoctrine
-  if ($FrameRequired) {
-    # Prefix rule 1's era branch: the title is byte-checked ONLY when the
-    # frame sharing a first transaction is this reader's OWN version. A
-    # region-opening interval carrying a complete OLDER-era frame pair is
-    # legacy-era creation: its title span and frame bytes are skipped
-    # unvalidated -- writers deliberately carry no retired canonical bytes,
-    # and byte-checking here would strand every index a later bump leaves
-    # behind -- while row-shaped lines in the span stay classified by the
-    # exemption scanner and the block below stays fully validated. A FUTURE
-    # era is the non-skippable reverse case: under future governance
-    # FrameRequired is false, so this branch never sees it and the title
-    # refusal below stands.
-    if (-not $AtFileStart -and $rest.StartsWith($title, [System.StringComparison]::Ordinal)) {
-      return @{ Ok = $false; Reason = 'title prose in a transaction whose OPEN does not begin the file' }
-    }
-    $own = $rest
-    if ($AtFileStart) {
-      $own = if ($own.StartsWith($title, [System.StringComparison]::Ordinal)) { $own.Substring($title.Length) } else { $null }
-    }
-    if ($null -ne $own -and $own.StartsWith($doctrine, [System.StringComparison]::Ordinal)) {
-      # FrameAdmissible is consulted on every frame consumption, as the
-      # docblock contracts. Every production caller computes it true when
-      # the region-opening prefix itself carries the frame (FrameIndex is
-      # the FIRST byte-valid frame), so this refusal holds the contract
-      # for other callers rather than a reachable production state.
-      if (-not $FrameAdmissible) { return @{ Ok = $false; Reason = 'a doctrine frame outside the transaction that begins the region or raises the version' } }
-      $rest = $own.Substring($doctrine.Length)
-    } else {
-      $begin = [regex]::Match($rest, '(?m)^<!-- review-followups: capture-doctrine v(?<ver>[0-9]+) BEGIN -->$')
-      $olderCut = -1
-      # A MIGRATION frame sits at index 1 exactly -- behind the lone
-      # separator LF every producer's frame constant leads with (the line
-      # anchor makes index 1 imply that LF). A first-creation title span is
-      # arbitrary in CONTENT but not in boundary: the BEGIN must follow the
-      # span's terminating LF plus the frame's leading blank separator. The
-      # END line's terminator and the trailing bounding blank line are
-      # REQUIRED in both forms: the prefix production is exact
-      # (docs/capture-doctrine-v6.md section 2).
-      if ($begin.Success -and
-          (($AtFileStart -and $begin.Index -ge 2 -and $rest[$begin.Index - 2] -eq "`n"[0]) -or
-           ((-not $AtFileStart) -and $begin.Index -eq 1)) -and
-          ([System.Numerics.BigInteger]::Parse($begin.Groups['ver'].Value) -lt [System.Numerics.BigInteger](Get-FollowupCaptureDoctrineVersion))) {
-        $end = [regex]::Match($rest.Substring($begin.Index), '(?m)^<!-- review-followups: capture-doctrine v' + $begin.Groups['ver'].Value + ' END -->$')
-        if ($end.Success) {
-          $endAt = $begin.Index + $end.Index + $end.Length
-          if (($endAt + 1) -lt $rest.Length -and $rest[$endAt] -eq "`n"[0] -and $rest[$endAt + 1] -eq "`n"[0]) {
-            $olderCut = $endAt + 2
-          }
-        }
-      }
-      if ($olderCut -lt 0) {
-        if ($AtFileStart -and -not $rest.StartsWith($title, [System.StringComparison]::Ordinal)) {
-          return @{ Ok = $false; Reason = 'a first-creation transaction without its pinned title prose' }
-        }
-        return @{ Ok = $false; Reason = 'a region-opening transaction without its doctrine frame' }
-      }
-      $rest = $rest.Substring($olderCut)
-    }
-  } else {
-    if ($rest.StartsWith($title, [System.StringComparison]::Ordinal)) {
-      if (-not $AtFileStart) { return @{ Ok = $false; Reason = 'title prose in a transaction whose OPEN does not begin the file' } }
-      $rest = $rest.Substring($title.Length)
-    } elseif ($AtFileStart) {
-      return @{ Ok = $false; Reason = 'a first-creation transaction without its pinned title prose' }
-    }
-    if ($rest.StartsWith($doctrine, [System.StringComparison]::Ordinal)) {
-      if (-not $FrameAdmissible) { return @{ Ok = $false; Reason = 'a doctrine frame outside the transaction that begins the region or raises the version' } }
-      $rest = $rest.Substring($doctrine.Length)
-    }
-  }
-  $nl = $rest.IndexOf([char]10)
-  if ($nl -ge 0) {
-    $seal = Test-FollowupSealLine -Line $rest.Substring(0, $nl)
-    if ($seal.Ok) {
-      if ([string]::IsNullOrEmpty($LegacyLen) -or $LegacyLen -eq '0') {
-        return @{ Ok = $false; Reason = 'a legacy seal in a file with no legacy region' }
-      }
-      $rest = $rest.Substring($nl + 1)
-    }
-  }
-  # EXACTLY one block: header line, row lines, the record closing it at its own
-  # LF, then at most one blank line, then nothing.
-  $nl = $rest.IndexOf([char]10)
-  if ($nl -lt 0) { return @{ Ok = $false; Reason = 'a transaction cut before its block header line completed' } }
-  $header = $rest.Substring(0, $nl)
-  if ($header -cnotmatch '^## \S') { return @{ Ok = $false; Reason = 'prefix content beyond the admitted order, or a missing block header' } }
-  $headerAndRows = $header + "`n"
-  $rowCount = 0
-  $rest = $rest.Substring($nl + 1)
-  while ($true) {
-    $nl = $rest.IndexOf([char]10)
-    if ($nl -lt 0) { return @{ Ok = $false; Reason = 'a transaction cut before its record line' } }
-    $line = $rest.Substring(0, $nl)
-    if ($line -cmatch '^- (?:QUALITY|NON-BLOCKER): ') {
-      $headerAndRows += $line + "`n"
-      $rowCount++
-      $rest = $rest.Substring($nl + 1)
-      continue
-    }
-    break
-  }
-  $rec = Test-FollowupRecordLine -Line $line
-  if (-not $rec.Ok) { return @{ Ok = $false; Reason = 'a block without its valid record line where the record is due' } }
-  if ($rec.Rows -cne [string]$rowCount) { return @{ Ok = $false; Reason = 'a record whose row count does not match the rows above it' } }
-  if ($rec.Sha -cne (Get-FollowupSha256Hex -Text $headerAndRows)) { return @{ Ok = $false; Reason = 'a record whose digest does not vouch for the block above it' } }
-  $rest = $rest.Substring($nl + 1)
-  if ($rest -ceq '' -or $rest -ceq "`n") { return @{ Ok = $true; Reason = '' } }
-  return @{ Ok = $false; Reason = "content past the block's record beyond its single separator line" }
-}
-
-# The append gate's tail classifier (§4 arms). RAW bytes in: a BOM refuses
-# before any arm; no v6 presence leaves the retained legacy final-byte-LF rule;
-# any v6 presence validates the FINAL OPEN interval end to end. Damage buried
-# deeper than the final interval is the destructive reader's to deny -- an
-# append cannot hide it.
-function Get-FollowupTailState {
-  param([byte[]]$Existing)
-  if ($null -eq $Existing -or $Existing.Length -eq 0) { return @{ State = 'empty'; Reason = '' } }
-  if ($Existing.Length -ge 3 -and $Existing[0] -eq 0xEF -and $Existing[1] -eq 0xBB -and $Existing[2] -eq 0xBF) {
-    return @{ State = 'bom'; Reason = 'a UTF-8 BOM leads the file, bytes no writer of this index emits' }
-  }
-  # Markers are scanned over a one-byte-per-char decode -- legacy bytes need
-  # not be valid UTF-8 to be classified -- and only the FINAL interval, the
-  # bytes under structural validation, is decoded strictly.
-  $text = Get-FollowupScanText -Bytes $Existing
-  $rs = Get-FollowupRegionState -Text $text
-  if (-not $rs.Present) {
-    if (Test-FollowupIndexTerminated -Existing $Existing) { return @{ State = 'legacy'; Reason = '' } }
-    return @{ State = 'torn'; Reason = 'a legacy tail with no terminal line break' }
-  }
-  if ($rs.OpenCount -eq 0) {
-    return @{ State = 'torn'; Reason = 'doctrine-version content with no OPEN marker at all' }
-  }
-  $ivLen = $Existing.Length - $rs.LastOpenIndex
-  $ivBytes = New-Object byte[] $ivLen
-  [System.Array]::Copy($Existing, $rs.LastOpenIndex, $ivBytes, 0, $ivLen)
-  $ivDecoded = Get-FollowupStrictText -Bytes $ivBytes
-  if (-not $ivDecoded.Ok) {
-    return @{ State = 'torn'; Reason = 'bytes inside the final transaction that are not valid UTF-8' }
-  }
-  $interval = $ivDecoded.Text
-  $atStart = ($rs.LastOpenIndex -eq 0)
-  # A frame is admissible only when it out-versions every complete frame
-  # ABOVE it: with a higher-version winner sitting above the final interval,
-  # this writer's frame there raises nothing and is refused.
-  $frameAdmissible = ((($rs.FrameIndex -lt 0) -or ($rs.FrameIndex -ge $rs.LastOpenIndex)) -and
-                      -not ($rs.FuturePresent -and ($rs.FutureIndex -ge 0) -and ($rs.FutureIndex -lt $rs.LastOpenIndex)))
-  # Under a FUTURE frame the file is governed by a later doctrine, and this
-  # writer's frame is rightly absent -- requiredness binds current-era
-  # regions only.
-  $frameRequired = (($rs.RegionStart -eq $rs.LastOpenIndex) -and (-not $rs.FuturePresent))
-  $legacyLen = [string]$rs.RegionStart
-  $r = Test-FollowupIntervalComplete -IntervalText $interval -AtFileStart $atStart -FrameAdmissible $frameAdmissible -FrameRequired $frameRequired -LegacyLen $legacyLen
-  if ($r.Ok) { return @{ State = 'complete'; Reason = '' } }
-  return @{ State = 'torn'; Reason = $r.Reason }
-}
-
-# ---- Locator accept set (BYTE-IDENTICAL mirror of the wrappers' copies in
-# scripts/codex/auto-review.ps1 / scripts/claude/auto-review.ps1; no shared
-# module to import, so the copies move together by hand). The promoter needs
-# the destructive reader's OWN accept set: a scoped payload whose locator
-# this validator resolves differently than the reader would is exactly how a
-# promoted record comes to quarantine every later prune. ----
-function Get-CaptureLocatorEscaped {
-  param([string]$Value)
-  if ([string]::IsNullOrEmpty($Value)) { return '' }
-  $sb = New-Object System.Text.StringBuilder
-  foreach ($b in [System.Text.Encoding]::UTF8.GetBytes($Value)) {
-    $c = [char]$b
-    if ($b -lt 128 -and $c -cmatch '^[A-Za-z0-9._/\\:-]$') { [void]$sb.Append($c) }
-    else { [void]$sb.AppendFormat('%{0:X2}', $b) }
-  }
-  return $sb.ToString()
-}
-
-function Get-CaptureLocatorUnescaped {
-  param([string]$Value)
-  if ([string]::IsNullOrEmpty($Value)) { return '' }
-  $bytes = New-Object System.Collections.Generic.List[byte]
-  for ($i = 0; $i -lt $Value.Length; $i++) {
-    if ($Value[$i] -eq '%' -and ($i + 2) -lt $Value.Length) {
-      [byte]$parsed = 0
-      if ([byte]::TryParse($Value.Substring($i + 1, 2), [System.Globalization.NumberStyles]::HexNumber,
-                           [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
-        [void]$bytes.Add($parsed)
-        $i += 2
-        continue
-      }
-    }
-    $bytes.AddRange([System.Text.Encoding]::UTF8.GetBytes([string]$Value[$i]))
-  }
-  return [System.Text.Encoding]::UTF8.GetString($bytes.ToArray())
-}
-
-function Test-CaptureLocatorCanonical {
-  param([string]$Payload, [string]$Decoded)
-  if ([string]::IsNullOrEmpty($Payload)) { return $false }
-  if ((Get-CaptureLocatorEscaped -Value $Decoded) -cne $Payload) { return $false }
-  foreach ($segment in ($Decoded -replace '\\', '/').Split('/')) {
-    if ($segment -eq '.' -or $segment -eq '..') { return $false }
-  }
-  return $true
-}
-
-function Test-CaptureLocatorFullyQualified {
-  param([string]$Value)
-  if ([string]::IsNullOrEmpty($Value)) { return $false }
-  $norm = $Value -replace '\\', '/'
-  if ($norm.StartsWith('//?/', [System.StringComparison]::Ordinal)) {
-    $extRest = $norm.Substring(4)
-    if ($extRest -cmatch '^[A-Za-z]:/') { return $true }
-    return ($extRest -cmatch '^(?i:UNC)/[^/]+/[^/]+')
-  }
-  if ($norm.StartsWith('//', [System.StringComparison]::Ordinal)) {
-    return ($norm -cmatch '^//[^/]+/[^/]+')
-  }
-  return ($norm -cmatch '^[A-Za-z]:/')
-}
-
-function Test-CaptureLocatorSegmentSafe {
-  param([string]$Segment)
-  if ([string]::IsNullOrEmpty($Segment)) { return $true }
-  if ($Segment.EndsWith('.', [System.StringComparison]::Ordinal) -or
-      $Segment.EndsWith(' ', [System.StringComparison]::Ordinal)) { return $false }
-  $stem = $Segment
-  $dot = $stem.IndexOf([char]'.')
-  if ($dot -ge 0) { $stem = $stem.Substring(0, $dot) }
-  # The superscript-digit device spellings are regex \u escapes on purpose:
-  # these scripts carry no BOM, so Windows PowerShell would decode a literal
-  # high byte by the ANSI codepage and the rule would silently stop matching.
-  return ($stem.TrimEnd(' ') -cnotmatch '^(?i:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00B9\u00B2\u00B3])$')
-}
-
-function Test-CaptureLocatorPathSafe {
-  param([string]$Value)
-  if ([string]::IsNullOrEmpty($Value)) { return $false }
-  $norm = $Value -replace '\\', '/'
-  foreach ($ch in $norm.ToCharArray()) {
-    $code = [int][char]$ch
-    if ($code -lt 32 -or $code -eq 127) { return $false }
-    if ('<>"|*'.IndexOf($ch) -ge 0) { return $false }
-  }
-  if ($norm.StartsWith('/', [System.StringComparison]::Ordinal) -and
-      -not (Test-CaptureLocatorFullyQualified -Value $norm)) { return $false }
-  if ($norm.StartsWith('//?/', [System.StringComparison]::Ordinal)) {
-    $extRest = $norm.Substring(4)
-    if ($extRest -cmatch '^(?i:UNC)/' -and $extRest -cnotmatch '^(?i:UNC)/[^/]+/[^/]+/[^/]+') { return $false }
-  } elseif ($norm.StartsWith('//', [System.StringComparison]::Ordinal)) {
-    if ($norm -cnotmatch '^//[^/]+/[^/]+/[^/]+') { return $false }
-  }
-  $rest = $norm
-  if ($rest.StartsWith('//?/', [System.StringComparison]::Ordinal)) { $rest = $rest.Substring(4) }
-  elseif ($rest.StartsWith('//', [System.StringComparison]::Ordinal)) { $rest = $rest.Substring(2) }
-  if ($rest -cmatch '^[A-Za-z]:(?:/|$)') { $rest = $rest.Substring(2) }
-  if ($rest.Contains(':') -or $rest.Contains('?')) { return $false }
-  foreach ($segment in $rest.Split('/')) {
-    if (-not (Test-CaptureLocatorSegmentSafe -Segment $segment)) { return $false }
-  }
-  return $true
-}
-
-function Get-CaptureLocatorNormalized {
-  param([string]$Value)
-  $norm = $Value -replace '\\', '/'
-  $root = ''
-  if ($norm.StartsWith('//?/', [System.StringComparison]::Ordinal)) {
-    $root = '//?/'
-  } elseif ($norm.StartsWith('//', [System.StringComparison]::Ordinal)) {
-    $root = '//'
-  }
-  $rest = $norm.Substring($root.Length)
-  while ($rest.Contains('//')) { $rest = $rest.Replace('//', '/') }
-  return ($root + $rest).TrimEnd('/')
-}
-
-function Resolve-CaptureLocatorWire {
-  param([string]$Value)
-  if ([string]::IsNullOrWhiteSpace($Value)) { return @{ Kind = 'none'; Path = '' } }
-  $prefix = [regex]::Match($Value, '^v(?<ver>[0-9]+):')
-  if ($prefix.Success) {
-    if ($prefix.Groups['ver'].Value -ne '1') { return @{ Kind = 'invalid'; Path = $Value } }
-    $payload = $Value.Substring($prefix.Length)
-    if ([string]::IsNullOrEmpty($payload)) { return @{ Kind = 'invalid'; Path = $Value } }
-    $decoded = Get-CaptureLocatorUnescaped -Value $payload
-    if (-not (Test-CaptureLocatorCanonical -Payload $payload -Decoded $decoded)) {
-      return @{ Kind = 'invalid'; Path = $Value }
-    }
-    if (-not (Test-CaptureLocatorPathSafe -Value $decoded)) {
-      return @{ Kind = 'invalid'; Path = $Value }
-    }
-    return @{ Kind = 'exact'; Path = (Get-CaptureLocatorNormalized -Value $decoded) }
-  }
-  if ($Value.Contains('/') -or $Value.Contains('\') -or $Value.Contains('%')) {
-    return @{ Kind = 'invalid'; Path = $Value }
-  }
-  return @{ Kind = 'bare'; Path = $Value }
-}
-
-function Test-CaptureVerdictLeaf {
-  param([string]$Name)
-  if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-  return ($Name -match '^review-\d{8}-\d{6}-.+\.md$')
-}
-
 # A PENDING PAYLOAD verified end to end before any byte is appended: EXACTLY one
 # block -- header line, row lines, its record, then the separator or the end of
 # the payload -- with row count and digest recomputed. A promoter is the last
@@ -3824,8 +2240,8 @@ function Test-FollowupPendingPayload {
   }
   $rec = Test-FollowupRecordLine -Line $line
   if (-not $rec.Ok) { return @{ Ok = $false; Reason = 'a payload without a valid record line after its rows' } }
-  if ($rec.Rows -cne [string]$rowCount) { return @{ Ok = $false; Reason = 'a payload record whose row count does not match its rows' } }
-  if ($rec.Sha -cne (Get-FollowupSha256Hex -Text $headerAndRows)) { return @{ Ok = $false; Reason = 'a payload record whose digest does not vouch for its block' } }
+  if (-not [string]::Equals([string]$rec.Rows, [string]$rowCount, [System.StringComparison]::Ordinal)) { return @{ Ok = $false; Reason = 'a payload record whose row count does not match its rows' } }
+  if (-not [string]::Equals([string]$rec.Sha, [string](Get-FollowupSha256Hex -Text $headerAndRows), [System.StringComparison]::Ordinal)) { return @{ Ok = $false; Reason = 'a payload record whose digest does not vouch for its block' } }
   # SCOPED rows key retention on the header's locator, so the wire itself must
   # pass the destructive reader's resolver and its leaf must be a name the
   # prune could actually be asked about -- a scoped block whose locator the
@@ -3853,102 +2269,21 @@ function Test-FollowupPendingPayload {
     }
   }
   $rest = $rest.Substring($nl + 1)
-  if ($rest -ceq '' -or $rest -ceq "`n") { return @{ Ok = $true; Reason = '' } }
+  if ([string]::Equals($rest, '', [System.StringComparison]::Ordinal) -or [string]::Equals($rest, "`n", [System.StringComparison]::Ordinal)) { return @{ Ok = $true; Reason = '' } }
   return @{ Ok = $false; Reason = 'a payload that is not exactly one record-closed block' }
 }
 
-# ONE APPEND OF ONE PREPARED BUFFER, under the cross-writer lock. The header, the
-# doctrine migration and the rows are a SINGLE transaction because a row's meaning
-# depends on the framing above it: rows that reached the file without their header
-# read as legacy bare-name rows, and a migration that landed without its rows
-# claims a contract for content that never arrived. Streaming the parts as
-# separate writes leaves each boundary as a place a crash can stop, so they are
-# concatenated first and handed to the stream once -- the same discipline the sh
-# hook applies by staging its whole block in a temp file and cat-ing it once.
-#
-# A TORN OR UNVOUCHED tail REFUSES the append rather than repairing, completing,
-# or burying it: appending would terminate the torn write and erase the evidence
-# the wrappers' destructive reader denies on, and the row it cut may have been a
-# capture claim. The gate validates the FINAL interval only
-# (Get-FollowupTailState) -- deeper damage is already durable, cannot be hidden
-# by a further append, and belongs to the destructive reader. Refusal costs one
-# dropped record, which the best-effort recording contract permits and the
-# verdict artifact still holds.
-#
-# Returns the outcome rather than printing it: the caller owns its log tag's
-# wording and its success line. Refusal reasons are 'lock' (already diagnosed by
-# the acquisition) and 'torn' (Reason carries the display-safe cause; the caller
-# names the repair); no reason at all on success. I/O failures PROPAGATE to the
-# caller's warn-and-continue wrapper.
-function Invoke-FollowupIndexAppend {
-  param([string]$IndexPath, [string]$HeaderText, [string]$BlockText, [string]$LogTag = 'auto-merge')
-  $enc = New-Object System.Text.UTF8Encoding($false)
-  $lockToken = Enter-FollowupIndexLock -IndexPath $IndexPath -LogTag $LogTag
-  if ([string]::IsNullOrEmpty($lockToken)) { return @{ Appended = $false; Refusal = 'lock'; Reason = '' } }
-  $torn = $false
-  $tornReason = ''
-  try {
-    $attempt = 0
-    while ($true) {
-      try {
-        $torn = $false
-        $tornReason = ''
-        $fs = [System.IO.File]::Open($IndexPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        try {
-          $txText = ''
-          if ($fs.Length -eq 0) {
-            $txText = (Get-FollowupTransactionOpenMarker) + "`n" + $HeaderText + $BlockText
-          }
-          else {
-            # FileStream.Read may return short; a partial read would misreport the
-            # doctrine state and duplicate a frame, so loop and fail loudly instead.
-            $existing = New-Object byte[] $fs.Length
-            $read = 0
-            while ($read -lt $existing.Length) {
-              $n = $fs.Read($existing, $read, $existing.Length - $read)
-              if ($n -le 0) { throw "short read on $IndexPath ($read of $($existing.Length) bytes)" }
-              $read += $n
-            }
-            $tail = Get-FollowupTailState -Existing $existing
-            if ($tail.State -eq 'bom' -or $tail.State -eq 'torn') {
-              $torn = $true
-              $tornReason = $tail.Reason
-            }
-            else {
-              # TOLERANT decode, deliberately: this reader only decides whether to
-              # APPEND a frame, and an index whose bytes are damaged still deserves
-              # its migration append. The wrappers' prune -- the reader that DELETES
-              # -- decodes the same file strictly and refuses on any invalid byte.
-              $txText = (Get-FollowupTransactionOpenMarker) + "`n" + (Get-FollowupDoctrineMigration -ExistingText $enc.GetString($existing)) + $BlockText
-            }
-          }
-          if (-not $torn) {
-            $txBytes = $enc.GetBytes($txText)
-            [void]$fs.Seek(0, [System.IO.SeekOrigin]::End)
-            $fs.Write($txBytes, 0, $txBytes.Length)
-          }
-        } finally { $fs.Dispose() }
-        break
-      } catch {
-        $attempt++
-        if ($attempt -ge 10) { throw }
-        Start-Sleep -Milliseconds 50
-      }
-    }
-  } finally { [void](Exit-FollowupIndexLock -IndexPath $IndexPath -Token $lockToken -LogTag $LogTag) }
-  if ($torn) { return @{ Appended = $false; Refusal = 'torn'; Reason = $tornReason } }
-  return @{ Appended = $true; Refusal = ''; Reason = '' }
-}
-
-# The diagnostic a refused append owes its operator. Shared by every PowerShell
-# writer of the index so one repair instruction reaches whoever hits it, whichever
-# gate surface was running. PURE.
-function Get-FollowupTornIndexWarning {
-  param([string]$IndexPath, [string]$LogTag = 'auto-merge', [string]$Reason = '')
-  $cause = if ([string]::IsNullOrWhiteSpace($Reason)) { 'its final transaction is incomplete' } else { $Reason }
-  return "[$LogTag] WARN: $IndexPath refused the append: $cause. This record is DROPPED rather than appended: appending would terminate the torn write and erase the evidence the age-prune denies on, after which it could resume deleting artifacts a cut capture claim may protect. REPAIR: inspect the file's tail by hand against the capture-doctrine frame it carries - complete or delete the damaged transaction (remove a leading BOM if one was added), leaving the file ending in a complete record-closed transaction. The findings stay in the verdict artifact and in the output above; the gate still passes."
-}
-
+# Promote a child wrapper's STAGED QUALITY follow-ups to the durable
+# logs/review-followups.md index. Called ONLY after the ff-merge has
+# succeeded (merge-gate BLOCKER 2026-07-10: a child that appended on its own
+# pass could record follow-ups for a merge that subsequently aborted on the
+# exit union, the branch pin, or the ff-merge -- so the children stage to
+# CROSS_REVIEW_FOLLOWUPS_PENDING paths and THIS single post-merge point promotes).
+# NON-pure I/O twin of the wrappers' direct-append mode: same main-repo
+# resolution (the submodule-aware Get-FollowupIndexDir selection), same header, same
+# exclusive-handle retry against concurrent writers. Any failure warns and
+# degrades -- the merge is already applied, so a lost follow-up record must
+# not fail the gate.
 function Publish-ReviewFollowups {
   param(
     [string]$PendingPath,
@@ -3987,17 +2322,17 @@ function Publish-ReviewFollowups {
       $commonDir = $null
       $absOut = & git rev-parse --path-format=absolute --git-common-dir 2>$null
       if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($absOut)) {
-        $commonDir = ($absOut | Select-Object -First 1).Trim()
+        $commonDir = ($absOut | Select-Object -First 1)
       } else {
         $plainOut = & git rev-parse --git-common-dir 2>$null
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($plainOut)) {
-          try { $commonDir = (Resolve-Path -LiteralPath (($plainOut | Select-Object -First 1).Trim()) -ErrorAction Stop).Path } catch { $commonDir = $null }
+          try { $commonDir = (Resolve-Path -LiteralPath ($plainOut | Select-Object -First 1) -ErrorAction Stop).Path } catch { $commonDir = $null }
         }
       }
       $topLevel = $null
       $topOut = & git rev-parse --show-toplevel 2>$null
       if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($topOut)) {
-        $topLevel = ($topOut | Select-Object -First 1).Trim()
+        $topLevel = ($topOut | Select-Object -First 1)
       }
       $logsDir = Get-FollowupIndexDir -CommonDir $commonDir -TopLevel $topLevel
       if ([string]::IsNullOrWhiteSpace($logsDir)) { $logsDir = Join-Path (Get-Location).Path 'logs' }
@@ -4011,7 +2346,8 @@ function Publish-ReviewFollowups {
     # appended entry, so this promotion runs under the same cross-writer protocol
     # the wrappers' direct-append mode uses.
     $appended = Invoke-FollowupIndexAppend -IndexPath $followupFile `
-      -HeaderText (Get-FollowupIndexHeader) -BlockText $block -LogTag 'auto-merge'
+      -HeaderText (Get-FollowupIndexHeader) -BlockText $block -LogTag 'auto-merge' `
+      -DropConsequence 'dropping this follow-up record, the merge still stands'
     if (-not $appended.Appended) {
       # A 'lock' refusal was already reported by the acquisition, which named the
       # lock, why it could not be taken, what this caller loses and the remedy. A
@@ -4026,41 +2362,6 @@ function Publish-ReviewFollowups {
     $promotionError = if ($ProviderNeutralOutput) { 'the run-owned promotion operation failed; inspect internal review artifacts' } else { $_.Exception.Message }
     Write-Host "[auto-merge] WARN: could not promote $backendDisplay QUALITY follow-ups: $promotionError"
   }
-}
-
-# PURE path-selection for the centralized logs dir, byte-identical to the
-# Codex/Claude wrappers' Get-ReviewLogDir. Given the resolved git common dir and
-# (when known) the working-tree top-level, pick the logs/<backend>/reviews
-# destination. SUBMODULE layout (common dir under `<superproject>/.git/modules/
-# <name>`) uses the working-tree TOP-LEVEL (its `<common-dir>/..` is `.git/modules`,
-# outside the submodule tree); if the top-level is unknown, return $null, NEVER the
-# wrong parent. NORMAL / LINKED-WORKTREE uses `<common-dir>/..` (for a worktree
-# that is the MAIN repo root -- the centralization that keeps merge forensics with
-# the commit-gate artifacts). PURE.
-function Get-ReviewLogDir {
-  param([string]$CommonDir, [string]$TopLevel, [string]$Backend)
-  if ([string]::IsNullOrWhiteSpace($CommonDir)) { return $null }
-  $commonNorm = $CommonDir -replace '\\', '/'
-  if ($commonNorm -match '(?i)/\.git/modules/') {
-    if ([string]::IsNullOrWhiteSpace($TopLevel)) { return $null }
-    return [System.IO.Path]::GetFullPath((Join-Path $TopLevel (Join-Path 'logs' (Join-Path $Backend 'reviews'))))
-  }
-  return [System.IO.Path]::GetFullPath((Join-Path $CommonDir (Join-Path '..' (Join-Path 'logs' (Join-Path $Backend 'reviews')))))
-}
-
-# Follow-up-index dir (`<root>/logs`, holding review-followups.md): the SAME
-# submodule-aware root selection as Get-ReviewLogDir, derived as its grandparent
-# (the helper returns `<root>/logs/<backend>/reviews`) so the index always lands
-# beside the verdict artifacts -- a submodule's common-dir parent is
-# `.git/modules`, NOT its working tree, and a common-dir-parent shortcut would
-# write the index where the batch-triage scan never looks. $null when the
-# helper fails safe (caller falls back to the cwd logs dir). PURE;
-# byte-identical to both wrappers' copy.
-function Get-FollowupIndexDir {
-  param([string]$CommonDir, [string]$TopLevel)
-  $reviews = Get-ReviewLogDir -CommonDir $CommonDir -TopLevel $TopLevel -Backend 'x'
-  if ([string]::IsNullOrWhiteSpace($reviews)) { return $null }
-  return (Split-Path -Parent (Split-Path -Parent $reviews))
 }
 
 # Resolve the centralized shared-logs `logs/<backend>/reviews` dir -- the SAME
@@ -4085,11 +2386,11 @@ function Resolve-CentralLogDir {
   $commonDir = $null
   $absOut = & git rev-parse --path-format=absolute --git-common-dir 2>$null
   if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($absOut)) {
-    $commonDir = ($absOut | Select-Object -First 1).Trim()
+    $commonDir = ($absOut | Select-Object -First 1)
   } else {
     $plainOut = & git rev-parse --git-common-dir 2>$null
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($plainOut)) {
-      try { $commonDir = (Resolve-Path -LiteralPath (($plainOut | Select-Object -First 1).Trim()) -ErrorAction Stop).Path }
+      try { $commonDir = (Resolve-Path -LiteralPath ($plainOut | Select-Object -First 1) -ErrorAction Stop).Path }
       catch { $commonDir = $null }
     }
   }
@@ -4097,7 +2398,7 @@ function Resolve-CentralLogDir {
   $topLevel = $null
   $topOut = & git rev-parse --show-toplevel 2>$null
   if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($topOut)) {
-    $topLevel = ($topOut | Select-Object -First 1).Trim()
+    $topLevel = ($topOut | Select-Object -First 1)
   }
   return Get-ReviewLogDir -CommonDir $commonDir -TopLevel $topLevel -Backend $Backend
 }
@@ -4327,8 +2628,9 @@ if (-not $backendSel.Ok) {
 $Backend = $backendSel.Backend
 if (-not [string]::IsNullOrWhiteSpace($ReasoningEffort)) {
   $ReasoningEffort = $ReasoningEffort.ToLowerInvariant()
-  if (@('minimal', 'low', 'medium', 'high', 'xhigh') -notcontains $ReasoningEffort) {
-    Write-Host "[auto-merge] ERROR: '-ReasoningEffort $ReasoningEffort' is not a supported tier (minimal|low|medium|high|xhigh)."
+  $mergeEffortTiers = Get-CodexEffortTiers -ExcludeMaxTier
+  if ([Array]::IndexOf([string[]]$mergeEffortTiers, [string]$ReasoningEffort) -lt 0) {
+    Write-Host "[auto-merge] ERROR: '-ReasoningEffort $ReasoningEffort' is not a supported tier ($($mergeEffortTiers -join '|'))."
     exit 3
   }
 }
@@ -4487,7 +2789,7 @@ if (-not (Test-CrgGateUntrackSanctioned)) {
 # branch-review codex child below so the review runs at a deterministic, stamped
 # tier rather than re-reading config). `unknown` -> do not pin (child inherits
 # codex's own default).
-$mergeEffort = Resolve-EffectiveCodexEffort -ExplicitEffort $ReasoningEffort -ConfigText (Get-CodexConfigText)
+$mergeEffort = Resolve-EffectiveCodexEffort -ExplicitEffort $ReasoningEffort -ConfigText (Get-CodexConfigText) -ExcludeMaxTier
 Write-Host (Get-MergeReviewEffortStatusLine -Effort $mergeEffort)
 
 # Consistency-doc exception (OPT-IN via CROSS_REVIEW_CONSISTENCY_DOC): the Claude
@@ -4558,9 +2860,9 @@ if ($cfgMergeDoc.State -eq 'valid') {
       # requested backend costs at most a burned claude panel that fails closed
       # on its own account, never a silent pass.)
       Write-Host "[auto-merge] WARN: '$consistencyDoc' detection git diff --name-status exited $diffExit - cannot determine whether the branch touches the consistency doc; proceeding with the requested -Backend"
-    } elseif (Test-PlanInNameStatus -NameStatus $branchNameStatus -DocName $consistencyDoc) {
+    } elseif (Test-ConsistencyDocInNameStatus -NameStatus $branchNameStatus -Doc $consistencyDoc) {
       $consistencyDocInBranch = $true
-      if ($Backend -eq 'claude') {
+      if ([string]::Equals($Backend, 'claude', [System.StringComparison]::Ordinal)) {
         Write-Host "[auto-merge] $consistencyDoc is in the branch diff and -Backend claude was chosen - the claude wrapper fails closed on any diff touching it, so the panel would be burned. Merge ABORTED (fail closed); re-run with -Backend codex."
         exit 3
       }
@@ -4630,7 +2932,7 @@ try {
 
 $reviewRepoRootRows = @(& git rev-parse --show-toplevel 2>$null)
 $reviewRepoRootExit = $LASTEXITCODE
-$reviewRepoRoot = if ($reviewRepoRootRows.Count -eq 1) { ([string]$reviewRepoRootRows[0]).Trim() } else { '' }
+$reviewRepoRoot = if ($reviewRepoRootRows.Count -eq 1) { [string]$reviewRepoRootRows[0] } else { '' }
 if ($reviewRepoRootExit -ne 0 -or [string]::IsNullOrWhiteSpace($reviewRepoRoot)) {
   Write-Host '[auto-merge] ERROR: the repository root could not be resolved while pinning successful-review evidence - merge ABORTED (fail closed).'
   Remove-TreeNoRecurse -Path $trustedDir
@@ -4666,15 +2968,25 @@ try {
   # backend's panel needs its own, and the exhaustion fallback may need the
   # OTHER provider's mid-run -- extraction is base-pinned and cheap, and a
   # missing fallback wrapper at substitution time would turn a recoverable
-  # exhaustion into an abort.
-  $reviewInfra = @(
+  # exhaustion into an abort. The shared modules the wrappers import from
+  # their scripts/ parent come from the same base, so a candidate cannot
+  # change the liveness code watching its own panel. A module is required only
+  # when an extracted trusted wrapper names it: wrappers from a base older than
+  # the module never import it and must still review (merge-panel BLOCKER
+  # 2026-10-07). Keep the module list in step with REVIEW_MODULES in
+  # scripts/git-hooks/pre-commit.
+  $reviewWrapperInfra = @(
     'scripts/codex/auto-review.ps1',
     'scripts/codex/review-prompt-template.md',
     'scripts/claude/auto-review.ps1'
   )
+  $reviewModules = @('scripts/review-liveness.psm1', 'scripts/review-common.ps1')
   $localReviewInfraUsed = $false
   New-Item -ItemType Directory -Path (Join-Path $trustedDir 'scripts\claude') -Force | Out-Null
-  foreach ($f in $reviewInfra) {
+  $reviewInfra = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($f in $reviewWrapperInfra) { $reviewInfra.Add($f) }
+  for ($reviewInfraIndex = 0; $reviewInfraIndex -lt $reviewInfra.Count; $reviewInfraIndex++) {
+    $f = $reviewInfra[$reviewInfraIndex]
     $outPath = Join-Path $trustedDir $f.Replace('/', '\')
     $outDir = Split-Path $outPath -Parent
     if (-not (Test-Path $outDir)) {
@@ -4701,6 +3013,16 @@ try {
       [System.IO.File]::WriteAllBytes($outPath, $infraSrc.Bytes)
     } else {
       [System.IO.File]::WriteAllText($outPath, $infraSrc.Text, $utf8NoBom)
+    }
+    if ($reviewInfraIndex -eq $reviewWrapperInfra.Count - 1) {
+      # A name in a comment also counts; over-requiring can only abort.
+      foreach ($reviewModule in $reviewModules) {
+        $reviewModuleLeaf = $reviewModule.Substring($reviewModule.LastIndexOf('/') + 1)
+        foreach ($reviewWrapper in @('scripts/codex/auto-review.ps1', 'scripts/claude/auto-review.ps1')) {
+          $reviewWrapperText = [System.IO.File]::ReadAllText((Join-Path $trustedDir $reviewWrapper.Replace('/', '\')), $utf8NoBom)
+          if ($reviewWrapperText.Contains($reviewModuleLeaf)) { $reviewInfra.Add($reviewModule); break }
+        }
+      }
     }
   }
   if ($localReviewInfraUsed) {
@@ -4821,14 +3143,14 @@ try {
   foreach ($slot in $panelPlan.Slots) {
     $slotSpec = Resolve-PanelSlotSpec -Backend $Backend -Slot $slot -RunDir $runDir
     New-Item -ItemType Directory -Path $slotSpec.Dir -Force | Out-Null
-    if ($Backend -eq 'codex') {
+    if ([string]::Equals($Backend, 'codex', [System.StringComparison]::Ordinal)) {
       $slotArgs = Get-ReviewChildArgs -WrapperPath $trustedWrapper -PromptPath $trustedPrompt `
         -Base $baseSha -BranchSha $branchSha -RunDir $slotSpec.Dir `
         -Title "Pre-merge review (codex): $Branch ($branchSha) -> $Base" -ReviewPasses $script:PanelPassCount
       # Pin the codex child to $mergeEffort (the gate's resolved effective
       # tier) whenever it is a known tier, so the review runs at a
       # deterministic, stamped tier rather than re-reading config.
-      if ($mergeEffort -ne 'unknown') { $slotArgs += @('-ReasoningEffort', $mergeEffort) }
+      if (-not [string]::Equals($mergeEffort, 'unknown', [System.StringComparison]::Ordinal)) { $slotArgs += @('-ReasoningEffort', $mergeEffort) }
     } else {
       $slotArgs = Get-ReviewChildArgs -WrapperPath $trustedClaudeWrapper -PromptPath $trustedPrompt `
         -Base $baseSha -BranchSha $branchSha -RunDir $slotSpec.Dir `
@@ -4928,7 +3250,7 @@ try {
     }
     'abort-exit3' {
       Publish-ReviewFailureTranscripts -FinalExitCode 3 -Children $reviewTranscriptChildren -State $reviewReplayState
-      if ($Backend -eq 'claude') {
+      if ([string]::Equals($Backend, 'claude', [System.StringComparison]::Ordinal)) {
         # Claude exit 3 is the Claude wrapper's GENERAL fail-closed code --
         # consistency-doc, ancestor CLAUDE.md trust breach, auth failure,
         # malformed/empty output -- NOT only quota; the gate cannot tell
@@ -5059,7 +3381,7 @@ try {
     $fbArgs = Get-ReviewChildArgs -WrapperPath $trustedWrapper -PromptPath $trustedPrompt `
       -Base $baseSha -BranchSha $branchSha -RunDir $fbSpec.Dir `
       -Title "Pre-merge review (codex fallback fb1): $Branch ($branchSha) -> $Base" -ReviewPasses $script:PanelPassCount
-    if ($mergeEffort -ne 'unknown') { $fbArgs += @('-ReasoningEffort', $mergeEffort) }
+    if (-not [string]::Equals($mergeEffort, 'unknown', [System.StringComparison]::Ordinal)) { $fbArgs += @('-ReasoningEffort', $mergeEffort) }
     $fbArgs += $fbSpec.ExtraArgs
     $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $fbSpec.Pending
     $fbChild = Start-ReviewChild -RunDir $fbSpec.Dir -WrapperArgs $fbArgs -Utf8NoBom $utf8NoBom
@@ -5134,6 +3456,13 @@ try {
       exit 3
     }
     Publish-CrgSuccessfulReviewProjection -Lines $successProjection.Lines
+    # Status lines must not fail the merge (Get-CrgReviewFeedbackStatusLines),
+    # so neither collecting nor printing them may throw past here.
+    try {
+      try { $feedbackLines = @(Get-CrgReviewFeedbackStatusLines -ChildDirs (@($panelChildren | ForEach-Object { $_.Dir }) + @($fallbackReviewDirs))) }
+      catch { $feedbackLines = @('review-feedback WARN: the review-feedback warnings could not be collected') }
+      if ($feedbackLines.Count -gt 0) { Publish-CrgSuccessfulReviewProjection -Lines $feedbackLines }
+    } catch { }
   }
 
   Write-Host ""
@@ -5141,7 +3470,7 @@ try {
 
   switch ($unionExit) {
     0 {
-      Write-Host "[auto-merge] PASS - proceeding with ff-merge (verdicts may contain informational NOTE and/or non-blocking QUALITY findings; the wrappers exit 0 for CLEAN, NOTE-only, and QUALITY-only, and each QUALITY-bearing PASS's staged follow-ups are promoted to logs/review-followups.md after the ff-merge succeeds)."
+      Write-Host "[auto-merge] PASS - $(Get-ReviewPassCoverageText -GitContext (Resolve-FollowupGitContext)) - proceeding with ff-merge (verdicts may contain informational NOTE and/or non-blocking QUALITY findings; the wrappers exit 0 for CLEAN, NOTE-only, and QUALITY-only, and each QUALITY-bearing PASS's staged follow-ups are promoted to logs/review-followups.md after the ff-merge succeeds)."
       $reviewPhaseActive = $false
     }
     2 {
@@ -5192,7 +3521,10 @@ try {
   }
 
   Write-Host "[auto-merge] ff-merge $branchSha (=$Branch) -> '$Base'"
-  & git merge --ff-only $branchSha
+  # --no-overwrite-ignore: an ignored local file (the per-user TASKS.md the
+  # review wrappers exclude, among others) is refused, not silently replaced,
+  # when the incoming tree tracks the same path.
+  & git merge --ff-only --no-overwrite-ignore $branchSha
   if ($LASTEXITCODE -ne 0) {
     Write-Host "[auto-merge] ERROR: ff-merge failed"
     exit 3
@@ -5457,7 +3789,7 @@ finally {
       # the source at copy time, so a live writer paused mid-write would pass
       # it and publish a partial verdict at its final name with a success
       # report. The dir stays in the preserved run dir un-copied instead.
-      if ($liveOwners -contains $fbc.Owner) {
+      if ([Array]::IndexOf([string[]]$liveOwners, [string]$fbc.Owner) -ge 0) {
         Write-Host "[auto-merge] forensics WARNING: consolidation SKIPPED for '$($fbc.Owner)' - its child could not be confirmed exited, so its artifacts may still be growing; they remain ONLY in the preserved run dir until the child is confirmed done and the dir is reaped manually."
         $preserveRunDir = $true
         continue

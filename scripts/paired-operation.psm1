@@ -13,10 +13,12 @@ function Get-CrgOperationReadCommand {
 
 function Assert-CrgOperationReadPath {
   param([string]$Path, [switch]$Root)
+  # Ordinal: -cne/-in and string overloads compare by culture and ignore characters such as U+00AD.
   if ($Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Contains('/') -or $Path.Length -le 3 -or $Path.Length -gt 32767 -or
-      $Path -match '[\x00-\x1f\x7f]' -or [IO.Path]::GetFullPath($Path) -cne $Path) { throw 'operation read path must be canonical and local' }
+      $Path -match '[\x00-\x1f\x7f]' -or -not [string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::Ordinal)) { throw 'operation read path must be canonical and local' }
   foreach ($part in ($Path.Substring(3) -split '\\', 0)) {
-    if ($part.Length -eq 0 -or $part -in @('.', '..') -or $part.EndsWith('.') -or $part -cne $part.Trim() -or
+    if ($part.Length -eq 0 -or [string]::Equals($part, '.', [StringComparison]::Ordinal) -or [string]::Equals($part, '..', [StringComparison]::Ordinal) -or
+        $part.EndsWith('.', [StringComparison]::Ordinal) -or -not [string]::Equals($part, $part.Trim(), [StringComparison]::Ordinal) -or
         $part -match '[<>:"|?*]' -or $part -match '\A(CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(\.|\z)') { throw 'operation read path contains an unsupported component' }
   }
 }
@@ -47,7 +49,7 @@ function Get-CrgExecutableReadState {
 function Assert-CrgExecutableReadState {
   param([object]$State)
   $record = $State.Record
-  if ($record.Present -isnot [bool] -or -not $record.Present -or $record.Path -cne $State.Path -or
+  if ($record.Present -isnot [bool] -or -not $record.Present -or -not [string]::Equals($record.Path, $State.Path, [StringComparison]::Ordinal) -or
       $record.Bytes -isnot [byte[]] -or -not [object]::ReferenceEquals($record.Stream, $State.Stream) -or
       -not $State.Stream.CanRead -or $State.Stream.CanWrite -or $State.Stream.SafeFileHandle.IsClosed) { throw 'executable read record lost its retained Path/Bytes/Stream identity' }
   & $State.NativeModule {
@@ -313,7 +315,7 @@ function Open-CrgPairedOperationReads {
       if ($name -isnot [string] -or $name -cnotmatch '\A[A-Za-z0-9._/-]+\z') { throw 'retained runtime payload name is invalid' }
       $record = $Runtime.Payloads[$name]
       $expectedPath = Join-Path $Runtime.Root $name.Replace('/', '\')
-      if ($record.Path -cne $expectedPath) { throw 'retained runtime payload path differs from the selected release' }
+      if (-not [string]::Equals($record.Path, $expectedPath, [StringComparison]::Ordinal)) { throw 'retained runtime payload path differs from the selected release' }
       $borrowed.Add($record)
     }
     foreach ($record in $RetainedFiles) { $borrowed.Add($record) }

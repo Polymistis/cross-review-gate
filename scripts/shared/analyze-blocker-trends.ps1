@@ -203,17 +203,16 @@ if ($PSBoundParameters.ContainsKey('ReviewsDirCsv')) {
 # for a region with NO header-shaped line at all (the wrappers predating
 # the header).
 $abCandidateRe = [regex]'(?i)^\s*(DIFF-SHA256|REVIEW-TREE-OID|REVIEW-BACKEND|REVIEW-EFFORT|REVIEW-SEVERITY-CONTRACT|REVIEW-DURATION-SECS)\b'
-$abEffortByBackend = @{
-  'codex'  = '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$'
-  'claude' = '^REVIEW-EFFORT: n/a$'
-}
+$abEffortByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+$abEffortByBackend['codex']  = '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$'
+$abEffortByBackend['claude'] = '^REVIEW-EFFORT: n/a$'
 function Get-ArtifactBackend {
   param([string]$Content)
   $abLines = $Content -split "`n"
   $abRegion = New-Object 'System.Collections.Generic.List[string]'
   $abHeaderShaped = $false
   foreach ($abLine in $abLines) {
-    if ($abLine -ceq '') { break }
+    if ($abLine.Length -eq 0) { break }
     $abRegion.Add($abLine)
     if ($abCandidateRe.IsMatch($abLine)) { $abHeaderShaped = $true }
   }
@@ -225,7 +224,7 @@ function Get-ArtifactBackend {
   if ($abRegion[2] -cnotmatch '^REVIEW-BACKEND: (?<b>codex|claude)$')             { return (& $abBad 'line 3 is not a producer REVIEW-BACKEND stamp') }
   $abBackend = $Matches['b']
   if ($abRegion[3] -cnotmatch $abEffortByBackend[$abBackend])                      { return (& $abBad "line 4 is not the $abBackend wrapper's REVIEW-EFFORT stamp") }
-  if ($abRegion.Count -ge 5 -and $abRegion[4] -cne 'REVIEW-SEVERITY-CONTRACT: blocker-only') { return (& $abBad 'line 5 is not the REVIEW-SEVERITY-CONTRACT stamp') }
+  if ($abRegion.Count -ge 5 -and -not [string]::Equals($abRegion[4], 'REVIEW-SEVERITY-CONTRACT: blocker-only', [System.StringComparison]::Ordinal)) { return (& $abBad 'line 5 is not the REVIEW-SEVERITY-CONTRACT stamp') }
   if ($abRegion.Count -eq 6 -and $abRegion[5] -cnotmatch '^REVIEW-DURATION-SECS: (0|[1-9][0-9]*)$') { return (& $abBad 'line 6 is not the REVIEW-DURATION-SECS stamp') }
   if ($abLines.Count -le $abRegion.Count) { return (& $abBad 'the header is cut off before its empty separator line') }
   return @{ Backend = $abBackend; Reason = $null }
@@ -314,12 +313,13 @@ function Get-FailClosedBannerReason {
   $lines = $Content -split "`n"
   $n = $lines.Count
   if ($n -lt 12) { return $null }   # cheap lower bound; the per-index checks below are authoritative
-  # HEADER BLOCK. CASE-SENSITIVE (-c*): PowerShell's default operators are case-
+  # HEADER BLOCK. CASE-SENSITIVE (-c* / ordinal): PowerShell's default operators are case-
   # INSENSITIVE, which would wrongly accept REVIEW-BACKEND: CODEX or uppercase hex
   # the producer never emits. Values pinned to auto-review.ps1's exact emission.
+  # Ordinal literal compares: culture compares ignore characters such as U+00AD.
   if ($lines[0] -cnotmatch '^DIFF-SHA256: [0-9a-f]{64}$')                              { return $null }
   if ($lines[1] -cnotmatch '^REVIEW-TREE-OID: [0-9a-f]{40}([0-9a-f]{24})?$')           { return $null }   # 40 (SHA1) or 64 (SHA256) hex
-  if ($lines[2] -cne 'REVIEW-BACKEND: codex')                                          { return $null }
+  if (-not [string]::Equals($lines[2], 'REVIEW-BACKEND: codex', [System.StringComparison]::Ordinal)) { return $null }
   if ($lines[3] -cnotmatch '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$') { return $null }   # auto-review.ps1 $validTiers or 'unknown'
   # Line 4 selects the era: the 5-line contract stamp -- then OPTIONALLY the
   # 6-line REVIEW-DURATION-SECS stamp on line 5, value-shape validated (the
@@ -327,17 +327,17 @@ function Get-FailClosedBannerReason {
   # recognizer blind to it would abort every current fail-closed run as
   # unrecognized instead of excluding it loudly) -- OR the blank ending the
   # 4-line header.
-  if ($lines[4] -ceq 'REVIEW-SEVERITY-CONTRACT: blocker-only') {
+  if ([string]::Equals($lines[4], 'REVIEW-SEVERITY-CONTRACT: blocker-only', [System.StringComparison]::Ordinal)) {
     if     ($lines[5] -cmatch '^REVIEW-DURATION-SECS: (0|[1-9][0-9]*)$') { $blankIdx = 6 }
-    elseif ($lines[5] -ceq '')                                           { $blankIdx = 5 }
+    elseif ($lines[5].Length -eq 0)                                      { $blankIdx = 5 }
     else                                                                 { return $null }
   }
-  elseif ($lines[4] -ceq '')                                      { $blankIdx = 4 }
+  elseif ($lines[4].Length -eq 0)                                 { $blankIdx = 4 }
   else                                                            { return $null }
   $bannerIdx = $blankIdx + 1
   if (($bannerIdx + 5) -ge $n)                              { return $null }   # need banner+diag+blank+VERDICT+blank+>=1 suffix line
-  if ($lines[$blankIdx] -cne '')                            { return $null }
-  if ($lines[$bannerIdx] -cne '===== GATE FAILED CLOSED =====') { return $null }
+  if ($lines[$blankIdx].Length -ne 0)                       { return $null }
+  if (-not [string]::Equals($lines[$bannerIdx], '===== GATE FAILED CLOSED =====', [System.StringComparison]::Ordinal)) { return $null }
   # DIAGNOSTIC (Get-CombinedReviewExit): the fixed malformed/errored strings, or the `expected N ...
   # only M ...` form with CANONICAL decimal counts (no leading zeros -- the producer
   # formats ints canonically). TryParse (not [int], which THROWS on overflow under
@@ -345,8 +345,8 @@ function Get-FailClosedBannerReason {
   # owned and cross-checked against the FIRST suffix line below (never the middle).
   $diag = $lines[$bannerIdx + 1]
   $diagKind = ''; $diagN = 0; $diagM = 0
-  if ($diag -ceq 'at least one pass produced a malformed verdict') { $diagKind = 'malformed' }
-  elseif ($diag -ceq 'one or more review passes errored or produced no verdict') { $diagKind = 'errored' }
+  if ([string]::Equals($diag, 'at least one pass produced a malformed verdict', [System.StringComparison]::Ordinal)) { $diagKind = 'malformed' }
+  elseif ([string]::Equals($diag, 'one or more review passes errored or produced no verdict', [System.StringComparison]::Ordinal)) { $diagKind = 'errored' }
   else {
     $dm = [regex]::Match($diag, '^expected (?<n>0|[1-9][0-9]*) review passes, only (?<m>0|[1-9][0-9]*) completed$')
     if ($dm.Success) {
@@ -358,9 +358,9 @@ function Get-FailClosedBannerReason {
     }
   }
   if ($diagKind -eq '')                                     { return $null }   # unknown / unbounded / non-canonical diagnostic
-  if ($lines[$bannerIdx + 2] -cne '')                       { return $null }
-  if ($lines[$bannerIdx + 3] -cne 'VERDICT: BLOCKED')       { return $null }
-  if ($lines[$bannerIdx + 4] -cne '')                       { return $null }
+  if ($lines[$bannerIdx + 2].Length -ne 0)                  { return $null }
+  if (-not [string]::Equals($lines[$bannerIdx + 3], 'VERDICT: BLOCKED', [System.StringComparison]::Ordinal)) { return $null }
+  if ($lines[$bannerIdx + 4].Length -ne 0)                  { return $null }
   # TERMINAL FRAMING (validated, not normalized): the producer ends the artifact with
   # exactly ONE trailing LF, and each final pass body is `Verdict.TrimEnd()` (or the
   # exact `(no verdict produced)` remainder), so the split yields exactly one trailing
@@ -369,8 +369,8 @@ function Get-FailClosedBannerReason {
   # (second-to-last empty), or a whitespace-ENDING final content line -- a terminal CR
   # from CRLF, trailing spaces/tabs, or a whitespace-only final body are all producer-
   # impossible because TrimEnd strips them.
-  if ($lines[$n - 1] -cne '')                               { return $null }   # missing terminal newline
-  if ($lines[$n - 2] -ceq '')                               { return $null }   # extra trailing blank line(s)
+  if ($lines[$n - 1].Length -ne 0)                          { return $null }   # missing terminal newline
+  if ($lines[$n - 2].Length -eq 0)                          { return $null }   # extra trailing blank line(s)
   $lastContent = $n - 2
   if ($lines[$lastContent] -cmatch '\s$')                   { return $null }   # trailing whitespace on the final content line (TrimEnd => never)
   $suffixStart = $bannerIdx + 5
@@ -380,7 +380,7 @@ function Get-FailClosedBannerReason {
   # (CANONICAL decimals, n in 1..total, total in 1..10) followed by an OPAQUE, non-
   # empty middle. The multi-section MIDDLE past this line is never inspected.
   $suffixIsNoVerdict = $false; $firstMarkerN = 0; $firstMarkerTotal = 0
-  if ($lines[$suffixStart] -ceq '(no verdict produced)') {
+  if ([string]::Equals($lines[$suffixStart], '(no verdict produced)', [System.StringComparison]::Ordinal)) {
     if ($lastContent -ne $suffixStart)                      { return $null }   # trailing data after the no-verdict remainder
     $suffixIsNoVerdict = $true
   }
@@ -408,14 +408,14 @@ function Get-FailClosedBannerReason {
   #                             refuses any preamble before this string exists, so a BOM never
   #                             reaches the recognizer. Any OTHER leading whitespace is caught
   #                             here because every producer-owned line is exact-matched
-  #                             (`^...$` / -ceq).
+  #                             (`^...$` / ordinal).
   #   interior tabs/spaces   -> the producer emits single spaces; the exact matches pin them.
   #   blank-line counts      -> the one/zero blanks between each producer-owned pair are pinned
   #                             by fixed line index (an extra/missing blank shifts a required
   #                             line off its exact match).
-  #   whitespace-only blanks -> every producer blank is checked `-ceq ''` (a "  " blank fails).
+  #   whitespace-only blanks -> every producer blank is checked for zero length (a "  " blank fails).
   #   unicode whitespace     -> `\s` (terminal check) + the exact ASCII matches cover it.
-  #   case on every literal  -> all comparisons are case-sensitive (`-c*` / [regex]::Match).
+  #   case on every literal  -> all comparisons are case-sensitive (ordinal / `-c*` / [regex]::Match).
   # The opaque MIDDLE's interior bytes are the ONLY unvalidated axis (reviewer content by
   # construction -- see the PHASE CONTRACT); its FRAMING (first marker + terminal) is pinned.
   # DIAGNOSTIC <-> FIRST-MARKER matrix (CLOSED; all PRODUCER-OWNED, prefix-level; the
@@ -728,28 +728,18 @@ function Get-FindingArchetype {
 # which verdicts are trustworthy evidence.
 $script:CategoryCountMax = 10000
 
-# Classify a category line's tail as none|count|invalid, the SAME way the
-# wrapper's `:\s*(?<v>none|\d+)\s*$` regex matches it. BYTE-IDENTICAL to the
-# helper in scripts/shared/dispatch-checklist.ps1 -- keep the two copies in sync
-# (the analyzer's suspect check and the checklist's trustworthiness gate must
-# classify tails identically).
+# Classify a category line's tail as none|count|invalid by the wrapper's
+# category value grammar. The log consumers must classify tails identically, or
+# they disagree on which verdict files are trustworthy evidence.
 function Get-CategoryTailKind {
   param([string]$Tail)
   $t = $Tail.Trim()
-  # CASE-SENSITIVE `none` compare (-ceq): the wrapper's contract regex is
-  # `:\s*(?<v>none|\d+)\s*$` (case-sensitive), so `None` / `NONE` are NOT the
-  # `none` sentinel -- they fall through to 'invalid', matching how the wrapper
-  # treats a non-`none|\d+` tail. A case-insensitive -eq would wrongly accept
-  # `None` as a zero-count category and admit a wrong-case tail as clean evidence.
-  if ($t -ceq 'none') { return @{ Kind = 'none'; Value = 0 } }
-  # Require a DIGITS-ONLY shape (on the already-trimmed tail) before TryParse,
-  # classifying a tail the same way the wrapper's `:\s*(?<v>none|\d+)\s*$` regex
-  # matches it. NOTE leading/trailing WHITESPACE is NOT a difference: the wrapper
-  # allows `\s*` around the value and trims, and $t is `$Tail.Trim()`, so ` 1 `
-  # is a valid count to BOTH. Only a SIGNED or otherwise non-`\d+` tail (e.g.
-  # `+1`, `1.0`, `1a`) fails `^\d+$` here AND fails `(?<v>none|\d+)` in the
-  # wrapper -- the wrapper then treats the line as a non-matching category line
-  # (counts toward neither `none` nor a digit count).
+  # CASE-SENSITIVE `none` compare (ordinal): the wrapper's category grammar is
+  # case-sensitive and refuses `None` / `NONE`, so a case-insensitive compare
+  # would admit a wrong-case tail as clean evidence.
+  if ([string]::Equals($t, 'none', [System.StringComparison]::Ordinal)) { return @{ Kind = 'none'; Value = 0 } }
+  # Digits-only shape before TryParse: TryParse alone accepts tails the wrapper
+  # refuses, such as a signed `+1` or a trailing NUL character.
   $parsed = 0
   if ($t -match '^\d+$' -and [int]::TryParse($t, [ref]$parsed) -and $parsed -le $script:CategoryCountMax) {
     return @{ Kind = 'count'; Value = $parsed }
@@ -769,7 +759,8 @@ function Get-CategoryTailKind {
 # the wrapper's (Get-VerdictExitCode): it rejects everything the wrapper fails
 # closed on (exit 3, possibly banner-less) AND the STRICTER-than-wrapper shapes
 # dispatch-checklist rejects -- over/underfilled category ROW blocks, malformed
-# category TAILS (`+1`, `1.0`), and WRONG-CASE severity prefixes (`blocker:`) --
+# category TAILS (`+1`, `1.0`) outside any review-pass block, and WRONG-CASE
+# severity prefixes (`blocker:`) --
 # because both scripts consume the same
 # verdict logs and must agree on which files are trustworthy evidence (a file one
 # rejects but the other counts would desync the corpus). $VerdictWordRe is the
@@ -783,11 +774,11 @@ function Get-VerdictSuspectReason {
   # Case policy MIRRORS the wrappers (and dispatch-checklist), which is ASYMMETRIC:
   #  - The VERDICT line + word and the GATE FAILED CLOSED banner are matched CASE-
   #    INSENSITIVELY. The wrappers detect the verdict with `-match '^VERDICT:'` and
-  #    compare the word with case-insensitive `-ne` (auto-review.ps1
-  #    Get-VerdictExitCode), so `verdict: clean` is an ACCEPTED clean verdict --
+  #    compare the word with case-insensitive `-ne` (Get-VerdictExitCode in
+  #    scripts/review-common.ps1), so `verdict: clean` is an ACCEPTED clean verdict --
   #    quarantining it here would wrongly diverge from a wrapper-accepted log.
   #  - SEVERITY prefixes and CATEGORY lines / `none` are matched CASE-SENSITIVELY
-  #    (the wrapper counts `^BLOCKER:` and `^<CAT>:\s*(none|\d+)` case-sensitively);
+  #    (the wrapper counts `^BLOCKER:` and `^<CAT>:` rows case-sensitively);
   #    a WRONG-CASE severity prefix is quarantined by the scan below as a finding
   #    the case-sensitive parser would silently under-count.
   if ($Content -match '(?m)^=====\s*GATE FAILED CLOSED\s*=====') {
@@ -805,7 +796,9 @@ function Get-VerdictSuspectReason {
   # any such line rather than trust a block the case-sensitive parser under-counts.
   foreach ($sm in ([regex]'(?im)^(?<sev>BLOCKER|QUALITY|NON-BLOCKER|NOTE):').Matches($Content)) {
     $sev = $sm.Groups['sev'].Value
-    if ($sev -cne $sev.ToUpperInvariant()) {
+    # Exact names, not "equals its upper case": (?i) also matches U+212A
+    # (Kelvin sign) for K, which ToUpperInvariant leaves as it is.
+    if ($sev -cnotmatch '\A(?:BLOCKER|QUALITY|NON-BLOCKER|NOTE)\z') {
       return "a severity-prefix line uses non-uppercase '$sev`:' -- the wrapper's case-sensitive parser under-counts it, so a real finding could hide under a falsely-clean verdict (untrustworthy)"
     }
   }
@@ -896,32 +889,19 @@ function Get-VerdictSuspectReason {
     return 'more than one REVIEW-DURATION-SECS stamp -- conflicting duration metadata is malformed evidence'
   }
   $lineVerdictRe = [regex]'(?im)^VERDICT:[^\r\n]*'   # case-INSENSITIVE, mirroring the wrappers' `-match '^VERDICT:'`
-  # Category-block validation is UNCONDITIONAL: EVERY verdict-shaped artifact the
-  # analyzer counts MUST carry the complete eight-category block, because the
-  # wrapper (Get-VerdictExitCode) and dispatch-checklist (Test-VerdictBlock) both
-  # reject a categoryless verdict (exit 3 / not-clean-evidence). There is NO
-  # pre-category legacy exemption: this package shipped WITH the eight-category
-  # format, so a categoryless `VERDICT: CLEAN` / `NON-BLOCKING` / `BLOCKER`
-  # artifact is malformed (truncated or corrupt), NOT a legit historical log the
-  # wrapper never saw, and must be quarantined -- admitting it would let evidence
-  # the other two log-consumers reject enter the trends corpus. (An earlier port
-  # carried a `$categoryEra` header/category-presence exemption; the gate flagged
-  # it as admitting current malformed logs, so it was removed.)
+  # Category-block validation is UNCONDITIONAL: every verdict-shaped artifact
+  # counted here must carry the complete eight-category block, because the
+  # wrapper rejects a categoryless verdict (exit 3). There is NO pre-category
+  # legacy exemption: this package shipped WITH the eight-category format, so a
+  # categoryless `VERDICT: CLEAN` / `NON-BLOCKING` / `BLOCKER` artifact is
+  # malformed (truncated or corrupt), not a historical log the wrapper never saw.
+  # (An earlier port carried a `$categoryEra` header/category-presence exemption;
+  # the gate flagged it as admitting current malformed logs, so it was removed.)
   $catNames = @('PLAN-DRIFT','SILENT-FAILURE','TOMBSTONE-OR-SHIM','CROSS-CRATE-CONTRACT','LOADER-OR-ASSET-EDGE','CONVENTION-ADHERENCE','TEST-QUALITY','DOC-VS-CODE-DRIFT')
-  # Loose category-header regex (ANY tail) shared by the invalid-tail scan below
-  # and the per-block row-balance check further down. The per-category cardinality
-  # check inside the segment loop uses the STRICT `none|\d+` form instead.
-  $catExactRe = [regex]'(?m)^(?<cat>PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT):\s*(?<rest>.*)$'
-  # [STRICTER-than-wrapper, matches dispatch-checklist Get-VerdictStructure]: NO
-  # category line may carry a malformed tail (a signed / non-`\d+` value like `+1`,
-  # `1.0`, `1a`, or an over-max count). The wrapper's `none|\d+` count regex is
-  # BLIND to such a tail (it sees no valid count line and can return CLEAN, not
-  # exit 3), but a malformed tail means the artifact is an untrustworthy DATA
-  # SOURCE -- dispatch-checklist rejects it (Get-CategoryFindings would misparse
-  # it), so the analyzer must reject it too or the two log-consumers disagree on
-  # the corpus. Caught here as a whole-content scan (an EXTRA malformed tail
-  # alongside a valid `<cat>: none` line passes the per-category cardinality check,
-  # which counts only the strict-form line).
+  $catExactRe = [regex]'(?m)^(?<cat>PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT):[^\S\r\n]*(?<rest>.*)$'
+  # The malformed-tail scan covers the whole file, not only review-pass blocks:
+  # a malformed category line anywhere makes the artifact an untrustworthy data
+  # source, and every log consumer must reject the same files.
   foreach ($ctm in $catExactRe.Matches($Content)) {
     if ((Get-CategoryTailKind -Tail $ctm.Groups['rest'].Value).Kind -eq 'invalid') {
       return "a category line has a malformed tail (not none|<digits<=$($script:CategoryCountMax)>) -- untrustworthy evidence (dispatch-checklist rejects it as a misparseable data source)"
@@ -961,10 +941,10 @@ function Get-VerdictSuspectReason {
       $vwm = $VerdictWordRe.Match($blk)
       if ($vwm.Success) { $vw = $vwm.Groups['v'].Value }
       if (($blk -cmatch '(?m)^QUALITY:') -or ($blk -cmatch '(?m)^NON-BLOCKER:') -or ($blk -cmatch '(?m)^NOTE:')) {
-        if ($vw -ne 'NON-BLOCKING') {
+        if (-not [string]::Equals($vw, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase)) {
           return 'a review-pass block has QUALITY/NON-BLOCKER/NOTE findings but its VERDICT is not NON-BLOCKING (wrapper-rejected incoherence)'
         }
-      } elseif ($vw -ne 'CLEAN') {
+      } elseif (-not [string]::Equals($vw, 'CLEAN', [System.StringComparison]::OrdinalIgnoreCase)) {
         return 'a review-pass block has zero findings but its VERDICT is not CLEAN (wrapper-rejected incoherence)'
       }
     }
@@ -978,12 +958,16 @@ function Get-VerdictSuspectReason {
     # finding-row count.
     $catTotal = 0
     foreach ($cat in $catNames) {
-      $cms = [regex]::Matches($blk, ('(?m)^' + [regex]::Escape($cat) + ':\s*(?<v>none|\d+)\s*$'))
+      $cms = [regex]::Matches($blk, ('(?m)^' + [regex]::Escape($cat) + ':[^\S\r\n]*(?<v>none|\d+)[^\S\r\n]*\r?$'))
+      $cRows = ([regex]::Matches($blk, ('(?m)^' + [regex]::Escape($cat) + ':'))).Count
+      if ($cRows -ne 1) {
+        return "a review-pass block has $cRows '$cat' category row(s) (exactly one required; the wrapper exits 3 on a missing row or a duplicate, malformed or not)"
+      }
       if ($cms.Count -ne 1) {
         return "a review-pass block has $($cms.Count) '$cat' category line(s) (exactly one required; the wrapper exits 3 on a missing or duplicate category -- a categoryless verdict is malformed, not legacy-exempt)"
       }
       $cv = $cms[0].Groups['v'].Value
-      if ($cv -ne 'none') {
+      if (-not [string]::Equals($cv, 'none', [System.StringComparison]::Ordinal)) {
         $cparsed = 0
         if (-not [int]::TryParse($cv, [ref]$cparsed) -or $cparsed -gt $script:CategoryCountMax) {
           return "a review-pass block has an out-of-range '$cat' count (the wrapper exits 3)"
@@ -1072,7 +1056,7 @@ $cutoff = if ($SinceDays -gt 0) { (Get-Date).AddDays(-$SinceDays) } else { [Date
 # otherwise overwrite the trend report with prompt examples masquerading as
 # verdicts. (Historical regression.) IDENTICAL to
 # scripts/shared/dispatch-checklist.ps1's $verdictNameRe (mirror contract).
-$verdictNameRe = [regex]'^review-\d{8}-\d{6}-.+\.md$'
+$verdictNameRe = [regex]'^review-[0-9]{8}-[0-9]{6}-.+\.md$'
 
 $sources = New-Object 'System.Collections.Generic.List[object]'   # @{ Display; Abs; Files }
 # Path identity is case-INSENSITIVE on Windows (and Resolve-Path preserves the
@@ -1149,13 +1133,14 @@ $findings = New-Object 'System.Collections.Generic.List[object]'
 # BLOCKER gives BLOCKED precedence even over a malformed word, so every counted
 # file resolves to exactly one of these three (there is no "OTHER" bucket).
 $verdictCounts = @{ CLEAN = 0; 'NON-BLOCKING' = 0; BLOCKED = 0 }
-$verdictCountsByBackend = @{}
+# Backend-keyed tables are ordinal: culture-keyed `@{}` ignores characters such as U+00AD.
+$verdictCountsByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 # Scanned-file count per backend (header-derived; recognized fail-closed runs
 # and trustworthy verdicts alike), for the report's `Backends:` provenance line.
-$filesByBackend = @{}
+$filesByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 # Recognized fail-closed exclusions per backend, so the excluded aggregate
 # carries the same per-backend split the report promises for every aggregate.
-$excludedByBackend = @{}
+$excludedByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 # Union file list (its .Count is the "verdicts scanned" total) + the distinct
 # untrustworthy classes:
 #   $excludedFailClosed -- files carrying the wrapper's own GATE FAILED CLOSED
@@ -1189,7 +1174,7 @@ foreach ($src in $sources) {
   foreach ($file in $src.Files) {
     $reviewFiles.Add($file) | Out-Null
     $shortName = $file.Name
-    $fileFindings = @{}  # reset per file: dedupe by normalized text, keep highest severity
+    $fileFindings = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)  # reset per file: dedupe by normalized text, keep highest severity
     if ($file.LastWriteTime -lt $oldestMtime) { $oldestMtime = $file.LastWriteTime }
     if ($file.LastWriteTime -gt $newestMtime) { $newestMtime = $file.LastWriteTime }
 
@@ -1280,9 +1265,9 @@ foreach ($src in $sources) {
     # test is CASE-SENSITIVE (-cmatch), matching the wrapper and the $severityRe
     # extraction below (a lowercase `blocker:` is not a finding to either).
     $vAll = @($verdictLineRe.Matches($content) | ForEach-Object { $_.Groups['v'].Value })
-    if (($content -cmatch '(?m)^BLOCKER:') -or ($vAll -contains 'BLOCKED')) {
+    if (($content -cmatch '(?m)^BLOCKER:') -or (@($vAll | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0)) {
       $vbucket = 'BLOCKED'
-    } elseif ($vAll -contains 'NON-BLOCKING') {
+    } elseif (@($vAll | Where-Object { [string]::Equals([string]$_, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
       $vbucket = 'NON-BLOCKING'
     } else {
       $vbucket = 'CLEAN'
@@ -1302,7 +1287,8 @@ foreach ($src in $sources) {
       # pass, or once per (severity,text) pair, inflates archetype counts and
       # thresholds. IDENTICAL normalize+rank to dispatch-checklist.ps1 (mirror).
       $textKey = ($text -replace '\s+', ' ').ToLowerInvariant()
-      $rank = switch ($sev) { 'BLOCKER' { 3 } 'QUALITY' { 2 } 'NON-BLOCKER' { 2 } 'NOTE' { 1 } default { 0 } }
+      # Ordinal, not `switch` (culture compare); same ranks as Get-SeverityRank in the mirror.
+      $rank = if ([string]::Equals($sev, 'BLOCKER', [System.StringComparison]::Ordinal)) { 3 } elseif ([string]::Equals($sev, 'QUALITY', [System.StringComparison]::Ordinal) -or [string]::Equals($sev, 'NON-BLOCKER', [System.StringComparison]::Ordinal)) { 2 } elseif ([string]::Equals($sev, 'NOTE', [System.StringComparison]::Ordinal)) { 1 } else { 0 }
       if (-not $fileFindings.ContainsKey($textKey) -or $fileFindings[$textKey].Rank -lt $rank) {
         $fileFindings[$textKey] = @{ Sev = $sev; Text = $text; Rank = $rank }
       }
@@ -1394,20 +1380,25 @@ $dateRange = "{0:yyyy-MM-dd} to {1:yyyy-MM-dd}" -f $oldestMtime, $newestMtime
 # provenance -- a per-backend split on every aggregate count + a [backend] tag
 # on every exemplar -- ALONGSIDE the union totals. With a single backend the
 # union lines keep their legacy labels (no '(union...)' suffix, no split).
-$backends = @($filesByBackend.Keys | Sort-Object)
+[string[]]$backends = @($filesByBackend.Keys | ForEach-Object { [string]$_ })
+[Array]::Sort($backends, [System.StringComparer]::Ordinal)
 $multiBackend = $backends.Count -gt 1
 
 # Wrap each Where-Object result in @() so an empty result is an empty
 # array (whose .Count is 0) rather than $null (whose .Count evaluates to
 # nothing and prints as blank in the wrapper log line).
-$blockerCount = @($findings | Where-Object { $_.Severity -eq 'BLOCKER' }).Count
-$qualityCount = @($findings | Where-Object { $_.Severity -eq 'QUALITY' }).Count
-$legacyNbCount = @($findings | Where-Object { $_.Severity -eq 'NON-BLOCKER' }).Count
-$noteCount = @($findings | Where-Object { $_.Severity -eq 'NOTE' }).Count
+$blockerCount = @($findings | Where-Object { [string]::Equals([string]$_.Severity, 'BLOCKER', [System.StringComparison]::Ordinal) }).Count
+$qualityCount = @($findings | Where-Object { [string]::Equals([string]$_.Severity, 'QUALITY', [System.StringComparison]::Ordinal) }).Count
+$legacyNbCount = @($findings | Where-Object { [string]::Equals([string]$_.Severity, 'NON-BLOCKER', [System.StringComparison]::Ordinal) }).Count
+$noteCount = @($findings | Where-Object { [string]::Equals([string]$_.Severity, 'NOTE', [System.StringComparison]::Ordinal) }).Count
 
 # Per-backend severity tallies for the per-backend provenance sub-lines.
-$sevByBackend = @{}
-foreach ($b in $backends) { $sevByBackend[$b] = @{ BLOCKER = 0; QUALITY = 0; 'NON-BLOCKER' = 0; NOTE = 0 } }
+$sevByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+foreach ($b in $backends) {
+  $sevTally = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+  foreach ($sevName in @('BLOCKER', 'QUALITY', 'NON-BLOCKER', 'NOTE')) { $sevTally[$sevName] = 0 }
+  $sevByBackend[$b] = $sevTally
+}
 foreach ($f in $findings) {
   if ($sevByBackend.ContainsKey($f.Backend) -and $sevByBackend[$f.Backend].ContainsKey($f.Severity)) {
     $sevByBackend[$f.Backend][$f.Severity]++
@@ -1478,7 +1469,9 @@ if ($excludedFailClosed.Count -gt 0) {
     [void]$sb.AppendLine("Per backend: $($exParts -join ', ')")
     [void]$sb.AppendLine('')
   }
-  foreach ($e in ($excludedFailClosed | Sort-Object)) {
+  $excludedSorted = $excludedFailClosed.ToArray()
+  [Array]::Sort($excludedSorted, [System.StringComparer]::Ordinal)
+  foreach ($e in $excludedSorted) {
     [void]$sb.AppendLine("- $e")
   }
   [void]$sb.AppendLine('')
@@ -1509,7 +1502,7 @@ function Write-ArchetypeSection {
   # PowerShell 5.1 returns a scalar PSObject whose .Count evaluates to
   # the wrong value (blank in the section header). Same defect pattern
   # as the top-level severity counts above. (Historical regression.)
-  $bucket = @($All | Where-Object { $_.Severity -eq $Severity })
+  $bucket = @($All | Where-Object { [string]::Equals([string]$_.Severity, $Severity, [System.StringComparison]::Ordinal) })
   [void]$sb.AppendLine("---")
   [void]$sb.AppendLine('')
   [void]$sb.AppendLine("## $Title ($($bucket.Count) findings)")
@@ -1538,7 +1531,7 @@ function Write-ArchetypeSection {
     $split = ''
     if ($MultiBackend) {
       $splitParts = foreach ($b in $Backends) {
-        $bc = @($g.Group | Where-Object { $_.Backend -eq $b }).Count
+        $bc = @($g.Group | Where-Object { [string]::Equals([string]$_.Backend, $b, [System.StringComparison]::Ordinal) }).Count
         "${b}=$bc"
       }
       $split = " ($($splitParts -join ', '))"

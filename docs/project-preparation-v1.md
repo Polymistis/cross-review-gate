@@ -98,8 +98,8 @@ Candidate mode diagnostics remain evidence and do not select governing rules.
 
 The compiler contains the renderer's marked byte-only values core as source.
 Marked copies must remain byte-identical by source inspection. Code unit-test
-authoring/execution is banned by the operator decision of 2026-09-07, clarified
-2026-09-08; other testing categories are not prohibited merely by category.
+authoring/execution is banned by operator decision; live testing, manual checks,
+ordinary program runs, and functional validation remain permitted.
 The accepted PowerShell compatibility repair lands alongside this compiler:
 SCOPED path splitting uses unlimited count 0 in every copy, preserving intended
 grammar on PowerShell 5.1 and 7. The renderer's Git/state record splits receive
@@ -127,7 +127,25 @@ second-package/receipt/history restrictions do not remain alongside conflicting
 configured ownership. Configured descriptions define document ownership only;
 no role can alter independent review, severity, output grammar, or capture duties.
 QUALITY classification and diff-only scope remain fixed. Bytes outside the three
-existing values bodies and the role-policy body remain unchanged.
+existing values bodies, the role-policy body and the unit-test policy body remain
+unchanged.
+
+From 2.5.0 the template also carries one ordered nonnested pair of standalone
+`<!-- crg-unit-test-policy v1 BEGIN -->` / `END` comments around the complete
+stock code unit-test ban, outside every values slot and the role-policy body;
+every other template statement about code unit tests defers to that policy.
+The boundaries are validated in the supplied template before any replacement
+and again in the compiled output. The compiler derives the permitted scope from the parsed configuration's
+`unit-tests` records and the same preparation's mode (`Get-CrgUnitTestScope`,
+[private governance](private-governance-v1.md)). With no scope in effect, the
+stock body and every other byte remain unchanged, and a template without the
+boundaries is accepted. With a scope in effect, the complete marked body is
+replaced by fixed text naming the scope (anywhere, for an effective prototype
+allowance; otherwise the configured folders) and keeping the stock rules outside
+it, and a template without the boundaries refuses. The paired PROJECT-MODE
+block's `pm-authority` line then defers to that policy instead of stating the
+every-mode ban; the legacy wrappers' copies of that block serve installs without
+project configuration and keep the ban.
 
 The caller proves role-document presence, original domain, and regular blob shape
 from pinned combined context. Pure compilation cannot authenticate that inventory.

@@ -197,7 +197,7 @@
 #       a correlated suspect (fail-loud report contract), never counted.
 #     * The severity-prefix + VERDICT-line regexes and the per-file union
 #       (BLOCKER-precedence) verdict classification, from the analyzer's parse
-#       loop and auto-merge.ps1's Get-VerdictExitCode.
+#       loop and Get-VerdictExitCode in scripts/review-common.ps1.
 #   Dot-sourcing analyze-blocker-trends.ps1 is NOT viable (it runs its full report
 #   pipeline and `exit`s on load), so the primitives are inlined here. A shared
 #   library is a recorded FUTURE refactor -- deliberately NOT done here. Any change
@@ -399,7 +399,7 @@ $script:CatNamesAll = @('PLAN-DRIFT', 'SILENT-FAILURE', 'TOMBSTONE-OR-SHIM', 'CR
 # dispatch-checklist.ps1's $verdictNameRe. auto-review.ps1 composes
 # `review-<YYYYMMDD>-<HHMMSS>-<scope>.md`; filtering by this shape (not bare *.md)
 # excludes prompt-template examples and other stray markdown. (Mirror contract.)
-$script:VerdictNameRe = [regex]'^review-\d{8}-\d{6}-.+\.md$'
+$script:VerdictNameRe = [regex]'^review-[0-9]{8}-[0-9]{6}-.+\.md$'
 # The VERDICT line regex, IDENTICAL to the analyzer's $verdictLineRe -- its
 # `(?<v>)` group yields the well-formed verdict WORD. Case-INSENSITIVE like the
 # wrappers' own `-match '^VERDICT:'` + case-insensitive word compare (a
@@ -448,8 +448,9 @@ namespace CrgWorkerAudit {
         uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
         if (n == 0 || n >= sb.Capacity) { error = Marshal.GetLastWin32Error(); return null; }
         string s = sb.ToString(0, (int)n);
-        if (s.StartsWith(@"\\?\UNC\")) { return @"\\" + s.Substring(8); }
-        if (s.StartsWith(@"\\?\")) { return s.Substring(4); }
+        // Ordinal throughout this file: culture compares ignore characters such as U+00AD.
+        if (s.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) { return @"\\" + s.Substring(8); }
+        if (s.StartsWith(@"\\?\", StringComparison.Ordinal)) { return s.Substring(4); }
         return s;
       }
     }
@@ -498,17 +499,16 @@ namespace CrgWorkerAudit {
 # for a region with NO header-shaped line at all (the wrappers predating
 # the header).
 $abCandidateRe = [regex]'(?i)^\s*(DIFF-SHA256|REVIEW-TREE-OID|REVIEW-BACKEND|REVIEW-EFFORT|REVIEW-SEVERITY-CONTRACT|REVIEW-DURATION-SECS)\b'
-$abEffortByBackend = @{
-  'codex'  = '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$'
-  'claude' = '^REVIEW-EFFORT: n/a$'
-}
+$abEffortByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+$abEffortByBackend['codex']  = '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$'
+$abEffortByBackend['claude'] = '^REVIEW-EFFORT: n/a$'
 function Get-ArtifactBackend {
   param([string]$Content)
   $abLines = $Content -split "`n"
   $abRegion = New-Object 'System.Collections.Generic.List[string]'
   $abHeaderShaped = $false
   foreach ($abLine in $abLines) {
-    if ($abLine -ceq '') { break }
+    if ($abLine.Length -eq 0) { break }
     $abRegion.Add($abLine)
     if ($abCandidateRe.IsMatch($abLine)) { $abHeaderShaped = $true }
   }
@@ -520,7 +520,7 @@ function Get-ArtifactBackend {
   if ($abRegion[2] -cnotmatch '^REVIEW-BACKEND: (?<b>codex|claude)$')             { return (& $abBad 'line 3 is not a producer REVIEW-BACKEND stamp') }
   $abBackend = $Matches['b']
   if ($abRegion[3] -cnotmatch $abEffortByBackend[$abBackend])                      { return (& $abBad "line 4 is not the $abBackend wrapper's REVIEW-EFFORT stamp") }
-  if ($abRegion.Count -ge 5 -and $abRegion[4] -cne 'REVIEW-SEVERITY-CONTRACT: blocker-only') { return (& $abBad 'line 5 is not the REVIEW-SEVERITY-CONTRACT stamp') }
+  if ($abRegion.Count -ge 5 -and -not [string]::Equals($abRegion[4], 'REVIEW-SEVERITY-CONTRACT: blocker-only', [System.StringComparison]::Ordinal)) { return (& $abBad 'line 5 is not the REVIEW-SEVERITY-CONTRACT stamp') }
   if ($abRegion.Count -eq 6 -and $abRegion[5] -cnotmatch '^REVIEW-DURATION-SECS: (0|[1-9][0-9]*)$') { return (& $abBad 'line 6 is not the REVIEW-DURATION-SECS stamp') }
   if ($abLines.Count -le $abRegion.Count) { return (& $abBad 'the header is cut off before its empty separator line') }
   return @{ Backend = $abBackend; Reason = $null }
@@ -593,28 +593,18 @@ function Read-VerdictArtifactText {
 # check and the classifier share ONE regex.
 # ---------------------------------------------------------------------------
 
-# Classify a category line's tail as none|count|invalid, the SAME way the
-# wrapper's `:\s*(?<v>none|\d+)\s*$` regex matches it. BYTE-IDENTICAL to the
-# helper in scripts/shared/dispatch-checklist.ps1 -- keep every mirrored copy in sync
-# (the analyzer's suspect check and the checklist's trustworthiness gate must
-# classify tails identically).
+# Classify a category line's tail as none|count|invalid by the wrapper's
+# category value grammar. The log consumers must classify tails identically, or
+# they disagree on which verdict files are trustworthy evidence.
 function Get-CategoryTailKind {
   param([string]$Tail)
   $t = $Tail.Trim()
-  # CASE-SENSITIVE `none` compare (-ceq): the wrapper's contract regex is
-  # `:\s*(?<v>none|\d+)\s*$` (case-sensitive), so `None` / `NONE` are NOT the
-  # `none` sentinel -- they fall through to 'invalid', matching how the wrapper
-  # treats a non-`none|\d+` tail. A case-insensitive -eq would wrongly accept
-  # `None` as a zero-count category and admit a wrong-case tail as clean evidence.
-  if ($t -ceq 'none') { return @{ Kind = 'none'; Value = 0 } }
-  # Require a DIGITS-ONLY shape (on the already-trimmed tail) before TryParse,
-  # classifying a tail the same way the wrapper's `:\s*(?<v>none|\d+)\s*$` regex
-  # matches it. NOTE leading/trailing WHITESPACE is NOT a difference: the wrapper
-  # allows `\s*` around the value and trims, and $t is `$Tail.Trim()`, so ` 1 `
-  # is a valid count to BOTH. Only a SIGNED or otherwise non-`\d+` tail (e.g.
-  # `+1`, `1.0`, `1a`) fails `^\d+$` here AND fails `(?<v>none|\d+)` in the
-  # wrapper -- the wrapper then treats the line as a non-matching category line
-  # (counts toward neither `none` nor a digit count).
+  # CASE-SENSITIVE `none` compare (ordinal): the wrapper's category grammar is
+  # case-sensitive and refuses `None` / `NONE`, so a case-insensitive compare
+  # would admit a wrong-case tail as clean evidence.
+  if ([string]::Equals($t, 'none', [System.StringComparison]::Ordinal)) { return @{ Kind = 'none'; Value = 0 } }
+  # Digits-only shape before TryParse: TryParse alone accepts tails the wrapper
+  # refuses, such as a signed `+1` or a trailing NUL character.
   $parsed = 0
   if ($t -match '^\d+$' -and [int]::TryParse($t, [ref]$parsed) -and $parsed -le $script:CategoryCountMax) {
     return @{ Kind = 'count'; Value = $parsed }
@@ -626,11 +616,11 @@ function Get-VerdictSuspectReason {
   # Case policy MIRRORS the wrappers (and dispatch-checklist), which is ASYMMETRIC:
   #  - The VERDICT line + word and the GATE FAILED CLOSED banner are matched CASE-
   #    INSENSITIVELY. The wrappers detect the verdict with `-match '^VERDICT:'` and
-  #    compare the word with case-insensitive `-ne` (auto-review.ps1
-  #    Get-VerdictExitCode), so `verdict: clean` is an ACCEPTED clean verdict --
+  #    compare the word with case-insensitive `-ne` (Get-VerdictExitCode in
+  #    scripts/review-common.ps1), so `verdict: clean` is an ACCEPTED clean verdict --
   #    quarantining it here would wrongly diverge from a wrapper-accepted log.
   #  - SEVERITY prefixes and CATEGORY lines / `none` are matched CASE-SENSITIVELY
-  #    (the wrapper counts `^BLOCKER:` and `^<CAT>:\s*(none|\d+)` case-sensitively);
+  #    (the wrapper counts `^BLOCKER:` and `^<CAT>:` rows case-sensitively);
   #    a WRONG-CASE severity prefix is quarantined by the scan below as a finding
   #    the case-sensitive parser would silently under-count.
   if ($Content -match '(?m)^=====\s*GATE FAILED CLOSED\s*=====') {
@@ -648,7 +638,9 @@ function Get-VerdictSuspectReason {
   # any such line rather than trust a block the case-sensitive parser under-counts.
   foreach ($sm in ([regex]'(?im)^(?<sev>BLOCKER|QUALITY|NON-BLOCKER|NOTE):').Matches($Content)) {
     $sev = $sm.Groups['sev'].Value
-    if ($sev -cne $sev.ToUpperInvariant()) {
+    # Exact names, not "equals its upper case": (?i) also matches U+212A
+    # (Kelvin sign) for K, which ToUpperInvariant leaves as it is.
+    if ($sev -cnotmatch '\A(?:BLOCKER|QUALITY|NON-BLOCKER|NOTE)\z') {
       return "a severity-prefix line uses non-uppercase '$sev`:' -- the wrapper's case-sensitive parser under-counts it, so a real finding could hide under a falsely-clean verdict (untrustworthy)"
     }
   }
@@ -739,32 +731,19 @@ function Get-VerdictSuspectReason {
     return 'more than one REVIEW-DURATION-SECS stamp -- conflicting duration metadata is malformed evidence'
   }
   $lineVerdictRe = [regex]'(?im)^VERDICT:[^\r\n]*'   # case-INSENSITIVE, mirroring the wrappers' `-match '^VERDICT:'`
-  # Category-block validation is UNCONDITIONAL: EVERY verdict-shaped artifact the
-  # analyzer counts MUST carry the complete eight-category block, because the
-  # wrapper (Get-VerdictExitCode) and dispatch-checklist (Test-VerdictBlock) both
-  # reject a categoryless verdict (exit 3 / not-clean-evidence). There is NO
-  # pre-category legacy exemption: this package shipped WITH the eight-category
-  # format, so a categoryless `VERDICT: CLEAN` / `NON-BLOCKING` / `BLOCKER`
-  # artifact is malformed (truncated or corrupt), NOT a legit historical log the
-  # wrapper never saw, and must be quarantined -- admitting it would let evidence
-  # the other two log-consumers reject enter the trends corpus. (An earlier port
-  # carried a `$categoryEra` header/category-presence exemption; the gate flagged
-  # it as admitting current malformed logs, so it was removed.)
+  # Category-block validation is UNCONDITIONAL: every verdict-shaped artifact
+  # counted here must carry the complete eight-category block, because the
+  # wrapper rejects a categoryless verdict (exit 3). There is NO pre-category
+  # legacy exemption: this package shipped WITH the eight-category format, so a
+  # categoryless `VERDICT: CLEAN` / `NON-BLOCKING` / `BLOCKER` artifact is
+  # malformed (truncated or corrupt), not a historical log the wrapper never saw.
+  # (An earlier port carried a `$categoryEra` header/category-presence exemption;
+  # the gate flagged it as admitting current malformed logs, so it was removed.)
   $catNames = @('PLAN-DRIFT','SILENT-FAILURE','TOMBSTONE-OR-SHIM','CROSS-CRATE-CONTRACT','LOADER-OR-ASSET-EDGE','CONVENTION-ADHERENCE','TEST-QUALITY','DOC-VS-CODE-DRIFT')
-  # Loose category-header regex (ANY tail) shared by the invalid-tail scan below
-  # and the per-block row-balance check further down. The per-category cardinality
-  # check inside the segment loop uses the STRICT `none|\d+` form instead.
-  $catExactRe = [regex]'(?m)^(?<cat>PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT):\s*(?<rest>.*)$'
-  # [STRICTER-than-wrapper, matches dispatch-checklist Get-VerdictStructure]: NO
-  # category line may carry a malformed tail (a signed / non-`\d+` value like `+1`,
-  # `1.0`, `1a`, or an over-max count). The wrapper's `none|\d+` count regex is
-  # BLIND to such a tail (it sees no valid count line and can return CLEAN, not
-  # exit 3), but a malformed tail means the artifact is an untrustworthy DATA
-  # SOURCE -- dispatch-checklist rejects it (Get-CategoryFindings would misparse
-  # it), so the analyzer must reject it too or the two log-consumers disagree on
-  # the corpus. Caught here as a whole-content scan (an EXTRA malformed tail
-  # alongside a valid `<cat>: none` line passes the per-category cardinality check,
-  # which counts only the strict-form line).
+  $catExactRe = [regex]'(?m)^(?<cat>PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT):[^\S\r\n]*(?<rest>.*)$'
+  # The malformed-tail scan covers the whole file, not only review-pass blocks:
+  # a malformed category line anywhere makes the artifact an untrustworthy data
+  # source, and every log consumer must reject the same files.
   foreach ($ctm in $catExactRe.Matches($Content)) {
     if ((Get-CategoryTailKind -Tail $ctm.Groups['rest'].Value).Kind -eq 'invalid') {
       return "a category line has a malformed tail (not none|<digits<=$($script:CategoryCountMax)>) -- untrustworthy evidence (dispatch-checklist rejects it as a misparseable data source)"
@@ -804,10 +783,10 @@ function Get-VerdictSuspectReason {
       $vwm = $VerdictWordRe.Match($blk)
       if ($vwm.Success) { $vw = $vwm.Groups['v'].Value }
       if (($blk -cmatch '(?m)^QUALITY:') -or ($blk -cmatch '(?m)^NON-BLOCKER:') -or ($blk -cmatch '(?m)^NOTE:')) {
-        if ($vw -ne 'NON-BLOCKING') {
+        if (-not [string]::Equals($vw, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase)) {
           return 'a review-pass block has QUALITY/NON-BLOCKER/NOTE findings but its VERDICT is not NON-BLOCKING (wrapper-rejected incoherence)'
         }
-      } elseif ($vw -ne 'CLEAN') {
+      } elseif (-not [string]::Equals($vw, 'CLEAN', [System.StringComparison]::OrdinalIgnoreCase)) {
         return 'a review-pass block has zero findings but its VERDICT is not CLEAN (wrapper-rejected incoherence)'
       }
     }
@@ -821,12 +800,16 @@ function Get-VerdictSuspectReason {
     # finding-row count.
     $catTotal = 0
     foreach ($cat in $catNames) {
-      $cms = [regex]::Matches($blk, ('(?m)^' + [regex]::Escape($cat) + ':\s*(?<v>none|\d+)\s*$'))
+      $cms = [regex]::Matches($blk, ('(?m)^' + [regex]::Escape($cat) + ':[^\S\r\n]*(?<v>none|\d+)[^\S\r\n]*\r?$'))
+      $cRows = ([regex]::Matches($blk, ('(?m)^' + [regex]::Escape($cat) + ':'))).Count
+      if ($cRows -ne 1) {
+        return "a review-pass block has $cRows '$cat' category row(s) (exactly one required; the wrapper exits 3 on a missing row or a duplicate, malformed or not)"
+      }
       if ($cms.Count -ne 1) {
         return "a review-pass block has $($cms.Count) '$cat' category line(s) (exactly one required; the wrapper exits 3 on a missing or duplicate category -- a categoryless verdict is malformed, not legacy-exempt)"
       }
       $cv = $cms[0].Groups['v'].Value
-      if ($cv -ne 'none') {
+      if (-not [string]::Equals($cv, 'none', [System.StringComparison]::Ordinal)) {
         $cparsed = 0
         if (-not [int]::TryParse($cv, [ref]$cparsed) -or $cparsed -gt $script:CategoryCountMax) {
           return "a review-pass block has an out-of-range '$cat' count (the wrapper exits 3)"
@@ -887,7 +870,7 @@ function Get-VerdictSuspectReason {
 # Union (worst) outcome of a whole verdict artifact: 'BLOCKED' | 'QUALITY' |
 # 'PASS'. Mirrors the analyzer's per-file vbucket union (BLOCKER precedence over a
 # malformed/CLEAN word) AND the wrapper's NOTE-only == exit-0 (PASS) rule
-# (auto-merge.ps1 Get-VerdictExitCode: NOTE-only -> exit 0). Because Get-Verdict-
+# (Get-VerdictExitCode in scripts/review-common.ps1: NOTE-only -> exit 0). Because Get-Verdict-
 # SuspectReason has already REJECTED any fail-closed / incoherent / malformed
 # artifact before a file reaches here, whole-file severity-prefix + verdict-word
 # counting yields the correct union:
@@ -913,7 +896,7 @@ function Get-VerdictSuspectReason {
 function Get-VerdictUnionClass {
   param([string]$Content)
   $vAll = @($script:VerdictLineRe.Matches($Content) | ForEach-Object { $_.Groups['v'].Value })
-  if (($Content -match '(?m)^BLOCKER:') -or ($vAll -contains 'BLOCKED')) { return 'BLOCKED' }
+  if (($Content -match '(?m)^BLOCKER:') -or (@($vAll | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0)) { return 'BLOCKED' }
   if (($Content -match '(?m)^QUALITY:') -or ($Content -match '(?m)^NON-BLOCKER:')) { return 'QUALITY' }
   return 'PASS'
 }
@@ -967,11 +950,11 @@ function Get-VerdictCategories {
   param([string]$Content)
   $present = New-Object 'System.Collections.Generic.List[string]'
   foreach ($cat in $script:CatNamesAll) {
-    $rx = [regex]('(?m)^' + [regex]::Escape($cat) + ':\s*(?<v>none|\d+)\s*$')
+    $rx = [regex]('(?m)^' + [regex]::Escape($cat) + ':[^\S\r\n]*(?<v>none|\d+)[^\S\r\n]*\r?$')
     $hit = $false
     foreach ($m in $rx.Matches($Content)) {
       $v = $m.Groups['v'].Value
-      if ($v -ne 'none') {
+      if (-not [string]::Equals($v, 'none', [System.StringComparison]::Ordinal)) {
         $parsed = 0
         if ([int]::TryParse($v, [ref]$parsed) -and $parsed -ge 1) { $hit = $true; break }
       }
@@ -995,7 +978,7 @@ function Get-VerdictCategories {
 function Get-VerdictScope {
   param([string]$Name)
   # Strip the fixed `review-<8>-<6>-` prefix and the `.md` suffix to get the tag.
-  $m = [regex]::Match($Name, '^review-\d{8}-\d{6}-(?<tag>.+)\.md$')
+  $m = [regex]::Match($Name, '^review-[0-9]{8}-[0-9]{6}-(?<tag>.+)\.md$')
   if (-not $m.Success) { return [pscustomobject]@{ Kind = 'other'; Tip = $null; Base = $null; Child = $null } }
   $tag = $m.Groups['tag'].Value
   # The optional trailing child token is the merge gate's per-child
@@ -1034,10 +1017,10 @@ function Get-VerdictScope {
   # in the same log namespace but never GATED a landing -- counting them as gate
   # rounds (or as a passing round via OID match) would inflate the audit. They are
   # classified 'manual' and excluded from the gate-round counts.
-  if ($tag -eq 'staged') {
+  if ([string]::Equals($tag, 'staged', [System.StringComparison]::OrdinalIgnoreCase)) {
     return [pscustomobject]@{ Kind = 'commit-gate'; Tip = $null; Base = $null; Child = $null }
   }
-  if ($tag -eq 'uncommitted') {
+  if ([string]::Equals($tag, 'uncommitted', [System.StringComparison]::OrdinalIgnoreCase)) {
     return [pscustomobject]@{ Kind = 'manual'; Tip = $null; Base = $null; Child = $null }
   }
   $cm = [regex]::Match($tag, '^commit-(?<sha>[0-9a-fA-F]{7,40})$')
@@ -1066,7 +1049,7 @@ function Get-VerdictScope {
 # the epoch-or-null shape.
 function Get-VerdictFileNameEpochState {
   param([string]$Name, [System.TimeZoneInfo]$Zone = [System.TimeZoneInfo]::Local)
-  $m = [regex]::Match($Name, '^review-(?<d>\d{8})-(?<t>\d{6})-')
+  $m = [regex]::Match($Name, '^review-(?<d>[0-9]{8})-(?<t>[0-9]{6})-')
   if (-not $m.Success) { return @{ Epoch = $null; State = 'no-prefix'; Reason = 'name carries no producer timestamp prefix' } }
   $stamp = $m.Groups['d'].Value + '-' + $m.Groups['t'].Value
   $dt = [DateTime]::MinValue
@@ -1126,7 +1109,7 @@ function Resolve-TipToCommit {
   $matches = @()
   foreach ($sha in $CommitShas) {
     $s = $sha.ToLowerInvariant()
-    if ($s.StartsWith($t) -or $t.StartsWith($s)) { $matches += ,$sha }
+    if ($s.StartsWith($t, [System.StringComparison]::Ordinal) -or $t.StartsWith($s, [System.StringComparison]::Ordinal)) { $matches += ,$sha }
   }
   if ($matches.Count -eq 1) { return $matches[0] }
   if ($matches.Count -gt 1) {
@@ -1177,13 +1160,13 @@ function Test-BaseMatch {
     # -Legacy: those paths only demote or mark suspect, so the wider match
     # is the conservative direction.
     $sha = ([string]$AuditBaseSha).ToLowerInvariant()
-    $shaHit = ($sha -ne '') -and ($sha.StartsWith($fb) -or $fb.StartsWith($sha))
+    $shaHit = ($sha.Length -ne 0) -and ($sha.StartsWith($fb, [System.StringComparison]::Ordinal) -or $fb.StartsWith($sha, [System.StringComparison]::Ordinal))
     if (-not $Legacy) { return $shaHit }
-    $refHit = (-not [string]::IsNullOrWhiteSpace($AuditBaseRef)) -and ($fb -eq ([string]$AuditBaseRef).ToLowerInvariant())
+    $refHit = (-not [string]::IsNullOrWhiteSpace($AuditBaseRef)) -and [string]::Equals($fb, ([string]$AuditBaseRef).ToLowerInvariant(), [System.StringComparison]::Ordinal)
     return ($shaHit -or $refHit)
   }
   if (-not [string]::IsNullOrWhiteSpace($AuditBaseRef)) {
-    return ($fb -eq ([string]$AuditBaseRef).ToLowerInvariant())
+    return [string]::Equals($fb, ([string]$AuditBaseRef).ToLowerInvariant(), [System.StringComparison]::Ordinal)
   }
   return $false
 }
@@ -1271,7 +1254,7 @@ function Test-ExhaustionSidecar {
       return $res
     }
   }
-  if ([string]$obj.kind -ne 'token-exhaustion') { $res.Reason = "sidecar kind is '$($obj.kind)', not 'token-exhaustion'"; return $res }
+  if (-not [string]::Equals([string]$obj.kind, 'token-exhaustion', [System.StringComparison]::OrdinalIgnoreCase)) { $res.Reason = "sidecar kind is '$($obj.kind)', not 'token-exhaustion'"; return $res }
   $res.Valid = $true
   $res.Record = $obj
   return $res
@@ -1377,7 +1360,7 @@ function Invoke-CommitGateCorrelation {
     $nearestDelta = [long]::MaxValue
     $nearestTied = New-Object 'System.Collections.Generic.List[int]'
     for ($i = 0; $i -lt $Commits.Count; $i++) {
-      if (([string]$Commits[$i].Tree).ToLowerInvariant() -ne $vTree) { continue }
+      if (-not [string]::Equals(([string]$Commits[$i].Tree).ToLowerInvariant(), $vTree, [System.StringComparison]::Ordinal)) { continue }
       $delta = [Math]::Abs([long]$Commits[$i].Epoch - $vEpoch)
       if ($delta -lt $nearestDelta) {
         $nearestDelta = $delta
@@ -1760,7 +1743,7 @@ function Get-Permutations {
 function Get-ClusterStabilityKeys {
   param([object[]]$Clusters, [string]$KeyOf)
   $keys = New-Object 'System.Collections.Generic.List[string]'
-  $seen = @{}
+  $seen = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
   foreach ($c in $Clusters) {
     $e = [string]([long]$c.Epoch)
     $n = if ($seen.ContainsKey($e)) { [int]$seen[$e] } else { 0 }
@@ -1809,7 +1792,7 @@ function Group-MergeRounds {
   # identity every post-match consumer keys on, so a SHA-spelled and a
   # ref-spelled artifact for one audited base land in ONE bucket. A record
   # without BaseKey keys on its Base token.
-  $byKey = @{}
+  $byKey = New-Object System.Collections.Hashtable([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($a in $Artifacts) {
     $aBaseKey = if ($null -ne $a.PSObject.Properties['BaseKey'] -and -not [string]::IsNullOrEmpty([string]$a.BaseKey)) { [string]$a.BaseKey } else { [string]$a.Base }
     $k = "$($a.MatchedSha)|$aBaseKey"
@@ -1851,7 +1834,9 @@ function Group-MergeRounds {
 # and the outcome it publishes.
 function Get-MergeRoundKey {
   param($Round)
-  return ((@($Round.Members | Sort-Object) -join '+') + '|' + [string]$Round.Class)
+  [string[]]$roundMembers = @($Round.Members | ForEach-Object { [string]$_ })
+  [Array]::Sort($roundMembers, [System.StringComparer]::Ordinal)
+  return (($roundMembers -join '+') + '|' + [string]$Round.Class)
 }
 
 function New-MergeRoundsForBucket {
@@ -1882,7 +1867,7 @@ function New-MergeRoundsForBucket {
           Class           = $a.Class
           Backends        = (New-Object 'System.Collections.Generic.List[string]')
           Members         = (New-Object 'System.Collections.Generic.List[string]')
-          BackendRoles    = @{}
+          BackendRoles    = (New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal))
           Ambiguous       = $false
           OrderAmbiguous  = $false
         }
@@ -1944,7 +1929,7 @@ function New-MergeRoundsForBucket {
 # PURE.
 function Group-CommitGateAttempts {
   param([object[]]$Artifacts)
-  $byTree = @{}
+  $byTree = New-Object System.Collections.Hashtable([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($a in $Artifacts) {
     $treeKey = if ([string]::IsNullOrWhiteSpace([string]$a.TreeOid)) { "NAME:$($a.Name)" } else { ([string]$a.TreeOid).ToLowerInvariant() }
     if (-not $byTree.ContainsKey($treeKey)) { $byTree[$treeKey] = New-Object 'System.Collections.Generic.List[object]' }
@@ -1967,7 +1952,9 @@ function Group-CommitGateAttempts {
 # when both of those match.
 function Get-CommitGateAttemptKey {
   param($Attempt)
-  return ((@($Attempt.Names | Sort-Object) -join '+') + '|' + [string]$Attempt.Class)
+  [string[]]$attemptNames = @($Attempt.Names | ForEach-Object { [string]$_ })
+  [Array]::Sort($attemptNames, [System.StringComparer]::Ordinal)
+  return (($attemptNames -join '+') + '|' + [string]$Attempt.Class)
 }
 
 function New-CommitGateAttemptsForBucket {
@@ -2186,7 +2173,7 @@ function Resolve-GitFacts {
   # every recorded parent edge.
   $inRange = New-Object 'System.Collections.Generic.HashSet[string]'
   foreach ($cc in $commits) { [void]$inRange.Add(([string]$cc.Sha).ToLowerInvariant()) }
-  $parentEpochs = @{}
+  $parentEpochs = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
   foreach ($cc in $commits) {
     foreach ($pSha in @($cc.Parents)) {
       $pk = ([string]$pSha).ToLowerInvariant()
@@ -2305,7 +2292,7 @@ function ConvertTo-UnixSeconds {
 function Get-TreeOidFromContent {
   param([string]$Content)
   foreach ($toLine in ($Content -split "`n")) {
-    if ($toLine -ceq '') { break }
+    if ($toLine.Length -eq 0) { break }
     if ($toLine -cmatch '^REVIEW-TREE-OID: (?<oid>[0-9a-f]{40}([0-9a-f]{24})?)$') { return $Matches['oid'] }
   }
   return ''
@@ -2334,11 +2321,11 @@ function Resolve-RelativeToMainRoot {
   $commonDir = $null
   $absOut = & git rev-parse --path-format=absolute --git-common-dir 2>$null
   if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($absOut)) {
-    $commonDir = ($absOut | Select-Object -First 1).Trim()
+    $commonDir = ($absOut | Select-Object -First 1)
   } else {
     $plainOut = & git rev-parse --git-common-dir 2>$null
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($plainOut)) {
-      try { $commonDir = (Resolve-Path -LiteralPath (($plainOut | Select-Object -First 1).Trim()) -ErrorAction Stop).Path }
+      try { $commonDir = (Resolve-Path -LiteralPath ($plainOut | Select-Object -First 1) -ErrorAction Stop).Path }
       catch { $commonDir = $null }
     }
   }
@@ -2353,7 +2340,7 @@ function Resolve-RelativeToMainRoot {
     if (($commonDir -replace '\\', '/') -match '(?i)/\.git/modules/') {
       $topOut = & git rev-parse --show-toplevel 2>$null
       if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($topOut)) {
-        return [System.IO.Path]::GetFullPath((Join-Path (($topOut | Select-Object -First 1).Trim()) $Dir))
+        return [System.IO.Path]::GetFullPath((Join-Path ($topOut | Select-Object -First 1) $Dir))
       }
       return $Dir
     }
@@ -2405,9 +2392,9 @@ if ($firstCommitEpoch -le [long]$facts.BaseEpoch) {
 # list, out-of-range parents (the base, a side history reachable from it)
 # from the facts' resolved ParentEpochs. A parent with no epoch on record
 # is an unverified edge and marks attribution unreliable rather than pass.
-$commitEpochBySha = @{}
+$commitEpochBySha = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 foreach ($c in $commits) { $commitEpochBySha[([string]$c.Sha).ToLowerInvariant()] = [long]$c.Epoch }
-$outsideParentEpochs = if ($null -ne $facts.PSObject.Properties['ParentEpochs'] -and $null -ne $facts.ParentEpochs) { $facts.ParentEpochs } else { @{} }
+$outsideParentEpochs = if ($null -ne $facts.PSObject.Properties['ParentEpochs'] -and $null -ne $facts.ParentEpochs) { $facts.ParentEpochs } else { New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal) }
 foreach ($c in $commits) {
   foreach ($parentSha in @($c.Parents)) {
     $pk = ([string]$parentSha).ToLowerInvariant()
@@ -2462,7 +2449,7 @@ $windowEndEpoch = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) + 3600
 # copies each artifact between them under the SAME producer name. Identity is
 # therefore the producer NAME plus the evidence the file carries, not the path
 # it was found at.
-$seenArtifactByName = @{}
+$seenArtifactByName = New-Object System.Collections.Hashtable([System.StringComparer]::OrdinalIgnoreCase)
 $duplicateArtifactCopies = New-Object 'System.Collections.Generic.List[string]'
 $commitGateAll = New-Object 'System.Collections.Generic.List[object]'
 $mergeAll = New-Object 'System.Collections.Generic.List[object]'
@@ -2765,7 +2752,7 @@ foreach ($dirRaw in $ReviewsDir) {
   $sidecarFiles = @()
   try {
     $sidecarFiles = @(Get-ChildItem -LiteralPath $abs -Filter '*.exhaustion.json' -File -ErrorAction Stop |
-      Where-Object { $_.Name -match '^review-\d{8}-\d{6}-.+\.exhaustion\.json$' -and (Test-VerdictNameInWindow -Name $_.Name -StartEpoch $windowStartEpoch -EndEpoch $windowEndEpoch) })
+      Where-Object { $_.Name -cmatch '^review-[0-9]{8}-[0-9]{6}-.+\.exhaustion\.json$' -and (Test-VerdictNameInWindow -Name $_.Name -StartEpoch $windowStartEpoch -EndEpoch $windowEndEpoch) })
   } catch {
     $sidecarScanIncomplete = $true
     Write-Host "[worker-audit] WARNING: failed to enumerate exhaustion sidecars in ${dir}: $($_.Exception.Message)"
@@ -2946,7 +2933,7 @@ foreach ($rec in @($commitGateAll.ToArray() + $otherAll.ToArray())) {
   # malformed base-tree verdict is NOT this branch's evidence and must NOT abort the
   # branch audit -- it falls through to the window advisory below. (Codex BLOCKER: the
   # base-tree correlation path false-aborted on a stray malformed base-tree verdict.)
-  $oidHit = ($oid -ne '' -and $commitTreeSet.Contains($oid))
+  $oidHit = ($oid.Length -ne 0 -and $commitTreeSet.Contains($oid))
   if ($oidHit) {
     $suspectCorrelated.Add("[$($rec.Backend)] $($rec.Name) -- $($rec.SuspectReason)$sidecarNote") | Out-Null
   } elseif ($null -eq $rec.Epoch) {
@@ -3071,7 +3058,10 @@ if ($suspectCorrelated.Count -gt 0) {
 if ($attributionNonMonotonic.Count -gt 0) {
   Write-Host "[worker-audit] ERROR: [class:operational] commit times are NOT monotonic along the branch ($($attributionNonMonotonic -join '; ')) - window attribution cannot be trusted; every window-attributed count below is UNRELIABLE (see the report lead)."
 }
-foreach ($am in @($script:AmbiguousTipMatches | Sort-Object -Unique)) {
+$ambiguousTipSeen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @(,[System.StringComparer]::Ordinal)
+$ambiguousTipLines = [string[]]@($script:AmbiguousTipMatches | Where-Object { $ambiguousTipSeen.Add([string]$_) } | ForEach-Object { [string]$_ })
+[Array]::Sort($ambiguousTipLines, [System.StringComparer]::Ordinal)
+foreach ($am in $ambiguousTipLines) {
   Write-Host "[worker-audit] WARNING: $am (see the report's advisory section)"
 }
 if ($verdictScanIncomplete) {
@@ -3134,7 +3124,9 @@ $passAmbiguousRows = @($rows | Where-Object { $_.PassMatchAmbiguous })
 # evidence collection, on the same footing as the ambiguous and order-unstable
 # attempt collections -- it carries no authority, but something DID correlate,
 # so it must count as correlation SIGNAL and be listed by name.
-$passAmbiguousArtifacts = @(@($rows | ForEach-Object { @($_.PassMatchAmbiguousNames) }) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
+$passAmbiguousSeen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @(,[System.StringComparer]::OrdinalIgnoreCase)
+$passAmbiguousArtifacts = [string[]]@(@($rows | ForEach-Object { @($_.PassMatchAmbiguousNames) }) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and $passAmbiguousSeen.Add([string]$_) } | ForEach-Object { [string]$_ })
+[Array]::Sort($passAmbiguousArtifacts, [System.StringComparer]::Ordinal)
 if ($passAmbiguousRows.Count -gt 0) {
   $commitGateEvidenceIncomplete = $true
   Write-Host "[worker-audit] WARNING: $($passAmbiguousRows.Count) commit row(s) sit equidistant from a same-tree PASS artifact - which commit that verdict reviewed is not decidable from the artifacts, so the round is claimed by NEITHER (named per row in the report)"
@@ -3187,9 +3179,9 @@ foreach ($rec in $mergeAll) {
   # tip + base match (checked just above) WITHOUT this tree-OID cross-check. (Codex
   # BLOCKER: the mismatch was silently `continue`d.)
   $recOid = ([string]$rec.TreeOid).ToLowerInvariant()
-  $matchedRow = @($commits | Where-Object { $_.Sha -eq $matchedCommit })[0]
+  $matchedRow = @($commits | Where-Object { [string]::Equals([string]$_.Sha, [string]$matchedCommit, [System.StringComparison]::Ordinal) })[0]
   $matchedTree = ([string]$matchedRow.Tree).ToLowerInvariant()
-  if ($recOid -ne '' -and $recOid -ne $matchedTree) {
+  if ($recOid.Length -ne 0 -and -not [string]::Equals($recOid, $matchedTree, [System.StringComparison]::Ordinal)) {
     $mergeTreeMismatch.Add("[$($rec.Backend)] $($rec.Name) -- tip resolves to commit $($matchedRow.Short) but REVIEW-TREE-OID $recOid != that commit's tree $matchedTree") | Out-Null
     continue
   }
@@ -3207,7 +3199,7 @@ foreach ($rec in $mergeAll) {
   $quarKey = "$matchedCommit|$canonBaseKey"
   $quarHit = $false
   foreach ($panelSc in $exhaustedPanelSidecars) {
-    if ($panelSc.Key -eq $quarKey -and [Math]::Abs([long]$rec.Epoch - $panelSc.Epoch) -le $script:PanelAttemptGapSec) {
+    if ([string]::Equals([string]$panelSc.Key, $quarKey, [System.StringComparison]::Ordinal) -and [Math]::Abs([long]$rec.Epoch - $panelSc.Epoch) -le $script:PanelAttemptGapSec) {
       $quarHit = $true
       break
     }
@@ -3427,7 +3419,9 @@ $dirsScannedList = if ($dirsScanned.Count -gt 0) { ($dirsScanned -join '; ') } e
 # directory-name derivation.
 # `.ToArray()` on each List (the PS 5.1 `@(<List>)` hazard documented at the
 # correlation engine's return).
-$backendsSeen = @(($commitGateAll.ToArray() + $mergeAll.ToArray() + $manualAll.ToArray() + $otherAll.ToArray()) | ForEach-Object { [string]$_.Backend } | Sort-Object -Unique)
+$backendsSeenSet = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @(,[System.StringComparer]::Ordinal)
+$backendsSeen = [string[]]@(($commitGateAll.ToArray() + $mergeAll.ToArray() + $manualAll.ToArray() + $otherAll.ToArray()) | ForEach-Object { [string]$_.Backend } | Where-Object { $backendsSeenSet.Add($_) })
+[Array]::Sort($backendsSeen, [System.StringComparer]::Ordinal)
 $backendsScannedList = if ($backendsSeen.Count -gt 0) { ($backendsSeen -join ', ') } else { '(none)' }
 
 $sb = [System.Text.StringBuilder]::new()
@@ -3572,7 +3566,10 @@ if ($script:AmbiguousTipMatches.Count -gt 0) {
   [void]$sb.AppendLine('so the artifacts carrying them are not credited to any commit (enumeration')
   [void]$sb.AppendLine('order never decides identity); verify them by hand.')
   [void]$sb.AppendLine('')
-  foreach ($am in @($script:AmbiguousTipMatches | Sort-Object -Unique)) { [void]$sb.AppendLine("- $(ConvertTo-BoundedMarkdownLine -Text $am)") }
+  $reportTipSeen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList @(,[System.StringComparer]::Ordinal)
+  $reportTipLines = [string[]]@($script:AmbiguousTipMatches | Where-Object { $reportTipSeen.Add([string]$_) } | ForEach-Object { [string]$_ })
+  [Array]::Sort($reportTipLines, [System.StringComparer]::Ordinal)
+  foreach ($am in $reportTipLines) { [void]$sb.AppendLine("- $(ConvertTo-BoundedMarkdownLine -Text $am)") }
   [void]$sb.AppendLine('')
 }
 if ($attributionNonMonotonic.Count -gt 0) {

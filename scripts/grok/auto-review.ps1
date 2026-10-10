@@ -70,8 +70,9 @@ function Get-CrgGrokCliPath {
     Join-Path $userProfilePath '.grok\bin\grok.exe'
   }
   $path = [IO.Path]::GetFullPath($candidate)
+  # Ordinal compares throughout: PS 5.1 culture rules ignore characters such as U+00AD.
   if (-not [IO.Path]::IsPathRooted($path) -or [IO.Path]::GetPathRoot($path).Length -lt 3 -or
-      [IO.Path]::GetExtension($path) -ine '.exe' -or -not [IO.File]::Exists($path) -or
+      -not [string]::Equals([IO.Path]::GetExtension($path), '.exe', [StringComparison]::OrdinalIgnoreCase) -or -not [IO.File]::Exists($path) -or
       ([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint)) {
     throw 'configured Grok CLI review requires an ordinary grok.exe from PATH or the standard user installation'
   }
@@ -84,7 +85,7 @@ function Get-CrgGrokCliEnvironment {
   foreach ($item in $source.GetEnumerator()) {
     $name = [string]$item.Key
     if ($name -imatch '\A(?:XAI_API_KEY|GROK_HOME|GROK_MEMORY|GROK_DISABLE_AUTOUPDATER|GROK_LOG_FILE|RUST_LOG)\z') { continue }
-    if ($name -ieq 'Path') { $name = 'Path' }
+    if ([string]::Equals($name, 'Path', [StringComparison]::OrdinalIgnoreCase)) { $name = 'Path' }
     $entries.Add($name + '=' + [string]$item.Value)
   }
   $entries.Add('GROK_MEMORY=0')
@@ -94,7 +95,8 @@ function Get-CrgGrokCliEnvironment {
 
 function Invoke-CrgGrokCliRequest {
   param([object]$HostInput, [object]$ProviderSnapshot, [string]$Executable, [string]$PromptPath,
-    [string]$ResponseLeaf, [string]$StandardErrorLeaf)
+    [string]$ResponseLeaf, [string]$StandardErrorLeaf, [ValidatePattern('\Agrok-[0-9a-z.-]+\z')][string]$Model,
+    [ValidatePattern('\A(?:low|medium|high|xhigh)\z', Options = 'None')][string]$Effort, [int]$StallWarnMs, [string]$LivenessLeaf)
   $responsePath = Join-Path $HostInput.OutDir $ResponseLeaf
   $responseStream = [IO.File]::Open($responsePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
   try {
@@ -104,14 +106,20 @@ function Invoke-CrgGrokCliRequest {
     $responseStream.Dispose()
     throw
   }
-  $session = $null; $quiescent = $true
+  $session = $null; $quiescent = $true; $heartbeat = $null
   try {
     $root = $ProviderSnapshot.Root
     $permissionRoot = $root.Replace('\', '/')
-    $arguments = @('--no-auto-update', '--model', 'grok-4.6', '--reasoning-effort', 'xhigh',
+    # No --max-turns and no deadline: like the Codex and Claude reviewers, a
+    # Grok pass runs until it finishes (docs/reviewer-liveness-design.md).
+    # Turn caps and the one-hour kill were removed in 2.4.4; a capped or
+    # killed pass is an unavailable review, never a shorter one, so a bound
+    # only converted slow reviews into failures. A CLI that stops on its own
+    # limit still reports a non-success result, which the stream check refuses.
+    $arguments = @('--no-auto-update', '--model', $Model, '--reasoning-effort', $Effort,
       '--tools', 'read_file,grep,list_dir', '--deny', 'MCPTool', '--permission-mode', 'dontAsk',
       '--allow', ('Read(' + $permissionRoot + '/**)'), '--allow', ('Grep(' + $permissionRoot + '/**)'),
-      '--no-plan', '--no-subagents', '--disable-web-search', '--max-turns', '128', '--verbatim',
+      '--no-plan', '--no-subagents', '--disable-web-search', '--verbatim',
       '--output-format', 'streaming-messages-json', '--cwd', $root, '--prompt-file', $PromptPath)
     try {
       $session = Start-CrgPairedReviewProcess -ApplicationName $Executable -Arguments $arguments -WorkingDirectory $root `
@@ -123,14 +131,15 @@ function Invoke-CrgGrokCliRequest {
       if ($null -ne $failure) { $session = $failure.Data['CrgPairedProcessSession']; $quiescent = $false }
       throw
     }
-    $deadline = [DateTime]::UtcNow.AddHours(1)
+    # The streamed Messages transcript grows per turn and tool call, so it is
+    # this pass's liveness evidence, owned by the Grok root process.
+    $heartbeat = Get-AdversarialReviewHeartbeat
+    $heartbeat.Start("grok-$($HostInput.ScopeTag)-$PID", 30000, $HostInput.OutDir, $ResponseLeaf, $StallWarnMs,
+      (Join-Path $HostInput.OutDir $LivenessLeaf), ($ResponseLeaf + '=' + $session.ProcessId))
     $rootExitedWithDescendants = $false
     do {
-      $remaining = $deadline - [DateTime]::UtcNow
-      if ($remaining.TotalMilliseconds -le 0) { throw 'Grok CLI exceeded the one-hour review deadline' }
-      $waitMilliseconds = [int][Math]::Min(10000, [Math]::Max(1, [Math]::Ceiling($remaining.TotalMilliseconds)))
-      $observations = @(Wait-CrgPairedReviewProcess -Session $session -TimeoutMilliseconds $waitMilliseconds)
-      if ($observations.Count -ne 1 -or ($null -ne $observations[0].Error -and $observations[0].Error -cne 'drain-timeout')) {
+      $observations = @(Wait-CrgPairedReviewProcess -Session $session -TimeoutMilliseconds 10000)
+      if ($observations.Count -ne 1 -or ($null -ne $observations[0].Error -and -not [string]::Equals([string]$observations[0].Error, 'drain-timeout', [StringComparison]::Ordinal))) {
         throw 'Grok CLI process observation failed'
       }
       $observation = $observations[0]
@@ -166,6 +175,9 @@ function Invoke-CrgGrokCliRequest {
     if ($observation.ExitCode -ne 0) { throw "Grok CLI returned exit $($observation.ExitCode); no complete review or positive exhaustion evidence exists" }
     return ,$bytes
   } finally {
+    if ($null -ne $heartbeat -and -not $heartbeat.Stop()) {
+      Write-Host '[paired-review] WARN: the Grok heartbeat thread did not confirm quiescence; the retained liveness log may miss trailing records'
+    }
     if ($null -ne $session) {
       try {
         $stopped = @(Stop-CrgPairedReviewProcess -Session $session -TimeoutMilliseconds 10000)
@@ -181,7 +193,8 @@ function Invoke-CrgGrokCliRequest {
 }
 
 function New-CrgGrokRequestBytes {
-  param([object]$HostInput)
+  param([object]$HostInput, [ValidatePattern('\Agrok-[0-9a-z.-]+\z')][string]$Model,
+    [ValidatePattern('\A(?:low|medium|high|xhigh)\z', Options = 'None')][string]$Effort)
   $bundle = $HostInput.InputBundle
   $records = New-Object 'System.Collections.Generic.List[object]'
   [long]$total = 0
@@ -211,7 +224,7 @@ function New-CrgGrokRequestBytes {
     contextEntries = $bundle.Metadata.ContextEntries; files = $records.ToArray()
   }) -Depth 12 -Compress
   $request = [ordered]@{
-    model = 'grok-4.6'; reasoning = @{ effort = 'xhigh' }; store = $false; stream = $false
+    model = $Model; reasoning = @{ effort = $Effort }; store = $false; stream = $false
     tools = @(); tool_choice = 'none'; truncation = 'disabled'; max_output_tokens = 32768
     input = @(
       @{ role = 'system'; content = $HostInput.FullPrompt },
@@ -231,21 +244,21 @@ function Invoke-CrgGrokRequest {
   $handler.UseDefaultCredentials = $false
   $client = [Net.Http.HttpClient]::new($handler)
   $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
-  $cancel = [Threading.CancellationTokenSource]::new(3600000)
   $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, 'https://api.x.ai/v1/responses')
   $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $ApiKey)
   $request.Content = [Net.Http.ByteArrayContent]::new($RequestBytes)
   $request.Content.Headers.ContentType = [Net.Http.Headers.MediaTypeHeaderValue]::new('application/json')
   $response = $null; $stream = $null; $output = [IO.MemoryStream]::new()
   try {
-    # One deadline covers headers and bounded body acquisition. No redirects,
+    # No deadline, matching every other reviewer (the one-hour cancellation
+    # was removed in 2.4.4); the body stays size-bounded. No redirects,
     # automatic retries, tools, stored conversation or endpoint discovery.
-    $response = $client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancel.Token).GetAwaiter().GetResult()
+    $response = $client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
     if ($null -eq $response.Content -or
         ($null -ne $response.Content.Headers.ContentLength -and $response.Content.Headers.ContentLength -gt 16777216)) { throw 'Grok HTTP response body is absent or exceeds 16 MiB' }
     $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
     $buffer = New-Object byte[] 8192
-    while (($count = $stream.ReadAsync($buffer, 0, $buffer.Length, $cancel.Token).GetAwaiter().GetResult()) -gt 0) {
+    while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
       if ($output.Length + $count -gt 16777216) { throw 'Grok HTTP response exceeds 16 MiB' }
       $output.Write($buffer, 0, $count)
     }
@@ -253,11 +266,11 @@ function Invoke-CrgGrokRequest {
   } catch {
     # Exception text from an HTTP stack is not an approved diagnostic surface
     # for credentials or request headers. Preserve only the failure category.
-    throw 'Grok API transport/deadline/body acquisition failed; no review result or exhaustion classification was produced'
+    throw 'Grok API transport/body acquisition failed; no review result or exhaustion classification was produced'
   } finally {
     if ($null -ne $stream) { $stream.Dispose() }
     if ($null -ne $response) { $response.Dispose() }
-    $request.Dispose(); $cancel.Dispose(); $output.Dispose(); $client.Dispose(); $handler.Dispose()
+    $request.Dispose(); $output.Dispose(); $client.Dispose(); $handler.Dispose()
   }
 }
 
@@ -274,14 +287,14 @@ function Assert-CrgGrokJsonMembers {
     $position = $token.Index + $token.Length
     $value = $token.Value
     $frame = if ($frames.Count -gt 0) { $frames[$frames.Count - 1] } else { $null }
-    if ($value -cin @('{', '[')) {
+    if ([Array]::IndexOf([string[]]@('{', '['), [string]$value) -ge 0) {
       if ($frames.Count -ge 64) { throw 'Grok JSON exceeds the nesting bound' }
-      $frames.Add([pscustomobject]@{ Kind = $value; Key = ($value -ceq '{'); Names = (New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)) })
-    } elseif ($value -cin @('}', ']')) {
-      if ($null -eq $frame -or $previous -ceq ',' -or ($value -ceq '}' -and $frame.Kind -cne '{') -or ($value -ceq ']' -and $frame.Kind -cne '[')) { throw 'Grok JSON has an invalid or trailing-comma container' }
+      $frames.Add([pscustomobject]@{ Kind = $value; Key = [string]::Equals($value, '{', [StringComparison]::Ordinal); Names = (New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)) })
+    } elseif ([Array]::IndexOf([string[]]@('}', ']'), [string]$value) -ge 0) {
+      if ($null -eq $frame -or [string]::Equals($previous, ',', [StringComparison]::Ordinal) -or ([string]::Equals($value, '}', [StringComparison]::Ordinal) -and -not [string]::Equals($frame.Kind, '{', [StringComparison]::Ordinal)) -or ([string]::Equals($value, ']', [StringComparison]::Ordinal) -and -not [string]::Equals($frame.Kind, '[', [StringComparison]::Ordinal))) { throw 'Grok JSON has an invalid or trailing-comma container' }
       $frames.RemoveAt($frames.Count - 1)
-    } elseif ($null -ne $frame -and $frame.Kind -ceq '{') {
-      if ($value -ceq ',') { $frame.Key = $true }
+    } elseif ($null -ne $frame -and [string]::Equals($frame.Kind, '{', [StringComparison]::Ordinal)) {
+      if ([string]::Equals($value, ',', [StringComparison]::Ordinal)) { $frame.Key = $true }
       elseif ($frame.Key -and $value.StartsWith('"', [StringComparison]::Ordinal)) {
         $decoded = ConvertFrom-Json -InputObject ('{"name":' + $value + '}') -ErrorAction Stop
         if (-not $frame.Names.Add([string]$decoded.name)) { throw 'Grok JSON contains a duplicate or case-aliased object member' }
@@ -294,33 +307,37 @@ function Assert-CrgGrokJsonMembers {
 }
 
 function Read-CrgGrokResponse {
-  param([byte[]]$Bytes)
+  param([byte[]]$Bytes, [ValidatePattern('\Agrok-[0-9a-z.-]+\z')][string]$Model,
+    [ValidatePattern('\A(?:low|medium|high|xhigh)\z', Options = 'None')][string]$Effort)
   try {
     $text = $utf8.GetString($Bytes)
     Assert-CrgGrokJsonMembers -Text $text
     $response = ConvertFrom-Json -InputObject $text -ErrorAction Stop
   }
   catch { throw 'Grok API body is not a complete strict-UTF8 JSON document' }
-  if ($response -isnot [pscustomobject] -or $response.object -cne 'response' -or $response.status -cne 'completed' -or
-      $response.model -isnot [string] -or $response.model -cnotmatch '\Agrok-4\.6(?:-(?:[0-9]{4}|[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?\z' -or
+  if ($response -isnot [pscustomobject] -or $response.object -isnot [string] -or -not [string]::Equals($response.object, 'response', [StringComparison]::Ordinal) -or
+      $response.status -isnot [string] -or -not [string]::Equals($response.status, 'completed', [StringComparison]::Ordinal) -or
+      $response.model -isnot [string] -or $response.model -cnotmatch ('\A' + [regex]::Escape($Model) + '(?:-(?:[0-9]{4}|[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}))?\z') -or
       $response.output -isnot [Array] -or $response.output.Count -eq 0 -or
       $response.output.Count -gt 128 -or $null -ne $response.error -or $null -ne $response.incomplete_details -or
       ($null -ne $response.PSObject.Properties['store'] -and ($response.store -isnot [bool] -or $response.store))) { throw 'Grok response is incomplete, failed, mismatched, or contradicts nonstored mode' }
-  if ($null -ne $response.reasoning.effort -and $response.reasoning.effort -cne 'xhigh') { throw 'Grok response reports an effort different from the requested maximum' }
+  if ($null -ne $response.reasoning.effort -and ($response.reasoning.effort -isnot [string] -or -not [string]::Equals($response.reasoning.effort, $Effort, [StringComparison]::Ordinal))) { throw 'Grok response reports an effort different from the requested profile effort' }
   $messages = New-Object 'System.Collections.Generic.List[object]'
   foreach ($item in $response.output) {
-    if ($item -isnot [pscustomobject] -or $item.type -cnotin @('reasoning', 'message') -or
-        ($null -ne $item.PSObject.Properties['status'] -and $null -ne $item.status -and $item.status -cne 'completed')) { throw 'Grok response contains an unfinished or unrequested output type' }
-    if ($item.type -ceq 'message') { $messages.Add($item) }
+    if ($item -isnot [pscustomobject] -or $item.type -isnot [string] -or [Array]::IndexOf([string[]]@('reasoning', 'message'), [string]$item.type) -lt 0 -or
+        ($null -ne $item.PSObject.Properties['status'] -and $null -ne $item.status -and ($item.status -isnot [string] -or -not [string]::Equals($item.status, 'completed', [StringComparison]::Ordinal)))) { throw 'Grok response contains an unfinished or unrequested output type' }
+    if ([string]::Equals($item.type, 'message', [StringComparison]::Ordinal)) { $messages.Add($item) }
   }
-  if ($messages.Count -ne 1 -or $messages[0].role -cne 'assistant' -or $messages[0].status -cne 'completed' -or $messages[0].content -isnot [Array] -or
-      $messages[0].content.Count -ne 1 -or $messages[0].content[0].type -cne 'output_text' -or
+  if ($messages.Count -ne 1 -or $messages[0].role -isnot [string] -or -not [string]::Equals($messages[0].role, 'assistant', [StringComparison]::Ordinal) -or
+      $messages[0].status -isnot [string] -or -not [string]::Equals($messages[0].status, 'completed', [StringComparison]::Ordinal) -or $messages[0].content -isnot [Array] -or
+      $messages[0].content.Count -ne 1 -or $messages[0].content[0].type -isnot [string] -or -not [string]::Equals($messages[0].content[0].type, 'output_text', [StringComparison]::Ordinal) -or
       $messages[0].content[0].text -isnot [string] -or [string]::IsNullOrWhiteSpace($messages[0].content[0].text)) { throw 'Grok response must contain exactly one complete assistant text verdict' }
   return $messages[0].content[0].text
 }
 
 function Read-CrgGrokCliResponse {
-  param([byte[]]$Bytes)
+  param([byte[]]$Bytes, [ValidatePattern('\Agrok-[0-9a-z.-]+\z')][string]$Model)
+  $modelPattern = '\A' + [regex]::Escape($Model) + '(?:-build)?\z'
   try {
     $text = $utf8.GetString($Bytes)
     $lines = @($text -split '\r?\n', 0)
@@ -342,30 +359,30 @@ function Read-CrgGrokCliResponse {
   }
   catch { throw 'Grok CLI output is not a complete strict-UTF8 NDJSON stream' }
   $initial = $records[0]
-  if ($initial.type -cne 'system' -or $initial.subtype -isnot [string] -or $initial.subtype -cne 'init' -or
-      $initial.apiKeySource -isnot [string] -or $initial.apiKeySource -cne 'oauth' -or
-      $initial.model -isnot [string] -or $initial.model -cnotmatch '\Agrok-4\.6(?:-build)?\z') {
+  if (-not [string]::Equals($initial.type, 'system', [StringComparison]::Ordinal) -or $initial.subtype -isnot [string] -or -not [string]::Equals($initial.subtype, 'init', [StringComparison]::Ordinal) -or
+      $initial.apiKeySource -isnot [string] -or -not [string]::Equals($initial.apiKeySource, 'oauth', [StringComparison]::Ordinal) -or
+      $initial.model -isnot [string] -or $initial.model -cnotmatch $modelPattern) {
     throw 'Grok CLI stream lacks the configured local-login model initialization'
   }
   $sessionId = $initial.session_id
   $initCount = 0; $finalAssistant = $null
   foreach ($record in $records) {
-    if ($record.session_id -cne $sessionId) { throw 'Grok CLI stream contains mismatched session identities' }
-    if ($record.type -ceq 'system' -and $record.subtype -ceq 'init') { $initCount++ }
-    if ($record.type -ceq 'result' -and $record -ne $records[$records.Count - 1]) { throw 'Grok CLI stream contains a nonterminal result record' }
-    if ($record.type -ceq 'assistant') { $finalAssistant = $record }
+    if (-not [string]::Equals($record.session_id, $sessionId, [StringComparison]::Ordinal)) { throw 'Grok CLI stream contains mismatched session identities' }
+    if ([string]::Equals($record.type, 'system', [StringComparison]::Ordinal) -and $record.subtype -is [string] -and [string]::Equals($record.subtype, 'init', [StringComparison]::Ordinal)) { $initCount++ }
+    if ([string]::Equals($record.type, 'result', [StringComparison]::Ordinal) -and $record -ne $records[$records.Count - 1]) { throw 'Grok CLI stream contains a nonterminal result record' }
+    if ([string]::Equals($record.type, 'assistant', [StringComparison]::Ordinal)) { $finalAssistant = $record }
   }
   $response = $records[$records.Count - 1]
-  if ($initCount -ne 1 -or $response.type -cne 'result' -or $response.subtype -isnot [string] -or
-      $response.subtype -cne 'success' -or $response.is_error -isnot [bool] -or $response.is_error -or
+  if ($initCount -ne 1 -or -not [string]::Equals($response.type, 'result', [StringComparison]::Ordinal) -or $response.subtype -isnot [string] -or
+      -not [string]::Equals($response.subtype, 'success', [StringComparison]::Ordinal) -or $response.is_error -isnot [bool] -or $response.is_error -or
       $response.result -isnot [string] -or [string]::IsNullOrWhiteSpace($response.result) -or
-      $response.stop_reason -isnot [string] -or $response.stop_reason -cne 'end_turn' -or
+      $response.stop_reason -isnot [string] -or -not [string]::Equals($response.stop_reason, 'end_turn', [StringComparison]::Ordinal) -or
       ($response.num_turns -isnot [int] -and $response.num_turns -isnot [long]) -or
-      $response.num_turns -lt 1 -or $response.num_turns -gt 128 -or $response.modelUsage -isnot [pscustomobject]) {
-    throw 'Grok CLI stream is incomplete, bounded by the turn cap, or lacks one successful terminal verdict'
+      $response.num_turns -lt 1 -or $response.modelUsage -isnot [pscustomobject]) {
+    throw 'Grok CLI stream is incomplete or lacks one successful terminal verdict'
   }
   $models = @($response.modelUsage.PSObject.Properties)
-  if ($models.Count -ne 1 -or $models[0].Name -cnotmatch '\Agrok-4\.6(?:-build)?\z' -or
+  if ($models.Count -ne 1 -or $models[0].Name -cnotmatch $modelPattern -or
       $models[0].Value -isnot [pscustomobject]) {
     throw 'Grok CLI output lacks the supported single-model usage identity'
   }
@@ -377,16 +394,16 @@ function Read-CrgGrokCliResponse {
   }
   if ($null -eq $finalAssistant -or $finalAssistant.PSObject.Properties['parent_tool_use_id'] -eq $null -or
       $null -ne $finalAssistant.parent_tool_use_id -or $finalAssistant.message -isnot [pscustomobject] -or
-      $finalAssistant.message.role -isnot [string] -or $finalAssistant.message.role -cne 'assistant' -or
-      $finalAssistant.message.model -isnot [string] -or $finalAssistant.message.model -cnotmatch '\Agrok-4\.6(?:-build)?\z' -or
-      $finalAssistant.message.stop_reason -isnot [string] -or $finalAssistant.message.stop_reason -cne 'end_turn' -or
+      $finalAssistant.message.role -isnot [string] -or -not [string]::Equals($finalAssistant.message.role, 'assistant', [StringComparison]::Ordinal) -or
+      $finalAssistant.message.model -isnot [string] -or $finalAssistant.message.model -cnotmatch $modelPattern -or
+      $finalAssistant.message.stop_reason -isnot [string] -or -not [string]::Equals($finalAssistant.message.stop_reason, 'end_turn', [StringComparison]::Ordinal) -or
       $finalAssistant.message.content -isnot [Array]) { throw 'Grok CLI stream lacks one complete final main-conversation assistant message' }
   $texts = New-Object 'System.Collections.Generic.List[string]'
   foreach ($content in $finalAssistant.message.content) {
-    if ($content -isnot [pscustomobject] -or $content.type -isnot [string] -or $content.type -cnotin @('thinking', 'text')) {
+    if ($content -isnot [pscustomobject] -or $content.type -isnot [string] -or [Array]::IndexOf([string[]]@('thinking', 'text'), [string]$content.type) -lt 0) {
       throw 'Grok CLI final assistant message contains an unsupported or unfinished content block'
     }
-    if ($content.type -ceq 'text') {
+    if ([string]::Equals($content.type, 'text', [StringComparison]::Ordinal)) {
       if ($content.text -isnot [string]) { throw 'Grok CLI final assistant text block is malformed' }
       $texts.Add($content.text)
     } elseif ($content.thinking -isnot [string] -or
@@ -394,56 +411,84 @@ function Read-CrgGrokCliResponse {
       throw 'Grok CLI final assistant thinking block is malformed'
     }
   }
-  if ($texts.Count -ne 1 -or $texts[0] -cne $response.result) {
+  if ($texts.Count -ne 1 -or -not [string]::Equals($texts[0], $response.result, [StringComparison]::Ordinal)) {
     throw 'Grok CLI terminal result does not exactly match the final assistant text'
   }
   return $response.result
 }
 
 $pairedHost = $null; $providerSnapshot = $null; $promptOwner = $null; $exitCode = 3; $apiKey = $null
-$duration = [Diagnostics.Stopwatch]::StartNew()
+$duration = $null
 try {
   $sharedScripts = Split-Path -Parent $PSScriptRoot
   foreach ($moduleName in @('private-governance', 'paired-governance', 'paired-tree', 'review-preparation',
-      'project-preparation', 'paired-review-input', 'paired-diff', 'paired-preparation', 'paired-process')) {
+      'project-preparation', 'paired-review-input', 'paired-diff', 'paired-preparation', 'paired-process', 'review-liveness')) {
     Import-Module -Name (Join-Path $sharedScripts ($moduleName + '.psm1')) -Force -DisableNameChecking -ErrorAction Stop
   }
+  $stallResolved = Resolve-StallWarnMs -Raw $env:CROSS_REVIEW_STALL_WARN_SECS
+  if (-not $stallResolved.Ok) { throw "CROSS_REVIEW_STALL_WARN_SECS='$($env:CROSS_REVIEW_STALL_WARN_SECS)' is not a valid stall-warning threshold (integer seconds, 30..86400)" }
   $pairedHost = Open-CrgPairedHostInput -HostScriptPath $PSCommandPath -PreparedPairPath $PreparedPairPath `
     -PreparedPairSha256 $PreparedPairSha256 -PreparedPublicTreeSha256 $PreparedPublicTreeSha256 `
     -PreparedPrivateTreeSha256 $PreparedPrivateTreeSha256 -OutDir $OutDir -Backend grok -PreparedOrigin $PreparedOrigin
   $configuration = $pairedHost.InputBundle.Metadata.Descriptor.GoverningConfig
-  if ($configuration.ReviewerPolicy -cne 'grok-fallback' -or $null -eq $configuration.Grok -or
-      $configuration.Grok.Model -cne 'grok-4.6' -or $configuration.Grok.Effort -cne 'xhigh') { throw 'Grok review is not enabled by the captured governing configuration' }
+  # The governing configuration names a central profile; this release's
+  # profile table (resolved when the configuration was parsed) supplies the
+  # model and effort, and the profile or a legacy record supplies the
+  # transport and authentication that run here.
+  if (-not [string]::Equals([string]$configuration.ReviewerPolicy, 'grok-fallback', [StringComparison]::Ordinal) -or $null -eq $configuration.Grok -or
+      [Array]::IndexOf([string[]]@('low', 'medium', 'high', 'xhigh'), [string]$configuration.Grok.Effort) -lt 0 -or
+      [Array]::IndexOf([string[]]@(Get-CrgGrokAllowedIdentities -Config $configuration), [string]($configuration.Grok.Model + '|' + $configuration.Grok.Effort)) -lt 0) { throw 'Grok review is not enabled by the captured governing configuration' }
+  $model = [string]$configuration.Grok.Model
+  $effort = [string]$configuration.Grok.Effort
   $transport = $configuration.Grok.Transport
-  if ($transport -ceq 'api' -and $configuration.Grok.Authentication -ceq 'environment-key') {
-    $requestBytes = New-CrgGrokRequestBytes -HostInput $pairedHost
+  if ([string]::Equals([string]$transport, 'api', [StringComparison]::Ordinal) -and [string]::Equals([string]$configuration.Grok.Authentication, 'environment-key', [StringComparison]::Ordinal)) {
+    $requestBytes = New-CrgGrokRequestBytes -HostInput $pairedHost -Model $model -Effort $effort
     # Credential acquisition occurs only inside an explicitly configured live
     # API review. The key is never accepted as an argument, inspected, or archived.
     $apiKey = [Environment]::GetEnvironmentVariable('XAI_API_KEY', [EnvironmentVariableTarget]::Process)
     if ([string]::IsNullOrWhiteSpace($apiKey) -or $apiKey.Length -gt 8192 -or $apiKey -match '[\s\x00-\x1f\x7f]') { throw 'configured Grok API review requires a valid XAI_API_KEY in the process environment' }
-  } elseif ($transport -ceq 'cli' -and $configuration.Grok.Authentication -ceq 'local-login') {
+  } elseif ([string]::Equals([string]$transport, 'cli', [StringComparison]::Ordinal) -and [string]::Equals([string]$configuration.Grok.Authentication, 'local-login', [StringComparison]::Ordinal)) {
     $grokExecutable = Get-CrgGrokCliPath
+    # The snapshot creates, owns and removes its own uniquely named root under
+    # this parent, so no adapter-created directory or pathname deletion is
+    # needed. Do not use the attempt directory ($pairedHost.OutDir) as the
+    # parent: the session holds it open, so snapshot custody cannot pin it
+    # (Win32 error 32, found by the first live gate run of the Grok CLI route
+    # on 2026-09-27). Codex and Claude snapshots also live under TEMP.
     try {
       $providerSnapshot = New-CrgPairedProviderSnapshot -InputBundle $pairedHost.InputBundle `
-        -RuntimeTemplateBytes $pairedHost.RuntimeTemplateBytes -TempParent $pairedHost.OutDir -Backend grok -PreparedOrigin $pairedHost.Origin
+        -RuntimeTemplateBytes $pairedHost.RuntimeTemplateBytes -TempParent $env:TEMP -Backend grok -PreparedOrigin $pairedHost.Origin
     } catch {
       $pairedHost.ProviderSnapshotFailure = $_.Exception
       throw
     }
   } else { throw 'Grok review transport and authentication do not match the captured governing configuration' }
   $stem = 'review-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + '-' + $pairedHost.ScopeTag
-  if ($transport -ceq 'cli') {
+  if ([string]::Equals([string]$transport, 'cli', [StringComparison]::Ordinal)) {
     $promptOwner = Open-CrgGrokPromptEvidence -HostInput $pairedHost -Leaf ($stem + '.prompt.txt') -Bytes $utf8.GetBytes($pairedHost.FullPrompt)
     Assert-CrgGrokPromptEvidence -Prompt $promptOwner
   }
   $verdicts = New-Object 'System.Collections.Generic.List[string]'
   $exitCode = 0
+  # REVIEW-DURATION-SECS anchors at the first reviewer launch, as in the
+  # Codex and Claude wrappers, so adapter setup and the checks before that
+  # first launch never count; the clock then runs across every later pass.
   for ($pass = 1; $pass -le $ReviewPasses; $pass++) {
     Assert-CrgPairedReadContext -Context $pairedHost.ReadContext -InputBundle $pairedHost.InputBundle
     Write-Host "[paired-review] starting full review pass $pass/$ReviewPasses"
     $responseLeaf = $stem + '.pass-' + $pass + '.response.json'
-    if ($transport -ceq 'api') {
-      $response = Invoke-CrgGrokRequest -RequestBytes $requestBytes -ApiKey $apiKey
+    $livenessLeaf = $stem + '.pass-' + $pass + '.liveness.jsonl'
+    if ([string]::Equals([string]$transport, 'api', [StringComparison]::Ordinal)) {
+      # The non-streaming API grows no evidence file until the body arrives,
+      # so the beat is the timer form: visible waiting, no stall inference.
+      $apiHeartbeat = Get-AdversarialReviewHeartbeat
+      $apiHeartbeat.Start("grok-$($pairedHost.ScopeTag)-$PID", 30000, '', '', $stallResolved.Ms,
+        (Join-Path $pairedHost.OutDir $livenessLeaf), '')
+      if ($null -eq $duration) { $duration = [Diagnostics.Stopwatch]::StartNew() }
+      try { $response = Invoke-CrgGrokRequest -RequestBytes $requestBytes -ApiKey $apiKey }
+      finally {
+        if (-not $apiHeartbeat.Stop()) { Write-Host '[paired-review] WARN: the Grok heartbeat thread did not confirm quiescence; the retained liveness log may miss trailing records' }
+      }
       $null = Write-CrgGrokEvidence -HostInput $pairedHost -Leaf $responseLeaf -Bytes $response.Bytes
       if ($response.StatusCode -ne 200) {
         # xAI documents 429 as rate limiting, not positive allowance exhaustion.
@@ -451,16 +496,18 @@ try {
         # HTTP failures, including authentication, credit and rate-limit errors.
         throw "Grok API returned HTTP $($response.StatusCode); no complete review or positive exhaustion evidence exists"
       }
-      $verdict = (Read-CrgGrokResponse -Bytes $response.Bytes).TrimEnd()
+      $verdict = (Read-CrgGrokResponse -Bytes $response.Bytes -Model $model -Effort $effort).TrimEnd()
     } else {
       Assert-CrgGrokPromptEvidence -Prompt $promptOwner
       Assert-CrgPairedInputSnapshot -Snapshot $providerSnapshot
+      if ($null -eq $duration) { $duration = [Diagnostics.Stopwatch]::StartNew() }
       $responseBytes = Invoke-CrgGrokCliRequest -HostInput $pairedHost -ProviderSnapshot $providerSnapshot `
         -Executable $grokExecutable -PromptPath $promptOwner.Path -ResponseLeaf $responseLeaf `
-        -StandardErrorLeaf ($stem + '.pass-' + $pass + '.stderr.log')
+        -StandardErrorLeaf ($stem + '.pass-' + $pass + '.stderr.log') -Model $model -Effort $effort `
+        -StallWarnMs $stallResolved.Ms -LivenessLeaf $livenessLeaf
       Assert-CrgPairedInputSnapshot -Snapshot $providerSnapshot
       Assert-CrgGrokPromptEvidence -Prompt $promptOwner
-      $verdict = (Read-CrgGrokCliResponse -Bytes $responseBytes).TrimEnd()
+      $verdict = (Read-CrgGrokCliResponse -Bytes $responseBytes -Model $model).TrimEnd()
     }
     Assert-CrgPairedReadContext -Context $pairedHost.ReadContext -InputBundle $pairedHost.InputBundle
     $classification = Get-CrgPairSemanticVerdict -Verdict $verdict
@@ -472,17 +519,18 @@ try {
   $artifact = & $pairedHost.ArtifactWriter -ReviewUnitBytes $pairedHost.InputBundle.Buffers['review-unit.txt'] `
     -PublicObjectFormat $fields['public-object-format'] -PrivateObjectFormat $fields['private-object-format'] `
     -DescriptorSha256 $pairedHost.InputBundle.DescriptorSha256 -DisplayDiffSha256 $pairedHost.DiffSha256 `
-    -Backend grok -Effort xhigh -DurationSecs ([Math]::Ceiling($duration.Elapsed.TotalSeconds).ToString([Globalization.CultureInfo]::InvariantCulture)) -VerdictText $body
+    -Backend grok -Effort $effort -DurationSecs ((Get-ReviewDurationSecs -ElapsedSeconds $duration.Elapsed.TotalSeconds).ToString([Globalization.CultureInfo]::InvariantCulture)) -VerdictText $body -RequestedModel $model
   $verdictPath = Write-CrgGrokEvidence -HostInput $pairedHost -Leaf ($stem + '.md') -Bytes $artifact
   Write-CrgPairedFollowups -HostInput $pairedHost -VerdictText $body -VerdictFile $verdictPath -Backend grok
   if ($exitCode -eq 0) {
     $readSuccess = if ($PreparedOrigin -ceq 'paired-v1') { Get-Command Read-CrgSuccessfulPairArtifactBytes -Module paired-governance }
       else { Get-Command Read-CrgSuccessfulFirstAttachmentArtifactBytes -Module paired-governance }
-    $null = & $readSuccess -Bytes $artifact -ReviewUnitBytes $pairedHost.InputBundle.Buffers['review-unit.txt'] `
+    $successful = & $readSuccess -Bytes $artifact -ReviewUnitBytes $pairedHost.InputBundle.Buffers['review-unit.txt'] `
       -PublicObjectFormat $fields['public-object-format'] -PrivateObjectFormat $fields['private-object-format'] `
       -DescriptorSha256 $pairedHost.InputBundle.DescriptorSha256 -DisplayDiffSha256 $pairedHost.DiffSha256 `
       -ExpectedBackend grok -ScheduledPassCount $ReviewPasses
-    Write-Host '[paired-review] complete semantic review PASS'
+    if (-not [string]::Equals([string]$successful.RequestedModel, $model, [StringComparison]::Ordinal) -or -not [string]::Equals([string]$successful.Effort, $effort, [StringComparison]::Ordinal)) { throw 'Grok artifact requested model or effort differs from the governing profile' }
+    Write-Host '[paired-review] complete semantic review PASS - covers this source diff only, not target execution or deployment readiness'
   } else { Write-Host '[paired-review] review did not pass; private verdict evidence retained' }
 } catch {
   $exitCode = 3
@@ -497,6 +545,6 @@ try {
     catch { $exitCode = 3; Write-Host "[paired-review] WARN: retained Grok prompt validation failed: $($_.Exception.Message)" }
     finally { $promptOwner.Stream.Dispose() }
   }
-  $duration.Stop()
+  if ($null -ne $duration) { $duration.Stop() }
 }
 exit $exitCode

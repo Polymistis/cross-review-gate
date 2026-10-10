@@ -475,9 +475,16 @@ it:
   256), refusing when no tool answers — hash-tool absence must never
   fail open.
 - **Hook untracked-infra guards** (commit wrappers; per-backend
-  wrapper + prompt): the same local branch replaces today's
-  unconditional refusal, running verified SNAPSHOTS of the wrapper and
-  prompt and announcing it (the commit-wrapper guard is detective-only
+  wrapper + prompt + the shared `scripts/review-liveness.psm1` and
+  `scripts/review-common.ps1` the wrappers load): the same local branch
+  replaces today's unconditional refusal, running verified SNAPSHOTS of the
+  wrapper, prompt and shared files and announcing it. A wrapper loads the
+  shared files from beside itself, so the hook always captures the whole set into one
+  directory, TRACKED components from HEAD and LOCAL ones as verified
+  snapshots, and runs it from there. A module is required only when the
+  captured wrapper bytes that run name it, so a wrapper from before the
+  module existed runs without it (the
+  commit-wrapper guard is detective-only
   in every shape — the wrappers run before the hook, so the guard
   grades persistent divergence, never pre-execution state). The
   author-lint pre-pass follows the same rule instead of skipping: a
@@ -489,7 +496,8 @@ it:
   manifest before consumption. The dispatcher remains machine state in
   every shape.
 - **Merge gate — trusted-infra extraction**: the gate extracts the
-  wrappers and prompt from the BASE commit so a candidate branch cannot
+  wrappers, prompt and shared review files from the BASE commit so a
+  candidate branch cannot
   weaken the reviewer that decides its merge. A base tree with no gate
   in it (the local shape) extracts nothing; the gate then copies each
   manifest-verified working-tree file into its trusted dir instead —

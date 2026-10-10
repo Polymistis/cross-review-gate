@@ -62,6 +62,13 @@ the preserved and candidate configurations. `Stage -All` is unavailable in this
 state. No attachment review, publication, migration, initialization or adoption is
 performed by pending staging; a later ordinary Attach remains mandatory.
 
+The same ABI also supports the narrow published instruction correction described
+in `first-attachment-v1.md`: an unactivated first-origin handoff with both refs
+already at the recorded results and no completed pointer. Only explicit root
+instruction paths may change; public content and other private entries remain
+unchanged. Stage and Attach use the active approved release and require a freshly
+reviewed successor. No new launcher parameter or Resume override is introduced.
+
 ## First installation and provenance
 
 An operator-approved bootstrap fully retains and validates the published release
@@ -181,8 +188,8 @@ and required public/private guards under the existing custody discipline. No
 operator-written attachment record alone enables an unreviewed private workflow.
 
 Static parsing and native compilation are distinct from ordinary installed
-operation. Code unit tests are not authorized; integration, end-to-end, smoke,
-performance, manual, live, and other functional testing remain allowed and
+operation. Code unit tests are not authorized; live testing, manual checks,
+ordinary program runs, and functional validation remain permitted and
 important. Deployment records must identify the actual package/release, initial
 paired review, final association and subsequent operation; source completion
 alone does not meet that boundary.

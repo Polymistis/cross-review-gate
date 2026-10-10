@@ -207,10 +207,11 @@ function ConvertFrom-CrgRawEnvironmentEntry {
   if ([string]::IsNullOrEmpty($Entry) -or $Entry.IndexOf([char]0) -ge 0) {
     throw [System.InvalidOperationException]::new('raw environment entries must be non-empty and NUL-free')
   }
+  # Ordinal: string IndexOf, -ceq/-cne and -in compare by culture and ignore characters such as U+00AD.
   $separator = if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) {
-    $Entry.IndexOf('=', 1)
+    $Entry.IndexOf([char]'=', 1)
   } else {
-    $Entry.IndexOf('=')
+    $Entry.IndexOf([char]'=')
   }
   $minimum = if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) { 1 } else { 0 }
   if ($separator -le $minimum) {
@@ -335,9 +336,9 @@ function Set-CrgNoReplaceObjectsChildEnvironmentSingleton {
 }
 
 # Classify the `git config --get core.hooksPath` exit status. BYTE-IDENTICAL to
-# the copies in scripts/codex/commit.ps1 and scripts/claude/commit.ps1 (there is
-# no shared module to import, so the classifier is kept identical by hand) so the
-# INSTALLER and the commit WRAPPERS agree on what "set" means: exit 1 = key
+# the copy in scripts/claude/commit.ps1, the shared commit wrapper (there is no
+# shared module to import, so the classifier is kept identical by hand) so the
+# INSTALLER and the commit WRAPPER agree on what "set" means: exit 1 = key
 # ABSENT (the required UNSET state) -> 'proceed'; exit 0 = key SET to ANY value
 # INCLUDING an empty `core.hooksPath=` -> 'abort-set'; anything else = git error
 # -> 'abort-indeterminate' (fail closed). Without this shared classification the
@@ -409,12 +410,12 @@ function Assert-CrgScopedAuthorityBody {
     }
     $path = $text.Substring(3, $text.Length - 4)
     if ([string]::IsNullOrEmpty($path) -or $path.StartsWith('/', [System.StringComparison]::Ordinal) -or $path.EndsWith('/', [System.StringComparison]::Ordinal) -or
-        $path.IndexOf('\') -ge 0 -or $path.IndexOf('`') -ge 0) { throw "scoped-authority path '$path' is not canonical" }
+        $path.IndexOf([char]'\') -ge 0 -or $path.IndexOf([char]'`') -ge 0) { throw "scoped-authority path '$path' is not canonical" }
     foreach ($character in $path.ToCharArray()) {
       if ([int][char]$character -lt 0x20 -or [int][char]$character -eq 0x7F) { throw 'scoped-authority path contains a control character' }
     }
     foreach ($segment in @($path -split '/', 0)) {
-      if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') { throw "scoped-authority path '$path' has a noncanonical segment" }
+      if ([string]::IsNullOrEmpty($segment) -or [string]::Equals($segment, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($segment, '..', [System.StringComparison]::Ordinal)) { throw "scoped-authority path '$path' has a noncanonical segment" }
     }
     if (-not $seen.Add($path)) { throw "scoped-authority path '$path' is duplicated" }
   }
@@ -423,20 +424,20 @@ function Assert-CrgScopedAuthorityBody {
 function Read-CrgInstallValuesBytes {
   param([Parameter(Mandatory = $true)][byte[]]$Bytes)
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 262144 -Label 'CROSS-REVIEW-VALUES.md'
-  if ($records.Count -eq 0 -or $records[0].Text -cne 'cross-review-values v1') { throw 'CROSS-REVIEW-VALUES.md has an invalid header' }
+  if ($records.Count -eq 0 -or -not [string]::Equals($records[0].Text, 'cross-review-values v1', [System.StringComparison]::Ordinal)) { throw 'CROSS-REVIEW-VALUES.md has an invalid header' }
   $names = @('project-context', 'project-hazards', 'scoped-authority')
-  $blocks = [ordered]@{}
+  $blocks = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
   $cursor = 1
   foreach ($name in $names) {
     $open = "<!-- crg-install-value v1 $name BEGIN -->"
     $close = "<!-- crg-install-value v1 $name END -->"
-    if ($cursor -ge $records.Count -or $records[$cursor].Text -cne $open) { throw "CROSS-REVIEW-VALUES.md is missing the ordered $name opening marker" }
+    if ($cursor -ge $records.Count -or -not [string]::Equals($records[$cursor].Text, $open, [System.StringComparison]::Ordinal)) { throw "CROSS-REVIEW-VALUES.md is missing the ordered $name opening marker" }
     $bodyStart = $records[$cursor].EndExclusive
     $cursor++
     $closeRecord = $null
     while ($cursor -lt $records.Count) {
       $recordText = [string]$records[$cursor].Text
-      if ($recordText -ceq $close) { $closeRecord = $records[$cursor]; break }
+      if ([string]::Equals($recordText, $close, [System.StringComparison]::Ordinal)) { $closeRecord = $records[$cursor]; break }
       if ($recordText.StartsWith('<!-- crg-install-value v1 ', [System.StringComparison]::Ordinal) -or
           $recordText.StartsWith('<!-- crg-render-slot v1 ', [System.StringComparison]::Ordinal)) {
         throw "CROSS-REVIEW-VALUES.md contains a structural marker inside $name"
@@ -485,14 +486,14 @@ function Assert-CrgNoReservedProjectPlaceholder {
 function Get-CrgRenderSlotLayout {
   param(
     [Parameter(Mandatory = $true)][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('review-prompt', 'agents-template')][string]$Target,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target,
     [switch]$FinalOutput
   )
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 1048576 -Label $Target
-  $required = if ($Target -ceq 'review-prompt') { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
+  $required = if ([string]::Equals($Target, 'review-prompt', [System.StringComparison]::Ordinal)) { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
   $allowed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
   foreach ($name in $required) { $null = $allowed.Add($name) }
-  $found = [ordered]@{}
+  $found = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
   $active = $null
   foreach ($record in $records) {
     $text = [string]$record.Text
@@ -526,7 +527,7 @@ function Invoke-CrgInstallValueRender {
   param(
     [Parameter(Mandatory = $true)][object]$Values,
     [Parameter(Mandatory = $true)][byte[]]$TemplateBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('review-prompt', 'agents-template')][string]$Target
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target
   )
   if ($null -eq $Values.Blocks) { throw 'renderer received no parsed values blocks' }
   $layout = Get-CrgRenderSlotLayout -Bytes $TemplateBytes -Target $Target
@@ -795,6 +796,8 @@ function Get-CrgCurrentFileList {
     @{ Src = 'scripts/git-hooks/pre-commit';             Dst = 'scripts/git-hooks/pre-commit' },
     @{ Src = 'scripts/run-gate.sh';                      Dst = 'scripts/run-gate.sh' },
     @{ Src = 'scripts/render-project-values.ps1';        Dst = 'scripts/render-project-values.ps1' },
+    @{ Src = 'scripts/review-liveness.psm1';             Dst = 'scripts/review-liveness.psm1' },
+    @{ Src = 'scripts/review-common.ps1';                Dst = 'scripts/review-common.ps1' },
     @{ Src = 'docs/audit-protocol.md';                   Dst = 'docs/audit-protocol.md' },
     @{ Src = 'docs/AGENTS.md.template';                  Dst = 'docs/AGENTS.md.template' }
   )
@@ -806,6 +809,71 @@ function Get-CrgCurrentFileList {
 # sources. An absent retired file cannot satisfy a prior manifest that still
 # names the path. Present entries require the ordinary seal custody.
 function Get-CrgSealRecoveryFileList {
+  return @(
+    @{ Dst = 'scripts/codex/auto-review.ps1';            Retired = $false },
+    @{ Dst = 'scripts/codex/auto-merge.ps1';             Retired = $false },
+    @{ Dst = 'scripts/shared/auto-merge.ps1';            Retired = $false },
+    @{ Dst = 'scripts/codex/commit.ps1';                 Retired = $false },
+    @{ Dst = 'scripts/codex/analyze-blocker-trends.ps1'; Retired = $true },
+    @{ Dst = 'scripts/codex/author-lint.ps1';            Retired = $true },
+    @{ Dst = 'scripts/codex/dispatch-checklist.ps1';     Retired = $true },
+    @{ Dst = 'scripts/codex/worker-audit.ps1';           Retired = $true },
+    @{ Dst = 'scripts/shared/analyze-blocker-trends.ps1'; Retired = $false },
+    @{ Dst = 'scripts/shared/author-lint.ps1';            Retired = $false },
+    @{ Dst = 'scripts/shared/dispatch-checklist.ps1';     Retired = $false },
+    @{ Dst = 'scripts/shared/worker-audit.ps1';           Retired = $false },
+    @{ Dst = 'scripts/codex/review-prompt-template.md';  Retired = $false },
+    @{ Dst = 'scripts/claude/auto-review.ps1';           Retired = $false },
+    @{ Dst = 'scripts/claude/commit.ps1';                Retired = $false },
+    @{ Dst = 'scripts/git-hooks/pre-commit';             Retired = $false },
+    @{ Dst = 'scripts/run-gate.sh';                      Retired = $false },
+    @{ Dst = 'scripts/render-project-values.ps1';        Retired = $false },
+    @{ Dst = 'scripts/review-liveness.psm1';             Retired = $false },
+    @{ Dst = 'scripts/review-common.ps1';                Retired = $false },
+    @{ Dst = 'scripts/codex/selftest-fixtures/e2e-probe-base-1.rs'; Retired = $true },
+    @{ Dst = 'scripts/codex/selftest-fixtures/e2e-probe-base-2.rs'; Retired = $true },
+    @{ Dst = 'docs/audit-protocol.md';                   Retired = $false },
+    @{ Dst = 'docs/AGENTS.md.template';                  Retired = $false }
+  )
+}
+
+# Exact shared-layout recovery order before scripts/review-common.ps1 joined
+# the inventory in 2.6.0 (the 2.4.4 through 2.5.0 layout). This frozen catalog
+# admits such a complete LOCAL installation whose newer paths are all
+# positively absent; it is never derived by subtracting today's paths.
+function Get-CrgPreCommonRecoveryFileList {
+  return @(
+    @{ Dst = 'scripts/codex/auto-review.ps1';            Retired = $false },
+    @{ Dst = 'scripts/codex/auto-merge.ps1';             Retired = $false },
+    @{ Dst = 'scripts/shared/auto-merge.ps1';            Retired = $false },
+    @{ Dst = 'scripts/codex/commit.ps1';                 Retired = $false },
+    @{ Dst = 'scripts/codex/analyze-blocker-trends.ps1'; Retired = $true },
+    @{ Dst = 'scripts/codex/author-lint.ps1';            Retired = $true },
+    @{ Dst = 'scripts/codex/dispatch-checklist.ps1';     Retired = $true },
+    @{ Dst = 'scripts/codex/worker-audit.ps1';           Retired = $true },
+    @{ Dst = 'scripts/shared/analyze-blocker-trends.ps1'; Retired = $false },
+    @{ Dst = 'scripts/shared/author-lint.ps1';            Retired = $false },
+    @{ Dst = 'scripts/shared/dispatch-checklist.ps1';     Retired = $false },
+    @{ Dst = 'scripts/shared/worker-audit.ps1';           Retired = $false },
+    @{ Dst = 'scripts/codex/review-prompt-template.md';  Retired = $false },
+    @{ Dst = 'scripts/claude/auto-review.ps1';           Retired = $false },
+    @{ Dst = 'scripts/claude/commit.ps1';                Retired = $false },
+    @{ Dst = 'scripts/git-hooks/pre-commit';             Retired = $false },
+    @{ Dst = 'scripts/run-gate.sh';                      Retired = $false },
+    @{ Dst = 'scripts/render-project-values.ps1';        Retired = $false },
+    @{ Dst = 'scripts/review-liveness.psm1';             Retired = $false },
+    @{ Dst = 'scripts/codex/selftest-fixtures/e2e-probe-base-1.rs'; Retired = $true },
+    @{ Dst = 'scripts/codex/selftest-fixtures/e2e-probe-base-2.rs'; Retired = $true },
+    @{ Dst = 'docs/audit-protocol.md';                   Retired = $false },
+    @{ Dst = 'docs/AGENTS.md.template';                  Retired = $false }
+  )
+}
+
+# Exact shared-layout recovery order before scripts/review-liveness.psm1 joined
+# the inventory in 2.4.4. This frozen catalog admits such a
+# complete LOCAL installation whose newer paths are all positively absent; it
+# is never derived by subtracting today's paths.
+function Get-CrgPreLivenessRecoveryFileList {
   return @(
     @{ Dst = 'scripts/codex/auto-review.ps1';            Retired = $false },
     @{ Dst = 'scripts/codex/auto-merge.ps1';             Retired = $false },
@@ -1042,7 +1110,9 @@ function Get-CrgInstallValueOutputAuthority {
       IgnoreState = $crgRaIgnore
     }) | Out-Null
   }
-  $crgRaFamilies = @($crgRaEntries | ForEach-Object { $_.Family } | Sort-Object -Unique)
+  $crgRaFamilySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+  foreach ($crgRaEntry in $crgRaEntries) { [void]$crgRaFamilySet.Add([string]$crgRaEntry.Family) }
+  $crgRaFamilies = @($crgRaFamilySet | Sort-Object)
   if ($crgRaFamilies.Count -ne 1) {
     $crgRaShape = @($crgRaEntries | ForEach-Object { "$($_.RelativePath)=$($_.Class)" }) -join ', '
     throw "render outputs do not share one authority family ($crgRaShape)"
@@ -1081,7 +1151,7 @@ function Open-CrgInstallValuesSourceHold {
 }
 
 function Get-CrgInstallValuesSourceEvidence {
-  param([string]$RepoRoot, [ValidateSet('TRACKED', 'LOCAL')][string]$Family, [object]$SourceOwner)
+  param([string]$RepoRoot, [ValidatePattern('\A(?:TRACKED|LOCAL)\z', Options = 'None')][string]$Family, [object]$SourceOwner)
   if ($null -eq $SourceOwner -or $null -eq $SourceOwner.Stream -or $SourceOwner.Bytes -isnot [byte[]]) { throw 'values-source custody is absent' }
   $crgVsAttributes = [CrgBootstrap.NativeV4]::GetHandleAttributes($SourceOwner.Stream.SafeFileHandle)
   if ($crgVsAttributes -lt 0 -or
@@ -1323,7 +1393,7 @@ function Get-CrgGitConversionSettings {
     if ([string]::Equals($gcAutoRaw.Trim(), 'input', [System.StringComparison]::OrdinalIgnoreCase)) { $gcAuto = 'input' }
     else {
       $gcAutoCanonical = @(& git -C $RepoRoot -c "core.autocrlf=$gcAutoRaw" config --type=bool --get core.autocrlf 2>$null)
-      if ($LASTEXITCODE -ne 0 -or $gcAutoCanonical.Count -ne 1 -or "$($gcAutoCanonical[0])" -notin @('true', 'false')) { throw 'effective core.autocrlf is not a valid boolean or input value' }
+      if ($LASTEXITCODE -ne 0 -or $gcAutoCanonical.Count -ne 1 -or -not ([string]::Equals("$($gcAutoCanonical[0])", 'true', [System.StringComparison]::Ordinal) -or [string]::Equals("$($gcAutoCanonical[0])", 'false', [System.StringComparison]::Ordinal))) { throw 'effective core.autocrlf is not a valid boolean or input value' }
       $gcAuto = "$($gcAutoCanonical[0])"
     }
   } else { throw 'effective core.autocrlf could not be captured exactly' }
@@ -1331,7 +1401,7 @@ function Get-CrgGitConversionSettings {
   $gcEolRows = @(& git -C $RepoRoot config --get core.eol 2>$null)
   $gcEolRc = $LASTEXITCODE
   if ($gcEolRc -eq 1) { $gcEol = 'native' }
-  elseif ($gcEolRc -eq 0 -and $gcEolRows.Count -eq 1 -and "$($gcEolRows[0])".Trim().ToLowerInvariant() -in @('lf', 'crlf', 'native')) { $gcEol = "$($gcEolRows[0])".Trim().ToLowerInvariant() }
+  elseif ($gcEolRc -eq 0 -and $gcEolRows.Count -eq 1 -and [System.Linq.Enumerable]::Contains([string[]]@('lf', 'crlf', 'native'), "$($gcEolRows[0])".Trim().ToLowerInvariant(), [System.StringComparer]::Ordinal)) { $gcEol = "$($gcEolRows[0])".Trim().ToLowerInvariant() }
   else { throw 'effective core.eol could not be captured exactly' }
 
   $gcSafeRows = @(& git -C $RepoRoot config --get core.safecrlf 2>$null)
@@ -1342,7 +1412,7 @@ function Get-CrgGitConversionSettings {
     if ([string]::Equals($gcSafeRaw.Trim(), 'warn', [System.StringComparison]::OrdinalIgnoreCase)) { $gcSafe = 'warn' }
     else {
       $gcSafeCanonical = @(& git -C $RepoRoot -c "core.safecrlf=$gcSafeRaw" config --type=bool --get core.safecrlf 2>$null)
-      if ($LASTEXITCODE -ne 0 -or $gcSafeCanonical.Count -ne 1 -or "$($gcSafeCanonical[0])" -notin @('true', 'false')) { throw 'effective core.safecrlf is not a valid boolean or warn value' }
+      if ($LASTEXITCODE -ne 0 -or $gcSafeCanonical.Count -ne 1 -or -not ([string]::Equals("$($gcSafeCanonical[0])", 'true', [System.StringComparison]::Ordinal) -or [string]::Equals("$($gcSafeCanonical[0])", 'false', [System.StringComparison]::Ordinal))) { throw 'effective core.safecrlf is not a valid boolean or warn value' }
       $gcSafe = "$($gcSafeCanonical[0])"
     }
   } else { throw 'effective core.safecrlf could not be captured exactly' }
@@ -1350,14 +1420,14 @@ function Get-CrgGitConversionSettings {
   $gcModeRows = @(& git -C $RepoRoot config --type=bool --get core.filemode 2>$null)
   $gcModeRc = $LASTEXITCODE
   if ($gcModeRc -eq 1) { $gcMode = 'false' }
-  elseif ($gcModeRc -eq 0 -and $gcModeRows.Count -eq 1 -and "$($gcModeRows[0])" -in @('true', 'false')) { $gcMode = "$($gcModeRows[0])" }
+  elseif ($gcModeRc -eq 0 -and $gcModeRows.Count -eq 1 -and ([string]::Equals("$($gcModeRows[0])", 'true', [System.StringComparison]::Ordinal) -or [string]::Equals("$($gcModeRows[0])", 'false', [System.StringComparison]::Ordinal))) { $gcMode = "$($gcModeRows[0])" }
   else { throw 'effective core.filemode could not be captured exactly' }
 
   return [pscustomobject]@{ AutoCrlf = $gcAuto; Eol = $gcEol; SafeCrlf = $gcSafe; FileMode = $gcMode }
 }
 
 function Get-CrgGitObjectIdOfBytes {
-  param([ValidateSet('blob', 'tree')][string]$Type, [byte[]]$Bytes, [ValidateSet(40, 64)][int]$ObjectIdLength)
+  param([ValidatePattern('\A(?:blob|tree)\z', Options = 'None')][string]$Type, [byte[]]$Bytes, [ValidatePattern('\A(?:40|64)\z', Options = 'None')][int]$ObjectIdLength)
   if ($null -eq $Bytes) { throw 'Git object-ID calculation received null bytes' }
   $goHeader = [System.Text.Encoding]::ASCII.GetBytes("$Type $($Bytes.Length)`0")
   $goStream = New-Object System.IO.MemoryStream
@@ -1371,7 +1441,7 @@ function Get-CrgGitObjectIdOfBytes {
 }
 
 function Get-CrgGitLooseObjectBytes {
-  param([ValidateSet('blob', 'tree')][string]$Type, [byte[]]$Bytes)
+  param([ValidatePattern('\A(?:blob|tree)\z', Options = 'None')][string]$Type, [byte[]]$Bytes)
   if ($null -eq $Bytes) { throw 'Git loose-object encoding received null bytes' }
   $glHeader = [System.Text.Encoding]::ASCII.GetBytes("$Type $($Bytes.Length)`0")
   $glRaw = New-Object byte[] ($glHeader.Length + $Bytes.Length)
@@ -1520,7 +1590,7 @@ function Test-CrgPathWithin {
   $pwPath = if ([string]::Equals($pwPathRaw, $pwPathRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $pwPathRoot } else { $pwPathRaw.TrimEnd('\', '/') }
   $pwRoot = if ([string]::Equals($pwRootRaw, $pwRootRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $pwRootRoot } else { $pwRootRaw.TrimEnd('\', '/') }
   if ([string]::Equals($pwPath, $pwRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
-  $pwBoundary = if ($pwRoot.EndsWith('\') -or $pwRoot.EndsWith('/')) { $pwRoot } else { "$pwRoot$([System.IO.Path]::DirectorySeparatorChar)" }
+  $pwBoundary = if ($pwRoot.EndsWith('\', [System.StringComparison]::Ordinal) -or $pwRoot.EndsWith('/', [System.StringComparison]::Ordinal)) { $pwRoot } else { "$pwRoot$([System.IO.Path]::DirectorySeparatorChar)" }
   return $pwPath.StartsWith($pwBoundary, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
@@ -1543,7 +1613,7 @@ function Get-CrgPackageProvenanceCandidate {
     $pcCommonDir = Invoke-CrgIsolatedPackageGit -Root $Root -GitArgs @('rev-parse', '--path-format=absolute', '--git-common-dir')
     if ($pcFormat.Exit -ne 0 -or $pcHead.Exit -ne 0 -or $pcGitDir.Exit -ne 0 -or $pcCommonDir.Exit -ne 0) { return $null }
     $pcFormatText = $pcFormat.OutputText.Trim(); $pcHeadText = $pcHead.OutputText.Trim()
-    $pcOidLength = if ($pcFormatText -ceq 'sha256') { 64 } elseif ($pcFormatText -ceq 'sha1') { 40 } else { 0 }
+    $pcOidLength = if ([string]::Equals($pcFormatText, 'sha256', [System.StringComparison]::Ordinal)) { 64 } elseif ([string]::Equals($pcFormatText, 'sha1', [System.StringComparison]::Ordinal)) { 40 } else { 0 }
     if ($pcOidLength -eq 0 -or $pcHeadText -cnotmatch "\A[0-9a-f]{$pcOidLength}\z") { throw 'package Git metadata returned a malformed object format or HEAD identity' }
     $pcCandidate = [pscustomobject]@{
       Root = $pcRootCanonical
@@ -1581,17 +1651,17 @@ function Assert-CrgCapturedPackageProvenanceCandidate {
   }
   $cpExpectedFormat = if ($Candidate.ObjectIdLength -eq 64) { 'sha256' } elseif ($Candidate.ObjectIdLength -eq 40) { 'sha1' } else { '<invalid>' }
   if (-not [string]::Equals((& $cpCanonical $cpTop.OutputText), (& $cpCanonical $Candidate.Root), [System.StringComparison]::OrdinalIgnoreCase) -or
-      $cpFormat.OutputText.Trim() -cne $cpExpectedFormat -or
-      $cpHead.OutputText.Trim() -cne $Candidate.Head -or
+      -not [string]::Equals($cpFormat.OutputText.Trim(), $cpExpectedFormat, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($cpHead.OutputText.Trim(), $Candidate.Head, [System.StringComparison]::Ordinal) -or
       -not [string]::Equals((& $cpCanonical $cpGitDir.OutputText), (& $cpCanonical $Candidate.GitDir), [System.StringComparison]::OrdinalIgnoreCase) -or
       -not [string]::Equals((& $cpCanonical $cpCommonDir.OutputText), (& $cpCanonical $Candidate.CommonDir), [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'captured package repository identity changed while its namespace was being retained'
   }
   $cpConversion = Get-CrgIsolatedPackageConversionSettings -Candidate $Candidate
   if ($null -eq $Candidate.Conversion -or
-      $cpConversion.AutoCrlf -cne $Candidate.Conversion.AutoCrlf -or
-      $cpConversion.Eol -cne $Candidate.Conversion.Eol -or
-      $cpConversion.SafeCrlf -cne $Candidate.Conversion.SafeCrlf -or
+      -not [string]::Equals($cpConversion.AutoCrlf, $Candidate.Conversion.AutoCrlf, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($cpConversion.Eol, $Candidate.Conversion.Eol, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($cpConversion.SafeCrlf, $Candidate.Conversion.SafeCrlf, [System.StringComparison]::Ordinal) -or
       $cpConversion.FileMode -cne $Candidate.Conversion.FileMode) {
     throw 'captured package conversion configuration changed while its namespace was being retained'
   }
@@ -1611,13 +1681,13 @@ function Get-CrgIsolatedPackageConversionSettings {
     if ([string]::Equals($icAutoRaw, 'input', [System.StringComparison]::OrdinalIgnoreCase)) { $icAuto = 'input' }
     else {
       $icAutoCanonical = Invoke-CrgCapturedPackageGit -Candidate $Candidate -GitArgs @('-c', "core.autocrlf=$icAutoRaw", 'config', '--type=bool', '--get', 'core.autocrlf') -UseAmbientConfig
-      if ($icAutoCanonical.Exit -ne 0 -or $icAutoCanonical.OutputText.Trim() -notin @('true', 'false')) { throw 'package core.autocrlf is not a canonical boolean or input value' }
+      if ($icAutoCanonical.Exit -ne 0 -or -not ([string]::Equals($icAutoCanonical.OutputText.Trim(), 'true', [System.StringComparison]::Ordinal) -or [string]::Equals($icAutoCanonical.OutputText.Trim(), 'false', [System.StringComparison]::Ordinal))) { throw 'package core.autocrlf is not a canonical boolean or input value' }
       $icAuto = $icAutoCanonical.OutputText.Trim()
     }
   } else { throw 'package core.autocrlf could not be captured exactly' }
   $icEolResult = & $icGet 'core.eol'
   if ($icEolResult.Exit -eq 1) { $icEol = 'native' }
-  elseif ($icEolResult.Exit -eq 0 -and $icEolResult.OutputText.Trim().ToLowerInvariant() -in @('lf', 'crlf', 'native')) { $icEol = $icEolResult.OutputText.Trim().ToLowerInvariant() }
+  elseif ($icEolResult.Exit -eq 0 -and [System.Linq.Enumerable]::Contains([string[]]@('lf', 'crlf', 'native'), $icEolResult.OutputText.Trim().ToLowerInvariant(), [System.StringComparer]::Ordinal)) { $icEol = $icEolResult.OutputText.Trim().ToLowerInvariant() }
   else { throw 'package core.eol could not be captured exactly' }
   $icSafeResult = & $icGet 'core.safecrlf'
   if ($icSafeResult.Exit -eq 1) { $icSafe = 'false' }
@@ -1626,7 +1696,7 @@ function Get-CrgIsolatedPackageConversionSettings {
     if ([string]::Equals($icSafeRaw, 'warn', [System.StringComparison]::OrdinalIgnoreCase)) { $icSafe = 'warn' }
     else {
       $icSafeCanonical = Invoke-CrgCapturedPackageGit -Candidate $Candidate -GitArgs @('-c', "core.safecrlf=$icSafeRaw", 'config', '--type=bool', '--get', 'core.safecrlf') -UseAmbientConfig
-      if ($icSafeCanonical.Exit -ne 0 -or $icSafeCanonical.OutputText.Trim() -notin @('true', 'false')) { throw 'package core.safecrlf is not a canonical boolean or warn value' }
+      if ($icSafeCanonical.Exit -ne 0 -or -not ([string]::Equals($icSafeCanonical.OutputText.Trim(), 'true', [System.StringComparison]::Ordinal) -or [string]::Equals($icSafeCanonical.OutputText.Trim(), 'false', [System.StringComparison]::Ordinal))) { throw 'package core.safecrlf is not a canonical boolean or warn value' }
       $icSafe = $icSafeCanonical.OutputText.Trim()
     }
   } else { throw 'package core.safecrlf could not be captured exactly' }
@@ -1651,7 +1721,7 @@ function Get-CrgHeldPackageProvenance {
     $hpBuffers = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
     $hpBuffers['VERSION'] = [byte[]]$VersionBytes
     foreach ($hpOwner in $SourceOwners) {
-      if ($hpOwner.RelativePath -ceq 'VERSION') { continue }
+      if ([string]::Equals($hpOwner.RelativePath, 'VERSION', [System.StringComparison]::Ordinal)) { continue }
       if ($null -eq $hpOwner.Stream -or $hpOwner.Bytes -isnot [byte[]] -or [string]::IsNullOrWhiteSpace("$($hpOwner.RelativePath)")) { throw 'package provenance received an incomplete held-source owner' }
       $hpPath = "$($hpOwner.RelativePath)" -replace '\\', '/'
       if ($hpBuffers.ContainsKey($hpPath)) { throw "duplicate held package source '$hpPath'" }
@@ -1700,13 +1770,14 @@ function Get-CrgHeldPackageProvenance {
     foreach ($hpSpecifiedKey in $hpSpecified.Keys) {
       $hpSpecifiedPath = "$hpSpecifiedKey".Substring(0, "$hpSpecifiedKey".IndexOf([char]0))
       $hpSpecifiedAttribute = "$hpSpecifiedKey".Substring("$hpSpecifiedKey".IndexOf([char]0) + 1)
-      if ($hpSpecifiedPath -notin $hpInstallValuePaths -and $hpSpecifiedAttribute -in @('filter', 'ident', 'working-tree-encoding')) { throw "package commit explicitly specifies unsupported content transform '$hpSpecifiedAttribute' for an installed source" }
+      if (-not [System.Linq.Enumerable]::Contains([string[]]@($hpInstallValuePaths), [string]$hpSpecifiedPath, [System.StringComparer]::Ordinal) -and
+          [System.Linq.Enumerable]::Contains([string[]]@('filter', 'ident', 'working-tree-encoding'), [string]$hpSpecifiedAttribute, [System.StringComparer]::Ordinal)) { throw "package commit explicitly specifies unsupported content transform '$hpSpecifiedAttribute' for an installed source" }
     }
     $hpConversion = $Candidate.Conversion
     if ($null -eq $hpConversion) { throw 'captured package provenance is missing its conversion contract' }
     foreach ($hpPath in $hpBuffers.Keys) {
       $hpOid = Get-CrgPrivateFilteredObjectIdOfBytes -Context $hpContext -TreeOid $hpAttributeTree -RepoPath $hpPath -Bytes ([byte[]]$hpBuffers[$hpPath]) -Conversion $hpConversion
-      if ($hpOid -cne $hpTreeMap[$hpPath].Oid) { return 'unknown' }
+      if (-not [string]::Equals($hpOid, $hpTreeMap[$hpPath].Oid, [System.StringComparison]::Ordinal)) { return 'unknown' }
     }
     return $Candidate.Head
   } finally {
@@ -1923,7 +1994,7 @@ function Set-CrgPrivateDirectoryMutation {
 function New-CrgPrivateAttributeContext {
   param(
     [string]$ScratchRoot,
-    [ValidateSet(40, 64)][int]$ObjectIdLength,
+    [ValidatePattern('\A(?:40|64)\z', Options = 'None')][int]$ObjectIdLength,
     [AllowEmptyCollection()][byte[]]$InfoAttributesBytes = @()
   )
   if ($null -eq $InfoAttributesBytes -or $InfoAttributesBytes.Length -gt 1048576) {
@@ -2004,7 +2075,7 @@ function New-CrgPrivateAttributeContext {
     [byte[]]$pcProbeLf = [System.Text.UTF8Encoding]::new($false).GetBytes("one`ntwo`n")
     $pcHashProbe = Invoke-CrgPrivateAttributeGit -Context $pc -GitArgs @("--attr-source=$pcCapabilityTree", 'hash-object', '--path=crg-capability-probe', '--stdin') -InputBytes $pcProbeCrlf
     $pcExpectedProbeBlob = Get-CrgGitObjectIdOfBytes -Type blob -Bytes $pcProbeLf -ObjectIdLength $ObjectIdLength
-    if ($pcHashProbe.Exit -ne 0 -or $pcHashProbe.ErrorText.Length -ne 0 -or $pcHashProbe.OutputText.Trim() -cne $pcExpectedProbeBlob) { throw "Git does not provide exact global --attr-source stdin conversion semantics ($($pcHashProbe.Text.Trim()))" }
+    if ($pcHashProbe.Exit -ne 0 -or $pcHashProbe.ErrorText.Length -ne 0 -or -not [string]::Equals($pcHashProbe.OutputText.Trim(), $pcExpectedProbeBlob, [System.StringComparison]::Ordinal)) { throw "Git does not provide exact global --attr-source stdin conversion semantics ($($pcHashProbe.Text.Trim()))" }
     return $pc
   } catch {
     if ($null -ne $pc) { $null = Close-CrgPrivateAttributeContext -Context $pc }
@@ -2013,7 +2084,7 @@ function New-CrgPrivateAttributeContext {
 }
 
 function Add-CrgPrivateGitObject {
-  param([object]$Context, [ValidateSet('blob', 'tree')][string]$Type, [byte[]]$Bytes)
+  param([object]$Context, [ValidatePattern('\A(?:blob|tree)\z', Options = 'None')][string]$Type, [byte[]]$Bytes)
   $poOid = Get-CrgGitObjectIdOfBytes -Type $Type -Bytes $Bytes -ObjectIdLength $Context.ObjectIdLength
   if ($Context.Objects.ContainsKey($poOid)) { return $poOid }
   $poPrefix = $poOid.Substring(0, 2)
@@ -2066,8 +2137,8 @@ function Get-CrgPrivateAttributeMap {
   $paInput = New-Object System.IO.MemoryStream
   try {
     foreach ($paPath in $Paths) {
-      if ($paPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $paPath.StartsWith('/') -or $paPath.EndsWith('/')) { throw "unsafe private attribute query path '$paPath'" }
-      foreach ($paComponent in @($paPath -split '/')) { if ($paComponent -in @('.', '..')) { throw "unsafe private attribute query path '$paPath'" } }
+      if ($paPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $paPath.StartsWith('/', [System.StringComparison]::Ordinal) -or $paPath.EndsWith('/', [System.StringComparison]::Ordinal)) { throw "unsafe private attribute query path '$paPath'" }
+      foreach ($paComponent in @($paPath -split '/')) { if ([string]::Equals($paComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($paComponent, '..', [System.StringComparison]::Ordinal)) { throw "unsafe private attribute query path '$paPath'" } }
       if (-not $paExpectedPaths.Add($paPath)) { throw "duplicate private attribute query path '$paPath'" }
       $paPathBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($paPath)
       $paInput.Write($paPathBytes, 0, $paPathBytes.Length); $paInput.WriteByte(0)
@@ -2105,8 +2176,8 @@ function Get-CrgPrivateSpecifiedAttributeMap {
   $psInput = New-Object System.IO.MemoryStream
   try {
     foreach ($psPath in $Paths) {
-      if ($psPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $psPath.StartsWith('/') -or $psPath.EndsWith('/')) { throw "unsafe private specified-attribute path '$psPath'" }
-      foreach ($psComponent in @($psPath -split '/')) { if ($psComponent -in @('.', '..')) { throw "unsafe private specified-attribute path '$psPath'" } }
+      if ($psPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $psPath.StartsWith('/', [System.StringComparison]::Ordinal) -or $psPath.EndsWith('/', [System.StringComparison]::Ordinal)) { throw "unsafe private specified-attribute path '$psPath'" }
+      foreach ($psComponent in @($psPath -split '/')) { if ([string]::Equals($psComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($psComponent, '..', [System.StringComparison]::Ordinal)) { throw "unsafe private specified-attribute path '$psPath'" } }
       if (-not $psExpectedPaths.Add($psPath)) { throw "duplicate private specified-attribute path '$psPath'" }
       $psPathBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($psPath)
       $psInput.Write($psPathBytes, 0, $psPathBytes.Length); $psInput.WriteByte(0)
@@ -2135,7 +2206,7 @@ function Assert-CrgProspectiveLiveInstallValuesAttributeOverrides {
     [string]$RepoRoot,
     [string]$ScratchRoot,
     [hashtable]$AttributeBuffers,
-    [ValidateSet(40, 64)][int]$ObjectIdLength
+    [ValidatePattern('\A(?:40|64)\z', Options = 'None')][int]$ObjectIdLength
   )
   if ([string]::IsNullOrWhiteSpace($RepoRoot) -or [string]::IsNullOrWhiteSpace($ScratchRoot) -or
       -not (Test-Path -LiteralPath $RepoRoot -PathType Container) -or -not (Test-Path -LiteralPath $ScratchRoot -PathType Container) -or
@@ -2177,7 +2248,7 @@ function Assert-CrgLiveInstallValuesAttributeGraph {
     [string]$RepoRoot,
     [string]$ScratchRoot,
     [hashtable]$AttributeBuffers,
-    [ValidateSet(40, 64)][int]$ObjectIdLength
+    [ValidatePattern('\A(?:40|64)\z', Options = 'None')][int]$ObjectIdLength
   )
   if ([string]::IsNullOrWhiteSpace($RepoRoot) -or [string]::IsNullOrWhiteSpace($ScratchRoot) -or
       -not (Test-Path -LiteralPath $RepoRoot -PathType Container) -or -not (Test-Path -LiteralPath $ScratchRoot -PathType Container) -or
@@ -2236,7 +2307,7 @@ function Assert-CrgLiveInstallValuesAttributeGraph {
     $laSeparator = $laKey.IndexOf([char]0)
     if ($laSeparator -lt 1) { throw 'live target check-attr --all returned a malformed key' }
     $laAttribute = $laKey.Substring($laSeparator + 1)
-    if ($laAttribute -in @('filter', 'ident', 'working-tree-encoding') -and $laAllMap[$laKey] -cne 'unset') {
+    if ([System.Linq.Enumerable]::Contains([string[]]@('filter', 'ident', 'working-tree-encoding'), [string]$laAttribute, [System.StringComparer]::Ordinal) -and -not [string]::Equals($laAllMap[$laKey], 'unset', [System.StringComparison]::Ordinal)) {
       throw "live target attribute override activates '$laAttribute' for '$($laKey.Substring(0, $laSeparator))'"
     }
   }
@@ -2255,16 +2326,16 @@ function Assert-CrgLiveInstallValuesAttributeGraph {
     foreach ($laAttribute in $laAttributes) {
       $laKey = "$laPath`0$laAttribute"
       $laNamedValue = $laNamedMap[$laKey]
-      if (($laNamedValue -ceq 'unspecified' -and $laAllMap.ContainsKey($laKey)) -or
-          ($laNamedValue -cne 'unspecified' -and (-not $laAllMap.ContainsKey($laKey) -or $laAllMap[$laKey] -cne $laNamedValue))) {
+      if (([string]::Equals($laNamedValue, 'unspecified', [System.StringComparison]::Ordinal) -and $laAllMap.ContainsKey($laKey)) -or
+          (-not [string]::Equals($laNamedValue, 'unspecified', [System.StringComparison]::Ordinal) -and (-not $laAllMap.ContainsKey($laKey) -or -not [string]::Equals($laAllMap[$laKey], $laNamedValue, [System.StringComparison]::Ordinal)))) {
         throw "live target check-attr queries disagreed for '$laPath/$laAttribute'"
       }
     }
-    if ($laNamedMap["$laPath`0text"] -cne 'set' -or $laNamedMap["$laPath`0eol"] -cne 'lf') {
+    if (-not [string]::Equals($laNamedMap["$laPath`0text"], 'set', [System.StringComparison]::Ordinal) -or -not [string]::Equals($laNamedMap["$laPath`0eol"], 'lf', [System.StringComparison]::Ordinal)) {
       throw "live target attribute override prevents '$laPath' from resolving to text=set and eol=lf"
     }
     foreach ($laUnsafe in @('filter', 'ident', 'working-tree-encoding')) {
-      if ($laNamedMap["$laPath`0$laUnsafe"] -notin @('unset', 'unspecified')) {
+      if (-not ([string]::Equals($laNamedMap["$laPath`0$laUnsafe"], 'unset', [System.StringComparison]::Ordinal) -or [string]::Equals($laNamedMap["$laPath`0$laUnsafe"], 'unspecified', [System.StringComparison]::Ordinal))) {
         throw "live target attribute override activates '$laUnsafe' for '$laPath'"
       }
     }
@@ -2279,8 +2350,10 @@ function Get-CrgPrivateFilteredObjectIdOfBytes {
       $RepoPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $null -eq $Bytes -or $null -eq $Conversion) {
     throw 'private filtered-object probe received an invalid context, tree, path, buffer, or conversion contract'
   }
-  foreach ($pfComponent in @($RepoPath -split '/')) { if ($pfComponent -in @('.', '..')) { throw "unsafe private filtered-object path '$RepoPath'" } }
-  if ($Conversion.AutoCrlf -notin @('true', 'false', 'input') -or $Conversion.Eol -notin @('lf', 'crlf', 'native') -or $Conversion.SafeCrlf -notin @('true', 'false', 'warn')) {
+  foreach ($pfComponent in @($RepoPath -split '/')) { if ([string]::Equals($pfComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($pfComponent, '..', [System.StringComparison]::Ordinal)) { throw "unsafe private filtered-object path '$RepoPath'" } }
+  if (-not [System.Linq.Enumerable]::Contains([string[]]@('true', 'false', 'input'), [string]$Conversion.AutoCrlf, [System.StringComparer]::Ordinal) -or
+      -not [System.Linq.Enumerable]::Contains([string[]]@('lf', 'crlf', 'native'), [string]$Conversion.Eol, [System.StringComparer]::Ordinal) -or
+      -not [System.Linq.Enumerable]::Contains([string[]]@('true', 'false', 'warn'), [string]$Conversion.SafeCrlf, [System.StringComparer]::Ordinal)) {
     throw 'private filtered-object probe received non-canonical conversion settings'
   }
   $pfResult = Invoke-CrgPrivateAttributeGit -Context $Context -GitArgs @(
@@ -2337,7 +2410,7 @@ function Convert-CrgGitHexObjectIdToBytes {
 function New-CrgGitAttributeSourceTree {
   param(
     [hashtable]$AttributeBuffers,
-    [ValidateSet(40, 64)][int]$ObjectIdLength,
+    [ValidatePattern('\A(?:40|64)\z', Options = 'None')][int]$ObjectIdLength,
     [scriptblock]$WriteObject,
     [AllowEmptyCollection()][string[]]$ProbePaths = @()
   )
@@ -2349,14 +2422,14 @@ function New-CrgGitAttributeSourceTree {
   foreach ($atPath in $AttributeBuffers.Keys) {
     $atNorm = "$atPath" -replace '\\', '/'
     if ($atNorm -cnotmatch '\A(?:[A-Za-z0-9._-]+/)*\.gitattributes\z' -or $AttributeBuffers[$atPath] -isnot [byte[]]) { throw "unsafe attribute-source path '$atPath'" }
-    foreach ($atComponent in @($atNorm -split '/')) { if ($atComponent -in @('.', '..')) { throw "unsafe attribute-source component in '$atPath'" } }
+    foreach ($atComponent in @($atNorm -split '/')) { if ([string]::Equals($atComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($atComponent, '..', [System.StringComparison]::Ordinal)) { throw "unsafe attribute-source component in '$atPath'" } }
     if (-not $atFiles.Add($atNorm)) { throw "duplicate normalized attribute-source path '$atNorm'" }
-    $atParent = if ($atNorm.Contains('/')) { $atNorm.Substring(0, $atNorm.LastIndexOf('/')) } else { '' }
-    $atName = if ($atNorm.Contains('/')) { $atNorm.Substring($atNorm.LastIndexOf('/') + 1) } else { $atNorm }
+    $atParent = if ($atNorm.Contains('/')) { $atNorm.Substring(0, $atNorm.LastIndexOf([char]'/')) } else { '' }
+    $atName = if ($atNorm.Contains('/')) { $atNorm.Substring($atNorm.LastIndexOf([char]'/') + 1) } else { $atNorm }
     $atCursor = $atParent
     while ($atCursor.Length -gt 0) {
       [void]$atDirectories.Add($atCursor)
-      $atCursor = if ($atCursor.Contains('/')) { $atCursor.Substring(0, $atCursor.LastIndexOf('/')) } else { '' }
+      $atCursor = if ($atCursor.Contains('/')) { $atCursor.Substring(0, $atCursor.LastIndexOf([char]'/')) } else { '' }
     }
     if (-not $atEntries.ContainsKey($atParent)) { $atEntries[$atParent] = New-Object 'System.Collections.Generic.List[object]' }
     $atExpectedBlobOid = Get-CrgGitObjectIdOfBytes -Type blob -Bytes ([byte[]]$AttributeBuffers[$atPath]) -ObjectIdLength $ObjectIdLength
@@ -2366,17 +2439,17 @@ function New-CrgGitAttributeSourceTree {
   }
   foreach ($atProbePath in @($ProbePaths)) {
     $atNorm = "$atProbePath" -replace '\\', '/'
-    if ($atNorm -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $atNorm.StartsWith('/') -or $atNorm.EndsWith('/')) {
+    if ($atNorm -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $atNorm.StartsWith('/', [System.StringComparison]::Ordinal) -or $atNorm.EndsWith('/', [System.StringComparison]::Ordinal)) {
       throw "unsafe attribute-state probe path '$atProbePath'"
     }
-    foreach ($atComponent in @($atNorm -split '/')) { if ($atComponent -in @('.', '..')) { throw "unsafe attribute-state probe component in '$atProbePath'" } }
+    foreach ($atComponent in @($atNorm -split '/')) { if ([string]::Equals($atComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($atComponent, '..', [System.StringComparison]::Ordinal)) { throw "unsafe attribute-state probe component in '$atProbePath'" } }
     if (-not $atFiles.Add($atNorm)) { throw "duplicate or colliding attribute-state probe path '$atNorm'" }
-    $atParent = if ($atNorm.Contains('/')) { $atNorm.Substring(0, $atNorm.LastIndexOf('/')) } else { '' }
-    $atName = if ($atNorm.Contains('/')) { $atNorm.Substring($atNorm.LastIndexOf('/') + 1) } else { $atNorm }
+    $atParent = if ($atNorm.Contains('/')) { $atNorm.Substring(0, $atNorm.LastIndexOf([char]'/')) } else { '' }
+    $atName = if ($atNorm.Contains('/')) { $atNorm.Substring($atNorm.LastIndexOf([char]'/') + 1) } else { $atNorm }
     $atCursor = $atParent
     while ($atCursor.Length -gt 0) {
       [void]$atDirectories.Add($atCursor)
-      $atCursor = if ($atCursor.Contains('/')) { $atCursor.Substring(0, $atCursor.LastIndexOf('/')) } else { '' }
+      $atCursor = if ($atCursor.Contains('/')) { $atCursor.Substring(0, $atCursor.LastIndexOf([char]'/')) } else { '' }
     }
     if (-not $atEntries.ContainsKey($atParent)) { $atEntries[$atParent] = New-Object 'System.Collections.Generic.List[object]' }
     [byte[]]$atProbeBytes = @()
@@ -2403,9 +2476,9 @@ function New-CrgGitAttributeSourceTree {
     $atDirect = New-Object 'System.Collections.Generic.List[object]'
     if ($atEntries.ContainsKey($atDir)) { foreach ($atEntry in $atEntries[$atDir]) { $atDirect.Add($atEntry) | Out-Null } }
     foreach ($atChildDir in $atTreeOids.Keys) {
-      $atChildParent = if ($atChildDir.Contains('/')) { $atChildDir.Substring(0, $atChildDir.LastIndexOf('/')) } else { '' }
+      $atChildParent = if ($atChildDir.Contains('/')) { $atChildDir.Substring(0, $atChildDir.LastIndexOf([char]'/')) } else { '' }
       if ($atChildParent -ceq $atDir) {
-        $atChildName = if ($atChildDir.Contains('/')) { $atChildDir.Substring($atChildDir.LastIndexOf('/') + 1) } else { $atChildDir }
+        $atChildName = if ($atChildDir.Contains('/')) { $atChildDir.Substring($atChildDir.LastIndexOf([char]'/') + 1) } else { $atChildDir }
         $atDirect.Add([pscustomobject]@{ Mode = '40000'; Name = $atChildName; Oid = $atTreeOids[$atChildDir] }) | Out-Null
       }
     }
@@ -2456,10 +2529,10 @@ function Assert-CrgPrivateInstallValuesAttributeStates {
   $asExpected = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
   $asPathspecs = New-Object 'System.Collections.Generic.List[string]'
   foreach ($asPath in $Paths) {
-    if ($asPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $asPath.StartsWith('/') -or $asPath.EndsWith('/')) {
+    if ($asPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or $asPath.StartsWith('/', [System.StringComparison]::Ordinal) -or $asPath.EndsWith('/', [System.StringComparison]::Ordinal)) {
       throw "unsafe private install-values attribute-state path '$asPath'"
     }
-    foreach ($asComponent in @($asPath -split '/')) { if ($asComponent -in @('.', '..')) { throw "unsafe private install-values attribute-state path '$asPath'" } }
+    foreach ($asComponent in @($asPath -split '/')) { if ([string]::Equals($asComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($asComponent, '..', [System.StringComparison]::Ordinal)) { throw "unsafe private install-values attribute-state path '$asPath'" } }
     if (-not $asExpected.Add($asPath)) { throw "duplicate private install-values attribute-state path '$asPath'" }
     for ($asMask = 0; $asMask -lt 8; $asMask++) {
       $asFilter = if (($asMask -band 1) -ne 0) { '!filter' } else { '-filter' }
@@ -2526,7 +2599,7 @@ function Get-CrgInstallValuesRootAttributeCandidate {
   foreach ($crgAcRule in @($RequiredRules)) {
     $crgAcFound = $false
     foreach ($crgAcLine in $crgAcLines) {
-      if ($crgAcLine -ceq $crgAcRule) { $crgAcFound = $true; break }
+      if ([string]::Equals($crgAcLine, $crgAcRule, [System.StringComparison]::Ordinal)) { $crgAcFound = $true; break }
     }
     if (-not $crgAcFound) { $crgAcMissing.Add($crgAcRule) | Out-Null }
   }
@@ -2570,7 +2643,7 @@ function Assert-CrgInstallValuesAttributeGraph {
   if ($null -ne $RetainedAttributeBuffers) {
     if ($AppendMissing -or -not $RetainedAttributeBuffers.ContainsKey('.gitattributes')) { throw 'retained package attribute graph lacks one exact root source or requested target mutation' }
     foreach ($crgAgAttributePath in @($RetainedAttributeBuffers.Keys)) {
-      if ("$crgAgAttributePath" -cnotin @('.gitattributes', 'scripts/.gitattributes', 'scripts/codex/.gitattributes', 'docs/.gitattributes') -or
+      if (-not [System.Linq.Enumerable]::Contains([string[]]@('.gitattributes', 'scripts/.gitattributes', 'scripts/codex/.gitattributes', 'docs/.gitattributes'), "$crgAgAttributePath", [System.StringComparer]::Ordinal) -or
           $RetainedAttributeBuffers[$crgAgAttributePath] -isnot [byte[]]) {
         throw "retained package attribute graph contains an invalid source '$crgAgAttributePath'"
       }
@@ -2588,19 +2661,19 @@ function Assert-CrgInstallValuesAttributeGraph {
   $crgAgContext = $null
   try {
     $crgAgFormatRows = @(& git -C $GitRepoRoot rev-parse --show-object-format 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $crgAgFormatRows.Count -ne 1 -or "$($crgAgFormatRows[0])" -notin @('sha1', 'sha256')) { throw 'repository object format could not be captured' }
-    $crgAgOidLength = if ("$($crgAgFormatRows[0])" -ceq 'sha256') { 64 } else { 40 }
+    if ($LASTEXITCODE -ne 0 -or $crgAgFormatRows.Count -ne 1 -or -not ([string]::Equals("$($crgAgFormatRows[0])", 'sha1', [System.StringComparison]::Ordinal) -or [string]::Equals("$($crgAgFormatRows[0])", 'sha256', [System.StringComparison]::Ordinal))) { throw 'repository object format could not be captured' }
+    $crgAgOidLength = if ([string]::Equals("$($crgAgFormatRows[0])", 'sha256', [System.StringComparison]::Ordinal)) { 64 } else { 40 }
     $crgAgContext = New-CrgPrivateAttributeContext -ScratchRoot $ScratchRoot -ObjectIdLength $crgAgOidLength
     $crgAgWriter = { param([string]$Type, [byte[]]$Bytes) Add-CrgPrivateGitObject -Context $crgAgContext -Type $Type -Bytes $Bytes }
     $crgAgTree = New-CrgGitAttributeSourceTree -AttributeBuffers $crgAgBuffers -ObjectIdLength $crgAgOidLength -WriteObject $crgAgWriter -ProbePaths $crgAgPaths
     $crgAgMap = Get-CrgPrivateAttributeMap -Context $crgAgContext -TreeOid $crgAgTree -Paths $crgAgPaths -Attributes @('text', 'eol', 'filter', 'ident', 'working-tree-encoding')
     Assert-CrgPrivateInstallValuesAttributeStates -Context $crgAgContext -TreeOid $crgAgTree -Paths $crgAgPaths
     foreach ($crgAgPath in $crgAgPaths) {
-      if ($crgAgMap["$crgAgPath`0text"] -cne 'set' -or $crgAgMap["$crgAgPath`0eol"] -cne 'lf') {
+      if (-not [string]::Equals($crgAgMap["$crgAgPath`0text"], 'set', [System.StringComparison]::Ordinal) -or -not [string]::Equals($crgAgMap["$crgAgPath`0eol"], 'lf', [System.StringComparison]::Ordinal)) {
         throw "'$crgAgPath' does not resolve to text=set and eol=lf"
       }
       foreach ($crgAgUnsafe in @('filter', 'ident', 'working-tree-encoding')) {
-        if ($crgAgMap["$crgAgPath`0$crgAgUnsafe"] -notin @('unset', 'unspecified')) {
+        if (-not ([string]::Equals($crgAgMap["$crgAgPath`0$crgAgUnsafe"], 'unset', [System.StringComparison]::Ordinal) -or [string]::Equals($crgAgMap["$crgAgPath`0$crgAgUnsafe"], 'unspecified', [System.StringComparison]::Ordinal))) {
           throw "'$crgAgPath' has active $crgAgUnsafe checkout transformation '$($crgAgMap["$crgAgPath`0$crgAgUnsafe"])'"
         }
       }
@@ -2615,7 +2688,7 @@ function Assert-CrgInstallValuesAttributeGraph {
     $crgAgConversion = [pscustomobject]@{ AutoCrlf = 'true'; Eol = 'native'; SafeCrlf = 'false' }
     foreach ($crgAgPath in $crgAgPaths) {
       $crgAgCrlfOid = Get-CrgPrivateFilteredObjectIdOfBytes -Context $crgAgContext -TreeOid $crgAgTree -RepoPath $crgAgPath -Bytes $crgAgCrlf -Conversion $crgAgConversion
-      if ($crgAgCrlfOid -cne $crgAgExpectedLfOid) { throw "'$crgAgPath' does not clean CRLF to the exact LF blob under core.autocrlf=true" }
+      if (-not [string]::Equals($crgAgCrlfOid, $crgAgExpectedLfOid, [System.StringComparison]::Ordinal)) { throw "'$crgAgPath' does not clean CRLF to the exact LF blob under core.autocrlf=true" }
       $crgAgCheckout = Invoke-CrgPrivateAttributeGit -Context $crgAgContext -GitArgs @("--attr-source=$crgAgTree", '-c', 'core.autocrlf=true', 'cat-file', '--filters', "--path=$crgAgPath", $crgAgSpecialOid)
       if ($crgAgCheckout.Exit -ne 0 -or $crgAgCheckout.ErrorText.Length -ne 0 -or
           -not (Compare-CrgInstallValueBytes -Left ([byte[]]$crgAgCheckout.Bytes) -Right $crgAgSpecial)) {
@@ -2653,11 +2726,11 @@ function Get-CrgControlledBasePathObjectId {
       -not [System.IO.Path]::IsPathRooted($ProofScratchRoot) -or
       $BaseCommit -cnotmatch '\A[0-9a-f]{40}([0-9a-f]{24})?\z' -or
       $RepoPath -cnotmatch '\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z' -or
-      $RepoPath.StartsWith('/') -or $RepoPath.EndsWith('/') -or $null -eq $HeldBytes) {
+      $RepoPath.StartsWith('/', [System.StringComparison]::Ordinal) -or $RepoPath.EndsWith('/', [System.StringComparison]::Ordinal) -or $null -eq $HeldBytes) {
     return $null
   }
   foreach ($bpComponent in @($RepoPath -split '/')) {
-    if ($bpComponent -in @('.', '..')) { return $null }
+    if ([string]::Equals($bpComponent, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($bpComponent, '..', [System.StringComparison]::Ordinal)) { return $null }
   }
   try {
     $bpRepoFull = [System.IO.Path]::GetFullPath($RepoRoot)
@@ -2674,7 +2747,7 @@ function Get-CrgControlledBasePathObjectId {
     if ($LASTEXITCODE -ne 0) { throw 'the captured base identity is not one readable commit' }
     $bpFormatRows = @(& git -C $bpRepoFull rev-parse --show-object-format 2>$null)
     $bpExpectedFormat = if ($BaseCommit.Length -eq 64) { 'sha256' } else { 'sha1' }
-    if ($LASTEXITCODE -ne 0 -or $bpFormatRows.Count -ne 1 -or "$($bpFormatRows[0])" -cne $bpExpectedFormat) {
+    if ($LASTEXITCODE -ne 0 -or $bpFormatRows.Count -ne 1 -or -not [string]::Equals("$($bpFormatRows[0])", $bpExpectedFormat, [System.StringComparison]::Ordinal)) {
       throw 'the captured base identity does not match the repository object format'
     }
 
@@ -2709,7 +2782,7 @@ function Get-CrgControlledBasePathObjectId {
     $bpSpecified = Get-CrgPrivateSpecifiedAttributeMap -Context $bpContext -TreeOid $bpTree -Paths @($RepoPath)
     foreach ($bpSpecifiedKey in $bpSpecified.Keys) {
       $bpSpecifiedAttribute = "$bpSpecifiedKey".Substring("$bpSpecifiedKey".IndexOf([char]0) + 1)
-      if ($bpSpecifiedAttribute -in @('filter', 'ident', 'working-tree-encoding')) {
+      if ([System.Linq.Enumerable]::Contains([string[]]@('filter', 'ident', 'working-tree-encoding'), [string]$bpSpecifiedAttribute, [System.StringComparer]::Ordinal)) {
         throw "captured base attributes explicitly specify unsupported content transform '$bpSpecifiedAttribute' for '$RepoPath'"
       }
     }
@@ -2766,7 +2839,7 @@ function Get-CrgControlledLegacyAttributeOid {
     $caSpecifiedMap = Get-CrgPrivateSpecifiedAttributeMap -Context $caContext -TreeOid $caTree -Paths @('.gitattributes')
     foreach ($caSpecifiedKey in $caSpecifiedMap.Keys) {
       $caSpecifiedAttribute = "$caSpecifiedKey".Substring("$caSpecifiedKey".IndexOf([char]0) + 1)
-      if ($caSpecifiedAttribute -in @('filter', 'ident', 'working-tree-encoding')) { throw "BaseHead .gitattributes explicitly specifies unsafe content transform '$caSpecifiedAttribute' for itself" }
+      if ([System.Linq.Enumerable]::Contains([string[]]@('filter', 'ident', 'working-tree-encoding'), [string]$caSpecifiedAttribute, [System.StringComparer]::Ordinal)) { throw "BaseHead .gitattributes explicitly specifies unsafe content transform '$caSpecifiedAttribute' for itself" }
     }
     $caResult = Get-CrgPrivateFilteredObjectIdOfBytes -Context $caContext -TreeOid $caTree -RepoPath '.gitattributes' -Bytes $HeldBytes -Conversion $caConversion
   } catch {
@@ -2801,18 +2874,25 @@ function Publish-CrgLegacyReviewKernelTransitionRecord {
     [byte[]]$AttributeExpectedBytes
   )
 
+  # The shared review files ride the same transition: the new wrappers load
+  # them, so landing the wrappers without them would leave the next commit with
+  # no runnable trusted reviewer.
   $trPaths = @(
     '.gitattributes',
     'scripts/git-hooks/pre-commit',
     'scripts/codex/auto-review.ps1',
     'scripts/claude/auto-review.ps1',
-    'scripts/codex/review-prompt-template.md'
+    'scripts/codex/review-prompt-template.md',
+    'scripts/review-liveness.psm1',
+    'scripts/review-common.ps1'
   )
   $trCore = @(
     'scripts/git-hooks/pre-commit',
     'scripts/codex/auto-review.ps1',
     'scripts/claude/auto-review.ps1',
-    'scripts/codex/review-prompt-template.md'
+    'scripts/codex/review-prompt-template.md',
+    'scripts/review-liveness.psm1',
+    'scripts/review-common.ps1'
   )
   if ([string]::IsNullOrWhiteSpace($ProofScratchRoot) -or -not [System.IO.Path]::IsPathRooted($ProofScratchRoot)) {
     Write-Host '[bootstrap] ERROR: the legacy transition proof root is not one absolute retained namespace; refusing to publish an identity record.'
@@ -2845,7 +2925,7 @@ function Publish-CrgLegacyReviewKernelTransitionRecord {
   $trChangedPaths = New-Object 'System.Collections.Generic.List[string]'
   $trChangedCore = 0
   $trSourceHolds = New-Object 'System.Collections.Generic.List[object]'
-  $trBaseMap = @{}
+  $trBaseMap = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
   $trExpectedIndexMap = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
   $trDeriveFailed = $false
   $trCleanupOk = $true
@@ -2903,12 +2983,13 @@ function Publish-CrgLegacyReviewKernelTransitionRecord {
     foreach ($trSpecifiedKey in $trSpecifiedMap.Keys) {
       $trSpecifiedPath = "$trSpecifiedKey".Substring(0, "$trSpecifiedKey".IndexOf([char]0))
       $trSpecifiedAttribute = "$trSpecifiedKey".Substring("$trSpecifiedKey".IndexOf([char]0) + 1)
-      if ($trSpecifiedPath -cne $trValuesOutputPath -and $trSpecifiedAttribute -in @('filter', 'ident', 'working-tree-encoding')) {
+      if (-not [string]::Equals($trSpecifiedPath, $trValuesOutputPath, [System.StringComparison]::Ordinal) -and
+          [System.Linq.Enumerable]::Contains([string[]]@('filter', 'ident', 'working-tree-encoding'), [string]$trSpecifiedAttribute, [System.StringComparer]::Ordinal)) {
         throw "private transition path explicitly specifies unsafe content-transform attribute '$trSpecifiedAttribute'"
       }
     }
     $trAttrMap = Get-CrgPrivateAttributeMap -Context $trContext -TreeOid $trAttributeTree -Paths $trAddPaths -Attributes @('text', 'eol')
-    if ($trAttrMap["scripts/git-hooks/pre-commit`0text"] -cne 'set' -or $trAttrMap["scripts/git-hooks/pre-commit`0eol"] -cne 'lf') {
+    if (-not [string]::Equals($trAttrMap["scripts/git-hooks/pre-commit`0text"], 'set', [System.StringComparison]::Ordinal) -or -not [string]::Equals($trAttrMap["scripts/git-hooks/pre-commit`0eol"], 'lf', [System.StringComparison]::Ordinal)) {
       throw 'the private transition hook does not resolve the exact installer-authored text=set/eol=lf contract'
     }
     $trSignatures = @('crg_pm_staged_touches_declaration', 'function Test-ProjectModeBranchRange', 'Green is campaign-anchored')
@@ -2952,7 +3033,7 @@ function Publish-CrgLegacyReviewKernelTransitionRecord {
       if (-not $trSame) {
         $trEntries.Add("entry: $trMode $trOid $trPath") | Out-Null
         $trChangedPaths.Add($trPath) | Out-Null
-        if ($trCore -contains $trPath) { $trChangedCore++ }
+        if ([System.Linq.Enumerable]::Contains([string[]]@($trCore), [string]$trPath, [System.StringComparer]::Ordinal)) { $trChangedCore++ }
       }
     }
   } catch {
@@ -2981,14 +3062,14 @@ function Publish-CrgLegacyReviewKernelTransitionRecord {
   $trStagePublished = $false
   try {
     $trKind = Get-CrgPathOccupantKind -Path $trRecord
-    if ($trKind -eq 'file') {
+    if ([string]::Equals($trKind, 'file', [System.StringComparison]::Ordinal)) {
       $trExisting = Open-CrgLegacyRoutingHeldFile -Path $trRecord -MaxLength 2048 -ReadBytes
       if (-not (Test-CrgLegacyRoutingBytesEqual -Left $trExisting.Bytes -Right $trBytes)) {
         throw 'an existing transition record differs from the exact record derived for this base and candidate'
       }
       return [pscustomobject]@{ RecordPath = $trRecord; Paths = @($trChangedPaths); BaseHead = $BaseHead; Reused = $true; Hold = $trExisting }
     }
-    if ($trKind -ne 'empty') {
+    if (-not [string]::Equals($trKind, 'empty', [System.StringComparison]::Ordinal)) {
       throw "transition-record path has occupant kind $trKind"
     }
     $trStageH = $null
@@ -3137,11 +3218,11 @@ function Publish-CrgLegacyRoutingDriverCustody {
     $cuExpectedRecordHash = Get-CrgSha256HexOfBytes -Bytes $cuBytes
 
     $cuKind = Get-CrgPathOccupantKind -Path $cuDir
-    $cuReusedDirectory = ($cuKind -eq 'directory')
-    if ($cuKind -eq 'directory') {
+    $cuReusedDirectory = [string]::Equals($cuKind, 'directory', [System.StringComparison]::Ordinal)
+    if ([string]::Equals($cuKind, 'directory', [System.StringComparison]::Ordinal)) {
       if (-not (& $cuHasExactInventory $cuDir)) { throw "existing base-bound custody directory '$cuDir' does not have the exact owned inventory" }
-    } elseif ($cuKind -eq 'empty') {
-      if ((Get-CrgPathOccupantKind -Path $cuStageDir) -ne 'empty') { throw "unique custody staging path '$cuStageDir' is occupied" }
+    } elseif ([string]::Equals($cuKind, 'empty', [System.StringComparison]::Ordinal)) {
+      if (-not [string]::Equals((Get-CrgPathOccupantKind -Path $cuStageDir), 'empty', [System.StringComparison]::Ordinal)) { throw "unique custody staging path '$cuStageDir' is occupied" }
       $cuDirCreateErr = 0
       $cuStageDirHandle = [CrgBootstrap.NativeV4]::CreateOwnedDirectoryAtomic($cuStageDir, [ref]$cuDirCreateErr)
       if ($null -eq $cuStageDirHandle -or $cuStageDirHandle.IsInvalid) { throw "atomic custody staging-directory create-and-hold failed (Win32 error $cuDirCreateErr); any occupant that won the name is preserved" }
@@ -3229,15 +3310,15 @@ function Publish-CrgLegacyRoutingDriverCustody {
     if (-not (& $cuHasExactInventory $cuDir)) { throw 'base-bound custody inventory changed after its held content proof' }
 
     $cuActiveKind = Get-CrgPathOccupantKind -Path $cuActive
-    $cuReusedActive = ($cuActiveKind -eq 'file')
-    if ($cuActiveKind -eq 'file') {
+    $cuReusedActive = [string]::Equals($cuActiveKind, 'file', [System.StringComparison]::Ordinal)
+    if ([string]::Equals($cuActiveKind, 'file', [System.StringComparison]::Ordinal)) {
       $cuActiveCustody = Read-CrgLegacyRoutingDriverCustodyRecord -RecordPath $cuActive -GitDir $GitDir
       $cuLease.Custody = $cuActiveCustody
       if ($cuActiveCustody.RecordHash -cne $cuExpectedRecordHash -or
           -not (Test-CrgLegacyRoutingBytesEqual -Left $cuActiveCustody.Bytes -Right $cuBytes)) {
         throw "existing active-custody record '$cuActive' belongs to a different epoch"
       }
-    } elseif ($cuActiveKind -eq 'empty') {
+    } elseif ([string]::Equals($cuActiveKind, 'empty', [System.StringComparison]::Ordinal)) {
       $cuActiveH = $null
       $cuActiveErr = 0
       try {
@@ -3555,7 +3636,7 @@ function Read-CrgLegacyReviewKernelTransitionRecord {
     }
     $rtText = [System.Text.Encoding]::ASCII.GetString($rtBytes, 0, $rtBytes.Length - 1)
     $rtLines = @($rtText -split "`n")
-    if ($rtLines.Count -lt 3 -or $rtLines.Count -gt 7 -or -not [string]::Equals($rtLines[0], 'crg-review-kernel-transition v1', [System.StringComparison]::Ordinal)) {
+    if ($rtLines.Count -lt 3 -or $rtLines.Count -gt 9 -or -not [string]::Equals($rtLines[0], 'crg-review-kernel-transition v1', [System.StringComparison]::Ordinal)) {
       throw 'the transition record does not have the bounded v1 shape'
     }
     if ($rtLines[1] -cnotmatch '^base: (?<base>[0-9a-f]{40}([0-9a-f]{24})?)$' -or
@@ -3568,6 +3649,8 @@ function Read-CrgLegacyReviewKernelTransitionRecord {
     $rtRanks.Add('scripts/codex/auto-review.ps1', 3)
     $rtRanks.Add('scripts/claude/auto-review.ps1', 4)
     $rtRanks.Add('scripts/codex/review-prompt-template.md', 5)
+    $rtRanks.Add('scripts/review-liveness.psm1', 6)
+    $rtRanks.Add('scripts/review-common.ps1', 7)
     $rtPrev = 0
     $rtCore = 0
     $rtEntries = @()
@@ -3671,14 +3754,14 @@ function Publish-CrgLegacyRoutingRestoredMarker {
   $rmBytes = [System.Text.UTF8Encoding]::new($false).GetBytes("crg-review-kernel-routing-restored v1`nbase: $($Custody.BaseHead)`nlanding-head: $LandingHead`ncustody-sha256: $($Custody.RecordHash)`n")
   $rmExpected = Get-CrgSha256HexOfBytes -Bytes $rmBytes
   $rmKind = Get-CrgPathOccupantKind -Path $rmPath
-  if ($rmKind -eq 'file') {
+  if ([string]::Equals($rmKind, 'file', [System.StringComparison]::Ordinal)) {
     $rmExisting = Open-CrgLegacyRoutingHeldFile -Path $rmPath -MaxLength 512 -ReadBytes
     try {
       if ($rmExisting.Hash -ceq $rmExpected -and (Test-CrgLegacyRoutingBytesEqual -Left $rmExisting.Bytes -Right $rmBytes)) { return $rmPath }
       throw "an existing completion marker at '$rmPath' does not match this exact custody landing"
     } finally { $rmExisting.Stream.Dispose() }
   }
-  if ($rmKind -ne 'empty') { throw "completion-marker path '$rmPath' has a $rmKind occupant" }
+  if (-not [string]::Equals($rmKind, 'empty', [System.StringComparison]::Ordinal)) { throw "completion-marker path '$rmPath' has a $rmKind occupant" }
   $rmStage = "$rmPath.crg-new-$([Guid]::NewGuid().ToString('N'))"
   $rmFs = $null
   $rmPublished = $false
@@ -3722,14 +3805,14 @@ function Test-CrgLegacyRoutingRestoredMarker {
   param([string]$RepoRoot, [string]$GitDir, [object]$Custody, [object]$Transition, [ref]$LandingHeadRef)
   if ($null -ne $LandingHeadRef) { $LandingHeadRef.Value = '' }
   $tmPath = Join-Path $GitDir 'crg-review-kernel-routing-custody-restored'
-  if ((Get-CrgPathOccupantKind -Path $tmPath) -eq 'empty') { return $false }
+  if ([string]::Equals((Get-CrgPathOccupantKind -Path $tmPath), 'empty', [System.StringComparison]::Ordinal)) { return $false }
   $tmHold = Open-CrgLegacyRoutingHeldFile -Path $tmPath -MaxLength 512 -ReadBytes
   try {
     foreach ($tmByte in $tmHold.Bytes) { if (-not ($tmByte -eq 0x0A -or ($tmByte -ge 0x20 -and $tmByte -le 0x7E))) { return $false } }
     if ($tmHold.Bytes.Length -lt 1 -or $tmHold.Bytes[$tmHold.Bytes.Length - 1] -ne 0x0A) { return $false }
     $tmLines = @([System.Text.Encoding]::ASCII.GetString($tmHold.Bytes, 0, $tmHold.Bytes.Length - 1) -split "`n")
-    if ($tmLines.Count -ne 4 -or $tmLines[0] -cne 'crg-review-kernel-routing-restored v1' -or
-        $tmLines[1] -cne "base: $($Custody.BaseHead)" -or $tmLines[3] -cne "custody-sha256: $($Custody.RecordHash)" -or
+    if ($tmLines.Count -ne 4 -or -not [string]::Equals($tmLines[0], 'crg-review-kernel-routing-restored v1', [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($tmLines[1], "base: $($Custody.BaseHead)", [System.StringComparison]::Ordinal) -or -not [string]::Equals($tmLines[3], "custody-sha256: $($Custody.RecordHash)", [System.StringComparison]::Ordinal) -or
         $tmLines[2] -cnotmatch '^landing-head: (?<head>[0-9a-f]{40}([0-9a-f]{24})?)$') { return $false }
     $tmLanding = $Matches['head']
     try { $tmState = Get-CrgLegacyRoutingLandingState -RepoRoot $RepoRoot -Custody $Custody -Transition $Transition -Commit $tmLanding } catch { return $false }
@@ -3745,8 +3828,8 @@ function Get-CrgLegacyRoutingResumeState {
   param([string]$RepoRoot, [string]$GitDir)
   $rsActive = Join-Path $GitDir 'crg-review-kernel-routing-custody-active'
   $rsKind = Get-CrgPathOccupantKind -Path $rsActive
-  if ($rsKind -eq 'empty') { return [pscustomobject]@{ State = 'none'; Reason = 'no active custody record'; BaseHead = ''; LandingHead = '' } }
-  if ($rsKind -ne 'file') { return [pscustomobject]@{ State = 'blocked'; Reason = "active custody path has occupant kind $rsKind"; BaseHead = ''; LandingHead = '' } }
+  if ([string]::Equals($rsKind, 'empty', [System.StringComparison]::Ordinal)) { return [pscustomobject]@{ State = 'none'; Reason = 'no active custody record'; BaseHead = ''; LandingHead = '' } }
+  if (-not [string]::Equals($rsKind, 'file', [System.StringComparison]::Ordinal)) { return [pscustomobject]@{ State = 'blocked'; Reason = "active custody path has occupant kind $rsKind"; BaseHead = ''; LandingHead = '' } }
   $rsCustody = $null
   $rsTransition = $null
   $rsLease = $null
@@ -3756,10 +3839,10 @@ function Get-CrgLegacyRoutingResumeState {
     $rsLease = Assert-CrgLegacyRoutingDriverCustodyEpoch -RepoRoot $RepoRoot -Custody $rsCustody
     $rsTransitionPath = Join-Path $GitDir 'crg-review-kernel-transition'
     $rsTransitionKind = Get-CrgPathOccupantKind -Path $rsTransitionPath
-    if ($rsTransitionKind -eq 'file') {
+    if ([string]::Equals($rsTransitionKind, 'file', [System.StringComparison]::Ordinal)) {
       $rsTransition = Read-CrgLegacyReviewKernelTransitionRecord -RecordPath $rsTransitionPath -ExpectedBase $rsCustody.BaseHead
       $rsLease.Transition = $rsTransition
-    } elseif ($rsTransitionKind -eq 'empty') {
+    } elseif ([string]::Equals($rsTransitionKind, 'empty', [System.StringComparison]::Ordinal)) {
       $rsHead = (& git -C $RepoRoot rev-parse --verify 'HEAD^{commit}' 2>$null)
       if ($LASTEXITCODE -ne 0 -or "$rsHead".Trim() -cnotmatch '\A[0-9a-f]{40}([0-9a-f]{24})?\z') { throw 'current HEAD could not be captured' }
       $rsLanding = Get-CrgLegacyRoutingLandingState -RepoRoot $RepoRoot -Custody $rsCustody -Transition $null -Commit "$rsHead".Trim()
@@ -3832,11 +3915,11 @@ function Restore-CrgLegacyRoutingDriverCustody {
     $rrHead = "$rrHead".Trim()
     $rrTransitionPath = Join-Path $GitDir 'crg-review-kernel-transition'
     $rrTransitionKind = Get-CrgPathOccupantKind -Path $rrTransitionPath
-    if ($rrTransitionKind -eq 'file') {
+    if ([string]::Equals($rrTransitionKind, 'file', [System.StringComparison]::Ordinal)) {
       $rrTransition = Read-CrgLegacyReviewKernelTransitionRecord -RecordPath $rrTransitionPath -ExpectedBase $rrCustody.BaseHead
       $rrEpoch.Transition = $rrTransition
       $rrLanding = Get-CrgLegacyRoutingLandingState -RepoRoot $RepoRoot -Custody $rrCustody -Transition $rrTransition -Commit $rrHead
-    } elseif ($rrTransitionKind -eq 'empty') {
+    } elseif ([string]::Equals($rrTransitionKind, 'empty', [System.StringComparison]::Ordinal)) {
       if (-not [string]::Equals($rrHead, $rrCustody.BaseHead, [System.StringComparison]::Ordinal)) {
         throw 'an absent transition record is recoverable only while HEAD is the exact recorded legacy base'
       }
@@ -3874,14 +3957,14 @@ function Restore-CrgLegacyRoutingDriverCustody {
         $rrDest.OriginalHash = $rrOriginalHash
         if (-not $rrAlready) {
           $rrPhaseOid = Get-CrgControlledBasePathObjectId -RepoRoot $RepoRoot -ProofScratchRoot $ProofScratchRoot -BaseCommit $rrCustody.BaseHead -RepoPath $rrEntry.RepoPath -HeldBytes $rrOriginal
-          if ($null -eq $rrPhaseOid -or $rrPhaseOid -cne $rrEntry.BaseOid) { throw "worktree bytes for '$($rrEntry.RepoPath)' changed after phase A; refusing to overwrite them" }
+          if ($null -eq $rrPhaseOid -or -not [string]::Equals($rrPhaseOid, $rrEntry.BaseOid, [System.StringComparison]::Ordinal)) { throw "worktree bytes for '$($rrEntry.RepoPath)' changed after phase A; refusing to overwrite them" }
         }
         $rrDest.State = if ($rrAlready) { 'restored' } else { 'pending' }
       } else {
         $rrKind = Get-CrgPathOccupantKind -Path $rrDestPath
-        if ($rrKind -eq 'empty') {
+        if ([string]::Equals($rrKind, 'empty', [System.StringComparison]::Ordinal)) {
           $rrDestinations += [pscustomobject]@{ Entry = $rrEntry; Path = $rrDestPath; State = 'pending-create'; Stream = $null; OriginalBytes = $null; OriginalHash = $null }
-        } elseif ($rrKind -eq 'file') {
+        } elseif ([string]::Equals($rrKind, 'file', [System.StringComparison]::Ordinal)) {
           $rrExisting = Open-CrgLegacyRoutingHeldFile -Path $rrDestPath -MaxLength 16777216
           if ($rrExisting.Hash -cne $rrEntry.Hash) { $rrExisting.Stream.Dispose(); throw "base-absent destination '$($rrEntry.RepoPath)' gained different worktree bytes; refusing to overwrite them" }
           $rrDestinations += [pscustomobject]@{ Entry = $rrEntry; Path = $rrDestPath; State = 'restored'; Stream = $rrExisting.Stream; OriginalBytes = $null; OriginalHash = $rrExisting.Hash }
@@ -3902,7 +3985,7 @@ function Restore-CrgLegacyRoutingDriverCustody {
       if ($rrEntry.BasePresent) {
         $rrTreeWant = "$($rrEntry.BaseMode) blob $($rrEntry.BaseOid)`t$($rrEntry.RepoPath)"
         $rrIndexWant = "$($rrEntry.BaseMode) $($rrEntry.BaseOid) 0`t$($rrEntry.RepoPath)"
-        if ($rrTree.Count -ne 1 -or "$($rrTree[0])" -cne $rrTreeWant -or $rrIndex.Count -ne 1 -or "$($rrIndex[0])" -cne $rrIndexWant) {
+        if ($rrTree.Count -ne 1 -or -not [string]::Equals("$($rrTree[0])", $rrTreeWant, [System.StringComparison]::Ordinal) -or $rrIndex.Count -ne 1 -or -not [string]::Equals("$($rrIndex[0])", $rrIndexWant, [System.StringComparison]::Ordinal)) {
           throw "tracked phase-A identity changed for '$($rrEntry.RepoPath)'"
         }
       } elseif ($rrTree.Count -ne 0 -or $rrIndex.Count -ne 0) {
@@ -4020,18 +4103,18 @@ function Get-CrgStagingPlan {
   foreach ($crgSpCand in $Candidates) {
     if (-not (Test-Path -LiteralPath (Join-Path $Repo $crgSpCand))) { continue }
     $crgSpTrk = Get-CrgTrackedState -Repo $Repo -Path $crgSpCand
-    if ($crgSpTrk -like 'error:*') {
+    if (([string]$crgSpTrk).StartsWith('error:', [System.StringComparison]::Ordinal)) {
       $crgSpUnknown.Add($crgSpCand) | Out-Null
       $crgSpList.Add($crgSpCand) | Out-Null
       continue
     }
-    if ($crgSpTrk -eq 'tracked') {
+    if ([string]::Equals($crgSpTrk, 'tracked', [System.StringComparison]::Ordinal)) {
       $crgSpList.Add($crgSpCand) | Out-Null
       continue
     }
     $crgSpIgn = Get-CrgCheckIgnoreState -Repo $Repo -Path $crgSpCand
-    if ($crgSpIgn -eq 'ignored') { continue }
-    if ($crgSpIgn -like 'error:*') { $crgSpUnknown.Add($crgSpCand) | Out-Null }
+    if ([string]::Equals($crgSpIgn, 'ignored', [System.StringComparison]::Ordinal)) { continue }
+    if (([string]$crgSpIgn).StartsWith('error:', [System.StringComparison]::Ordinal)) { $crgSpUnknown.Add($crgSpCand) | Out-Null }
     $crgSpList.Add($crgSpCand) | Out-Null
   }
   return @{ List = $crgSpList.ToArray(); Unknown = $crgSpUnknown.ToArray() }
@@ -4724,7 +4807,7 @@ function Install-CrgDispatcherSentinel {
       return (Install-CrgDispatcherSentinel -DispatcherPath $DispatcherPath -RetryDepth ($RetryDepth + 1) -PreservationPath $PreservationPath)
     }
     $crgSnKind = Get-CrgPathOccupantKind -Path $DispatcherPath
-    Write-Host "[bootstrap] WARNING: the FAIL-CLOSED sentinel could not be created at '$DispatcherPath' ($($_.Exception.Message)) - $(switch -Wildcard ($crgSnKind) { 'file' { "an occupant holds the path; repair it by hand before committing" } 'reparse' { "a REPARSE-POINT occupant (a symlink or junction, possibly dangling) holds the hook name; no re-run can replace it -- remove the link by hand, then re-run bootstrap" } 'directory' { "a DIRECTORY occupies the path; remove it by hand, then re-run bootstrap" } 'empty' { "the path is EMPTY (git silently runs no hook); re-run bootstrap before committing" } default { "the occupant could not be classified ($crgSnKind); diagnose the path by hand before committing" } })."
+    Write-Host "[bootstrap] WARNING: the FAIL-CLOSED sentinel could not be created at '$DispatcherPath' ($($_.Exception.Message)) - $(switch -Wildcard -CaseSensitive ($crgSnKind) { 'file' { "an occupant holds the path; repair it by hand before committing" } 'reparse' { "a REPARSE-POINT occupant (a symlink or junction, possibly dangling) holds the hook name; no re-run can replace it -- remove the link by hand, then re-run bootstrap" } 'directory' { "a DIRECTORY occupies the path; remove it by hand, then re-run bootstrap" } 'empty' { "the path is EMPTY (git silently runs no hook); re-run bootstrap before committing" } default { "the occupant could not be classified ($crgSnKind); diagnose the path by hand before committing" } })."
     return $false
   }
   if ([string]::Equals((Get-CrgSha256HexSafe -Path $DispatcherPath), $crgSnWant, [System.StringComparison]::Ordinal)) {
@@ -4976,7 +5059,7 @@ function Publish-CrgInstallManifest {
       }
       $pubH.Hash = $pubHash
     }
-    if ($PriorState -notin @('classify', 'held', 'absent', 'foreign')) { throw "unrecognized prior-manifest transaction state '$PriorState'" }
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@('classify', 'held', 'absent', 'foreign'), [string]$PriorState, [System.StringComparer]::Ordinal)) { throw "unrecognized prior-manifest transaction state '$PriorState'" }
     if ($PriorState -ceq 'held') {
       if ($null -eq $PriorOwner.Stream -or -not [string]::Equals("$($PriorOwner.Path)", $ManifestPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'the supplied prior manifest owner is absent or names a different path' }
       $pubOldSrcFs = $PriorOwner.Stream
@@ -5311,7 +5394,7 @@ function Start-CrgLocalAuthorizationMarkerReservationExact {
   $mrRewroteFixed = $false
   $mrSuccess = $false
   try {
-    if ($PriorState -notin @('classify', 'held', 'absent', 'foreign')) { throw "unrecognized prior-marker transaction state '$PriorState'" }
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@('classify', 'held', 'absent', 'foreign'), [string]$PriorState, [System.StringComparer]::Ordinal)) { throw "unrecognized prior-marker transaction state '$PriorState'" }
     if ($PriorState -ceq 'held') {
       if ($null -eq $PriorOwner -or $null -eq $PriorOwner.Stream -or -not [string]::Equals("$($PriorOwner.Path)", $mrPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'the supplied prior marker owner is absent or names a different path' }
       $mrPrior = [pscustomobject]@{ Path = $PriorOwner.Path; Stream = $PriorOwner.Stream; Bytes = $PriorOwner.Bytes }
@@ -5771,7 +5854,7 @@ function Get-CrgStampedFileBytes {
     "<!-- $sfText -->"
   } else {
     switch -Regex ($sfExt) {
-      '^\.(ps1|sh)$' { "# $sfText"; break }
+      '^\.(ps1|psm1|sh)$' { "# $sfText"; break }
       '^\.rs$'       { "// $sfText"; break }
       '^\.md$'       { "<!-- $sfText -->"; break }
       default {
@@ -5833,8 +5916,8 @@ function Read-CrgInstallVersionBytes {
   }
   $rvText = [System.Text.Encoding]::ASCII.GetString($rvBytes)
   $rvLines = @($rvText -split "`n")
-  if ($rvLines.Count -lt 5 -or $rvLines[$rvLines.Count - 1] -cne '') { return $null }
-  if ($rvLines[0] -cne 'crg-install-version v1') { return $null }
+  if ($rvLines.Count -lt 5 -or -not [string]::Equals($rvLines[$rvLines.Count - 1], '', [System.StringComparison]::Ordinal)) { return $null }
+  if (-not [string]::Equals($rvLines[0], 'crg-install-version v1', [System.StringComparison]::Ordinal)) { return $null }
   # SemVer, not "any non-whitespace". This value is compared against the
   # package's version to decide whether the refusal arms, so a record holding a
   # string the package reader would never produce must not be able to match it.
@@ -5933,7 +6016,7 @@ function Publish-CrgInstallVersion {
   $pvPublished = $false
   $pvFailure = $null
   try {
-    if ($PriorState -notin @('classify', 'held', 'absent', 'foreign')) { throw "unrecognized prior-version transaction state '$PriorState'" }
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@('classify', 'held', 'absent', 'foreign'), [string]$PriorState, [System.StringComparer]::Ordinal)) { throw "unrecognized prior-version transaction state '$PriorState'" }
     if ($PriorState -ceq 'held') {
       if ($null -eq $PriorOwner.Stream -or
           -not [string]::Equals("$($PriorOwner.Path)", $RecordPath, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -5948,12 +6031,12 @@ function Publish-CrgInstallVersion {
       throw 'the locked prior version-record classification was foreign or unowned; refusing to replace it'
     } elseif ($PriorState -ceq 'classify') {
       $pvKind = Get-CrgPathOccupantKind -Path $RecordPath
-      if ($pvKind -eq 'file') {
+      if ([string]::Equals($pvKind, 'file', [System.StringComparison]::Ordinal)) {
         $pvOpenedOwner = Open-CrgInstallVersionOwner -RecordPath $RecordPath
         $pvPriorFs = $pvOpenedOwner.Stream
         $pvOpenedOwner.Stream = $null
         $pvPriorDeleteEligible = $true
-      } elseif ($pvKind -ne 'empty') {
+      } elseif (-not [string]::Equals($pvKind, 'empty', [System.StringComparison]::Ordinal)) {
         throw "version-record path has occupant kind $pvKind"
       }
     }
@@ -6758,7 +6841,7 @@ function Enter-CrgPinnedAbsoluteDirectoryChain {
   $pcRelative = $pcFull.Substring($pcRoot.Length).Trim('\', '/')
   if ($pcRelative.Length -gt 0) {
     foreach ($pcPart in @($pcRelative -split '[\\/]')) {
-      if ([string]::IsNullOrWhiteSpace($pcPart) -or $pcPart -in @('.', '..') -or $pcPart.Contains(':')) { throw "$Label contains an unsafe directory component: '$pcPart'" }
+      if ([string]::IsNullOrWhiteSpace($pcPart) -or [string]::Equals($pcPart, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($pcPart, '..', [System.StringComparison]::Ordinal) -or $pcPart.Contains(':')) { throw "$Label contains an unsafe directory component: '$pcPart'" }
       $pcCurrent = Join-Path $pcCurrent $pcPart
       $pcPaths.Add($pcCurrent) | Out-Null
     }
@@ -7174,7 +7257,7 @@ function Open-CrgPackageSourceHold {
 function Open-CrgGitIndirectionHold {
   param(
     [string]$Path,
-    [ValidateSet('gitdir', 'commondir')][string]$Kind,
+    [ValidatePattern('\A(?:gitdir|commondir)\z', Options = 'None')][string]$Kind,
     [string]$RelativeBase,
     [string]$ExpectedDirectory,
     [switch]$AllowAbsent
@@ -7352,8 +7435,10 @@ function Read-CrgRuntimeManifestBytes {
     if ($rtByte -ne 10 -and ($rtByte -lt 32 -or $rtByte -gt 126)) { throw 'runtime manifest must be exact LF ASCII' }
   }
   $rtLines = @([System.Text.Encoding]::ASCII.GetString($Bytes).Split([char]10))
-  if ($rtLines.Count -lt 7 -or $rtLines.Count -gt 262 -or $rtLines[-1] -cne '' -or
-      $rtLines[0] -cne 'crg-runtime-manifest v1' -or $rtLines[3] -cnotin @('launcher-abi 1', 'launcher-abi 2') -or $rtLines[4] -cne 'config-schema 1') {
+  if ($rtLines.Count -lt 7 -or $rtLines.Count -gt 262 -or -not [string]::Equals($rtLines[-1], '', [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($rtLines[0], 'crg-runtime-manifest v1', [System.StringComparison]::Ordinal) -or
+      -not ([string]::Equals($rtLines[3], 'launcher-abi 1', [System.StringComparison]::Ordinal) -or [string]::Equals($rtLines[3], 'launcher-abi 2', [System.StringComparison]::Ordinal)) -or
+      -not [string]::Equals($rtLines[4], 'config-schema 1', [System.StringComparison]::Ordinal)) {
     throw 'runtime manifest header, ABI, schema, inventory count, or final LF is invalid'
   }
   $rtLauncherAbi = [int]$rtLines[3].Substring('launcher-abi '.Length)
@@ -7370,15 +7455,15 @@ function Read-CrgRuntimeManifestBytes {
     $rtLength = [int]$Matches['n']; $rtPath = $Matches['p']; $rtHash = $Matches['h']
     $rtTotal += $rtLength
     if ($rtLength -gt 16777216 -or $rtTotal -gt 268435456 -or $rtPath.Length -gt 240 -or
-        $rtPath -ieq 'runtime-manifest' -or -not $rtSeen.Add($rtPath) -or
+        [string]::Equals($rtPath, 'runtime-manifest', [System.StringComparison]::OrdinalIgnoreCase) -or -not $rtSeen.Add($rtPath) -or
         [System.StringComparer]::Ordinal.Compare($rtPrevious, $rtPath) -ge 0) { throw "runtime manifest payload '$rtPath' has an invalid length, path, or order" }
     foreach ($rtPart in @($rtPath.Split([char]'/'))) {
-      if ($rtPart.Length -eq 0 -or $rtPart -in @('.', '..') -or $rtPart.EndsWith('.') -or
+      if ($rtPart.Length -eq 0 -or [string]::Equals($rtPart, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($rtPart, '..', [System.StringComparison]::Ordinal) -or $rtPart.EndsWith('.', [System.StringComparison]::Ordinal) -or
           $rtPart -match '\A(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|\z)') { throw "runtime manifest payload '$rtPath' has an unsupported component" }
     }
     $rtParent = $rtPath
     while ($rtParent.Contains('/')) {
-      $rtParent = $rtParent.Substring(0, $rtParent.LastIndexOf('/'))
+      $rtParent = $rtParent.Substring(0, $rtParent.LastIndexOf([char]'/'))
       if ($rtSeen.Contains($rtParent)) { throw "runtime manifest payload '$rtPath' conflicts with a file parent" }
     }
     $rtPrevious = $rtPath
@@ -7431,7 +7516,7 @@ function Assert-CrgRuntimeLauncherOrigin {
 function Update-CrgRuntimeLauncherAbi {
   param([string]$Store, [object]$Release, [object]$Owners)
   if ($Release.Manifest.LauncherAbi -ne 2) { throw 'launcher migration requires an approved ABI 2 target' }
-  $target = @($Release.Owners | Where-Object { $_.RelativePath -ceq 'scripts/central-launcher.ps1' })
+  $target = @($Release.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })
   if ($target.Count -ne 1) { throw 'launcher migration target lacks the exact launcher payload' }
   $targetHash = Get-CrgSha256HexOfBytes -Bytes $target[0].Bytes
   $migrationPath = Join-Path $Store 'launcher-upgrade'
@@ -7516,8 +7601,9 @@ function Get-CrgRuntimeAbsolutePath {
   param([string]$Path, [string]$Label)
   if ([string]::IsNullOrWhiteSpace($Path) -or $Path -cnotmatch '\A[A-Za-z]:[\\/]') { throw "$Label must be an absolute local drive path" }
   foreach ($rtPart in @($Path.Substring(3) -split '[\\/]')) {
-    if ($rtPart.Length -eq 0 -or $rtPart -in @('.', '..') -or $rtPart.EndsWith('.') -or $rtPart.EndsWith(' ') -or
-        $rtPart.IndexOfAny([char[]]@(':', '*', '?', '"', '<', '>', '|')) -ge 0 -or $rtPart -ieq '.git') { throw "$Label contains an unsupported path component" }
+    if ($rtPart.Length -eq 0 -or [string]::Equals($rtPart, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($rtPart, '..', [System.StringComparison]::Ordinal) -or
+        $rtPart.EndsWith('.', [System.StringComparison]::Ordinal) -or $rtPart.EndsWith(' ', [System.StringComparison]::Ordinal) -or
+        $rtPart.IndexOfAny([char[]]@(':', '*', '?', '"', '<', '>', '|')) -ge 0 -or [string]::Equals($rtPart, '.git', [System.StringComparison]::OrdinalIgnoreCase)) { throw "$Label contains an unsupported path component" }
   }
   $rtFull = [System.IO.Path]::GetFullPath($Path)
   if ($rtFull.Length -le 3) { throw "$Label must not be a drive root" }
@@ -7563,13 +7649,13 @@ function Open-CrgRuntimeRelease {
     $rtManifestOwner = Open-CrgPackageSourceHold -Path (Join-Path $Root 'runtime-manifest') -RelativePath 'runtime-manifest' -MaxLength 65536
     $rtOwners.Add($rtManifestOwner) | Out-Null
     $rtManifest = Read-CrgRuntimeManifestBytes -Bytes $rtManifestOwner.Bytes
-    if ($rtManifest.Id -cne $ExpectedId) { throw 'runtime manifest digest differs from the approved release identity' }
+    if (-not [string]::Equals($rtManifest.Id, $ExpectedId, [System.StringComparison]::Ordinal)) { throw 'runtime manifest digest differs from the approved release identity' }
     Assert-CrgRuntimeInventory -Root $Root -Manifest $rtManifest
     foreach ($rtEntry in $rtManifest.Entries) {
       $rtOwner = Open-CrgPackageSourceHold -Path (Join-Path $Root $rtEntry.Path) -RelativePath $rtEntry.Path
       $rtOwners.Add($rtOwner) | Out-Null
       if ($rtOwner.Bytes.Length -ne $rtEntry.Length -or (Get-CrgSha256HexOfBytes -Bytes $rtOwner.Bytes) -cne $rtEntry.Hash) { throw "runtime payload '$($rtEntry.Path)' differs from the manifest" }
-      if ($rtEntry.Path -ceq 'VERSION' -and (Get-CrgPackageVersionFromBytes -Bytes $rtOwner.Bytes) -cne $rtManifest.Version) { throw 'runtime VERSION differs from the manifest' }
+      if ([string]::Equals($rtEntry.Path, 'VERSION', [System.StringComparison]::Ordinal) -and -not [string]::Equals((Get-CrgPackageVersionFromBytes -Bytes $rtOwner.Bytes), $rtManifest.Version, [System.StringComparison]::Ordinal)) { throw 'runtime VERSION differs from the manifest' }
     }
     Assert-CrgRuntimeInventory -Root $Root -Manifest $rtManifest
     return [pscustomobject]@{ Root = $Root; Manifest = $rtManifest; Owners = $rtOwners }
@@ -7595,7 +7681,7 @@ function Publish-CrgRuntimeSnapshot {
     [void]$rtDirectoryPaths.Add('')
     foreach ($rtEntry in $Manifest.Entries) {
       $rtParent = $rtEntry.Path
-      while ($rtParent.Contains('/')) { $rtParent = $rtParent.Substring(0, $rtParent.LastIndexOf('/')); [void]$rtDirectoryPaths.Add($rtParent) }
+      while ($rtParent.Contains('/')) { $rtParent = $rtParent.Substring(0, $rtParent.LastIndexOf([char]'/')); [void]$rtDirectoryPaths.Add($rtParent) }
     }
     foreach ($rtRelative in @($rtDirectoryPaths | Sort-Object Length, { $_ })) {
       $rtPath = if ($rtRelative.Length -eq 0) { $rtStage } else { Join-Path $rtStage $rtRelative }
@@ -7703,7 +7789,7 @@ function Invoke-CrgCentralRuntimeOperation {
         $rtOwner = Open-CrgPackageSourceHold -Path (Join-Path $rtInput $rtPath) -RelativePath $rtPath
         $rtOwners.Add($rtOwner) | Out-Null; $rtPayloadOwners.Add($rtOwner) | Out-Null
       }
-      $rtVersionOwner = @($rtPayloadOwners | Where-Object { $_.RelativePath -ceq 'VERSION' })[0]
+      $rtVersionOwner = @($rtPayloadOwners | Where-Object { [string]::Equals($_.RelativePath, 'VERSION', [System.StringComparison]::Ordinal) })[0]
       $rtVersion = Get-CrgPackageVersionFromBytes -Bytes $rtVersionOwner.Bytes
       if ($null -eq $rtVersion) { throw 'source VERSION is not bounded SemVer' }
       $rtSource = Get-CrgHeldPackageProvenance -Candidate $rtCandidate -VersionBytes $rtVersionOwner.Bytes -SourceOwners $rtPayloadOwners.ToArray() -ScratchRoot (Join-Path $rtStore ('.proof-' + [Guid]::NewGuid().ToString('N')))
@@ -7734,7 +7820,7 @@ function Invoke-CrgCentralRuntimeOperation {
           throw 'a recorded launcher migration requires UpgradeRuntimeLauncher for retry; a completed migration needs only normal release activation'
         }
         if (@($rtMissingCapabilities).Count -gt 0) { throw "release lacks executable launcher capability: $($rtMissingCapabilities -join ', ')" }
-        $rtLauncherOwner = @($rtRelease.Owners | Where-Object { $_.RelativePath -ceq 'scripts/central-launcher.ps1' })[0]
+        $rtLauncherOwner = @($rtRelease.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })[0]
         $rtLauncherHash = Get-CrgSha256HexOfBytes -Bytes $rtLauncherOwner.Bytes
         $rtInstallBuffers = @(
           [pscustomobject]@{ Name = 'launcher.ps1'; Bytes = [byte[]]$rtLauncherOwner.Bytes; Maximum = 16777216 },
@@ -7742,7 +7828,7 @@ function Invoke-CrgCentralRuntimeOperation {
         )
         # Existing identical files stay read-held without mutation access, so
         # installation is idempotent while ordinary launcher readers are active.
-        $rtExistingInstall = @{}
+        $rtExistingInstall = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
         foreach ($rtItem in $rtInstallBuffers) {
           $rtExisting = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtItem.Name) -RelativePath $rtItem.Name -MaxLength $rtItem.Maximum -AllowAbsent
           if ($null -ne $rtExisting) {
@@ -7767,7 +7853,7 @@ function Invoke-CrgCentralRuntimeOperation {
         Write-Host "[bootstrap] stable launcher installed from verified release $ReleaseId; no release activated and no consumer changed."
         return
       }
-      $rtInstalledFiles = @{}
+      $rtInstalledFiles = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
       foreach ($rtItem in @('launcher.ps1', 'launcher-install')) {
         $rtExisting = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtItem) -RelativePath $rtItem -MaxLength 16777216 -AllowAbsent
         if ($null -ne $rtExisting) { $rtOwners.Add($rtExisting) | Out-Null; $rtInstalledFiles.Add($rtItem, $rtExisting) }
@@ -7830,12 +7916,12 @@ function Invoke-CrgCentralRuntimeOperation {
 # only later, after this clean entry check.
 $crgForbiddenGitEnv = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($crgForbiddenGitEnvName in $gitOverrideEnvNames) { [void]$crgForbiddenGitEnv.Add($crgForbiddenGitEnvName) }
-$maskingGitOverrideEnv = New-Object 'System.Collections.Generic.List[string]'
+$maskingGitOverrideEnv = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
 foreach ($crgRawEnvEntry in [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process).GetEnumerator()) {
   $crgRawEnvName = [string]$crgRawEnvEntry.Key
   if ($crgForbiddenGitEnv.Contains($crgRawEnvName)) { $maskingGitOverrideEnv.Add($crgRawEnvName) | Out-Null }
 }
-$maskingGitOverrideEnv = @($maskingGitOverrideEnv | Sort-Object -Unique)
+$maskingGitOverrideEnv = @($maskingGitOverrideEnv | Sort-Object)
 if ($maskingGitOverrideEnv.Count -gt 0) {
   Write-Error "bootstrap.ps1: refusing to run with git-config override env var(s), repository-selector override(s), attribute-resolution override(s), or history-resolution override(s) set: $($maskingGitOverrideEnv -join ', '). These can redirect Git proofs away from -TargetRepo or alter the config, attribute, object, or ancestry domain used for trusted identity checks. Unset every named variable and re-run -- PowerShell: Remove-Item Env:<NAME>; bash: unset <NAME>. Nothing has been modified in the target repository."
   exit 1
@@ -7847,7 +7933,7 @@ try {
   exit 1
 }
 
-if ($PSCmdlet.ParameterSetName -in @('PublishRuntimeSource', 'PublishRuntimePackage', 'ActivateRuntime', 'InstallRuntimeLauncher', 'UpgradeRuntimeLauncher')) {
+if ([System.Linq.Enumerable]::Contains([string[]]@('PublishRuntimeSource', 'PublishRuntimePackage', 'ActivateRuntime', 'InstallRuntimeLauncher', 'UpgradeRuntimeLauncher'), [string]$PSCmdlet.ParameterSetName, [System.StringComparer]::Ordinal)) {
   try { Invoke-CrgCentralRuntimeOperation -Operation $PSCmdlet.ParameterSetName }
   catch { Write-Error "bootstrap.ps1: central runtime operation refused: $($_.Exception.Message)"; exit 1 }
   exit 0
@@ -7865,7 +7951,7 @@ if (-not (Test-Path -LiteralPath $TargetRepo -PathType Container)) {
 }
 $targetRepoAbs = (Resolve-Path -LiteralPath $TargetRepo).Path
 $gitCheck = & git -C $targetRepoAbs rev-parse --is-inside-work-tree 2>&1
-if ($LASTEXITCODE -ne 0 -or "$gitCheck".Trim() -ne 'true') {
+if ($LASTEXITCODE -ne 0 -or -not [string]::Equals("$gitCheck".Trim(), 'true', [System.StringComparison]::Ordinal)) {
   Write-Error "bootstrap.ps1: -TargetRepo '$targetRepoAbs' is not a git working tree (git rev-parse --is-inside-work-tree failed or did not return 'true')."
   exit 1
 }
@@ -7884,7 +7970,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitTopLevel)) {
   exit 1
 }
 $gitTopLevel = (Resolve-Path -LiteralPath ($gitTopLevel.Trim())).Path
-if ($gitTopLevel -ne $targetRepoAbs) {
+if (-not [string]::Equals($gitTopLevel, $targetRepoAbs, [System.StringComparison]::OrdinalIgnoreCase)) {
   Write-Host "[bootstrap] normalizing -TargetRepo from '$targetRepoAbs' to working-tree top-level '$gitTopLevel' (file copies must land in the same tree the dispatcher resolves at commit time)."
   $targetRepoAbs = $gitTopLevel
 }
@@ -7895,7 +7981,7 @@ if ($gitTopLevel -ne $targetRepoAbs) {
 # indeterminate read cannot safely select either the ordinary
 # checklist or the legacy transition checklist.
 $crgRetiredPmHead = Get-CrgRetiredProjectModeHeadState -Repo $targetRepoAbs
-if ($crgRetiredPmHead.State -eq 'error') {
+if ([string]::Equals($crgRetiredPmHead.State, 'error', [System.StringComparison]::Ordinal)) {
   Write-Error "bootstrap.ps1: could not classify the trusted HEAD review kernel while checking for retired PROJECT-MODE enforcement ($($crgRetiredPmHead.Reason)). Repair the repository read failure, then re-run. Nothing has been modified in the target repository."
   exit 1
 }
@@ -7953,7 +8039,7 @@ $crgInstalledPayloadOwners = New-Object 'System.Collections.Generic.List[object]
 $crgValuesSourceOwner = $null
 $crgValuesSourceEvidence = $null
 $crgRenderOutputAuthority = $null
-$crgRenderedRawBuffers = @{}
+$crgRenderedRawBuffers = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 $crgPackageProvenanceCandidate = $null
 $crgPackageDotGitPath = Join-Path $packageRootFull '.git'
 $crgPackageDotGitKindPre = 'not-required'
@@ -7972,7 +8058,7 @@ try {
 if ($crgNeedsPackagePayload) {
   $crgRoutingResume = Get-CrgLegacyRoutingResumeState -RepoRoot $targetRepoAbs -GitDir $crgGitDir
   if ($null -ne $crgRoutingResume.Lease) { $crgRoutingLease = $crgRoutingResume.Lease }
-  if ($crgRetiredPmHead.State -eq 'legacy' -and $crgRoutingResume.State -notin @('none', 'pre-kernel', 'pre-transition')) {
+  if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal) -and -not [System.Linq.Enumerable]::Contains([string[]]@('none', 'pre-kernel', 'pre-transition'), [string]$crgRoutingResume.State, [System.StringComparer]::Ordinal)) {
     $crgRoutingEntryHead = (& git -C $targetRepoAbs rev-parse --verify 'HEAD^{commit}' 2>$null)
     if ($LASTEXITCODE -ne 0 -or "$crgRoutingEntryHead".Trim() -cnotmatch '\A[0-9a-f]{40}([0-9a-f]{24})?\z') { $crgRoutingEntryHead = '<unreadable-legacy-head>' }
     else { $crgRoutingEntryHead = "$crgRoutingEntryHead".Trim() }
@@ -7980,20 +8066,20 @@ if ($crgNeedsPackagePayload) {
     Write-Error "bootstrap.ps1: routing custody in the target's per-worktree Git directory is already active for recorded legacy base '$crgRoutingRecordedBase', while the target worktree is at legacy HEAD '$crgRoutingEntryHead' ($($crgRoutingResume.Reason)). A second active epoch in that Git directory is forbidden, so this run refuses before package or repository mutation; no custody was created for '$crgRoutingEntryHead'. Recovery: return the target worktree to the recorded base '$crgRoutingRecordedBase'. If phase A left legacy or absent routing-driver paths, run the target checkout's bootstrap.ps1 from that checkout with -TargetRepo . -RestoreLegacyRoutingCustody so the checkout again contains the complete candidate payload. Then either re-run at that exact base, or keep that complete checkout as the external package source and run its bootstrap against a fresh linked worktree at the intended legacy base (a fresh per-worktree Git directory): powershell -NoProfile -ExecutionPolicy Bypass -File <complete-candidate-checkout>\bootstrap.ps1 -TargetRepo <fresh-linked-worktree> -Force. Preserve every existing custody record."
     exit 1
   }
-  if ($crgRoutingResume.State -in @('pre-transition', 'pre-kernel') -and -not $selfInstall) {
+  if (([string]::Equals($crgRoutingResume.State, 'pre-transition', [System.StringComparison]::Ordinal) -or [string]::Equals($crgRoutingResume.State, 'pre-kernel', [System.StringComparison]::Ordinal)) -and -not $selfInstall) {
     Write-Error "bootstrap.ps1: verified self-host routing custody is active at recorded legacy base '$($crgRoutingResume.BaseHead)' in transaction state '$($crgRoutingResume.State)'. Only the target checkout's own bootstrap.ps1 may retry that custody epoch; an external package source could bind different candidate bytes to existing custody. This run refuses before package or repository mutation."
     exit 1
   }
-  if ($crgRoutingResume.State -eq 'pending') {
+  if ([string]::Equals($crgRoutingResume.State, 'pending', [System.StringComparison]::Ordinal)) {
     Write-Error "bootstrap.ps1: the exact legacy kernel landing is HEAD, but the recorded target routing drivers are still in phase-A state. From the target checkout, run its bootstrap.ps1: powershell -NoProfile -ExecutionPolicy Bypass -File .\bootstrap.ps1 -TargetRepo . -RestoreLegacyRoutingCustody ; then re-run the full install. The retired CROSS_REVIEW_ALLOW_MODE_CHANGE variable has no authority and must not be used."
     exit 1
   }
-  if ($crgRoutingResume.State -eq 'blocked') {
+  if ([string]::Equals($crgRoutingResume.State, 'blocked', [System.StringComparison]::Ordinal)) {
     $crgRoutingRecordedBase = if ("$($crgRoutingResume.BaseHead)" -cmatch '\A[0-9a-f]{40}([0-9a-f]{24})?\z') { "$($crgRoutingResume.BaseHead)" } else { '<unreadable-active-record>' }
     Write-Error "bootstrap.ps1: unresolved routing custody exists in the target's per-worktree Git directory for recorded legacy base '$crgRoutingRecordedBase', but the target's trusted HEAD state '$($crgRetiredPmHead.State)' cannot be admitted for exact bounded recovery ($($crgRoutingResume.Reason)). A full install could consume phase-A or absent routing sources or publish beside an unresolved epoch, so this run refuses before package or repository mutation. Preserve every machine-local custody record. Return the target worktree to the recorded base and run -RestoreLegacyRoutingCustody there when phase A left candidate drivers absent or legacy; otherwise keep a complete candidate checkout as the external package source and target a fresh linked worktree with its own per-worktree Git directory."
     exit 1
   }
-  if ($crgRoutingResume.State -notin @('none', 'pre-kernel', 'pre-transition', 'restored')) {
+  if (-not [System.Linq.Enumerable]::Contains([string[]]@('none', 'pre-kernel', 'pre-transition', 'restored'), [string]$crgRoutingResume.State, [System.StringComparer]::Ordinal)) {
     Write-Error "bootstrap.ps1: routing custody in the target's per-worktree Git directory returned an unrecognized state '$($crgRoutingResume.State)'. Refusing before package or repository mutation; preserve every custody record and repair the exact recorded landing before continuing."
     exit 1
   }
@@ -8022,7 +8108,7 @@ if ($crgNeedsPackagePayload) {
       Write-Error "bootstrap.ps1: package .git metadata has occupant kind '$crgPackageDotGitKindPre' but no exact Git provenance namespace could be captured. Present-but-unreadable package metadata refuses; only positive .git absence may classify an extracted archive. No target mutation was performed."
       exit 1
     }
-  } elseif ($crgPackageDotGitKindPre -notin @('file', 'directory')) {
+  } elseif (-not ([string]::Equals($crgPackageDotGitKindPre, 'file', [System.StringComparison]::Ordinal) -or [string]::Equals($crgPackageDotGitKindPre, 'directory', [System.StringComparison]::Ordinal))) {
     Write-Error "bootstrap.ps1: a package provenance candidate was found beside unsupported .git occupant kind '$crgPackageDotGitKindPre'. No target mutation was performed."
     exit 1
   }
@@ -8042,7 +8128,7 @@ if ($null -ne $crgPackageProvenanceCandidate) {
 $crgNamespaceLease = Initialize-CrgRootedNamespace -Roots $crgNamespaceRoots.ToArray()
 if ($crgNeedsPackagePayload) {
   $crgPackageParents = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-  $crgPackageBoundary = if ($packageRootFull.EndsWith('\') -or $packageRootFull.EndsWith('/')) { $packageRootFull } else { "$packageRootFull$([System.IO.Path]::DirectorySeparatorChar)" }
+  $crgPackageBoundary = if ($packageRootFull.EndsWith('\', [System.StringComparison]::Ordinal) -or $packageRootFull.EndsWith('/', [System.StringComparison]::Ordinal)) { $packageRootFull } else { "$packageRootFull$([System.IO.Path]::DirectorySeparatorChar)" }
   foreach ($crgPackageEntry in $fileList) {
     $crgPackageLeaf = [System.IO.Path]::GetFullPath((Join-Path $packageRoot $crgPackageEntry.Src))
     if (-not $crgPackageLeaf.StartsWith($crgPackageBoundary, [System.StringComparison]::OrdinalIgnoreCase)) { throw "package inventory path '$($crgPackageEntry.Src)' escapes the retained package root" }
@@ -8143,7 +8229,7 @@ if ($crgPinnedTopExit -ne 0 -or [string]::IsNullOrWhiteSpace("$crgPinnedTop") -o
     -not [string]::Equals([System.IO.Path]::GetFullPath("$crgPinnedTop".Trim()).TrimEnd('\', '/'), [System.IO.Path]::GetFullPath($targetRepoAbs).TrimEnd('\', '/'), [System.StringComparison]::OrdinalIgnoreCase) -or
     $null -eq $crgPinnedGitDir -or -not [string]::Equals([System.IO.Path]::GetFullPath($crgPinnedGitDir).TrimEnd('\', '/'), [System.IO.Path]::GetFullPath($crgGitDir).TrimEnd('\', '/'), [System.StringComparison]::OrdinalIgnoreCase) -or
     $null -eq $crgPinnedCommonDir -or -not [string]::Equals([System.IO.Path]::GetFullPath($crgPinnedCommonDir).TrimEnd('\', '/'), [System.IO.Path]::GetFullPath($crgCommonDir).TrimEnd('\', '/'), [System.StringComparison]::OrdinalIgnoreCase) -or
-    $crgPinnedPmHead.State -eq 'error' -or
+    [string]::Equals($crgPinnedPmHead.State, 'error', [System.StringComparison]::Ordinal) -or
     -not [string]::Equals("$($crgPinnedPmHead.Identity)", "$($crgRetiredPmHead.Identity)", [System.StringComparison]::Ordinal) -or
     -not [string]::Equals($crgPinnedPmHead.State, $crgRetiredPmHead.State, [System.StringComparison]::Ordinal)) {
   Write-Error 'bootstrap.ps1: repository/Git-directory/HEAD identity changed while the ordinary no-reparse namespace chains were being pinned. No mutation was performed; let the namespace settle and re-run.'
@@ -8165,8 +8251,8 @@ if ($crgHooksOverrideClass -ceq 'abort-indeterminate') {
 $crgCapabilityContext = $null
 try {
   $crgCapabilityFormatRows = @(& git -C $targetRepoAbs rev-parse --show-object-format 2>$null)
-  if ($LASTEXITCODE -ne 0 -or $crgCapabilityFormatRows.Count -ne 1 -or "$($crgCapabilityFormatRows[0])" -notin @('sha1', 'sha256')) { throw 'the target object format could not be classified' }
-  $crgCapabilityOidLength = if ("$($crgCapabilityFormatRows[0])" -ceq 'sha256') { 64 } else { 40 }
+  if ($LASTEXITCODE -ne 0 -or $crgCapabilityFormatRows.Count -ne 1 -or -not ([string]::Equals("$($crgCapabilityFormatRows[0])", 'sha1', [System.StringComparison]::Ordinal) -or [string]::Equals("$($crgCapabilityFormatRows[0])", 'sha256', [System.StringComparison]::Ordinal))) { throw 'the target object format could not be classified' }
+  $crgCapabilityOidLength = if ([string]::Equals("$($crgCapabilityFormatRows[0])", 'sha256', [System.StringComparison]::Ordinal)) { 64 } else { 40 }
   $crgCapabilityContext = New-CrgPrivateAttributeContext -ScratchRoot $crgCapabilityScratch -ObjectIdLength $crgCapabilityOidLength
   if (-not (Close-CrgPrivateAttributeContext -Context $crgCapabilityContext)) { throw 'the exact private attribute capability context could not be cleaned' }
   $crgCapabilityContext = $null
@@ -8187,7 +8273,7 @@ try {
   Write-Error "bootstrap.ps1: the fixed skip-audit ref root could not be retained as ordinary Git metadata ($($_.Exception.Message)). Remove any reparse/junction occupant at '$crgCommonDir\refs' deliberately, then re-run. No payload, dispatcher, manifest, marker, or version mutation was attempted."
   exit 1
 }
-if ($crgRetiredPmHead.State -eq 'legacy' -and -not $DispatcherOnly -and -not $RestoreLegacyRoutingCustody) {
+if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal) -and -not $DispatcherOnly -and -not $RestoreLegacyRoutingCustody) {
   try { & git -C $targetRepoAbs diff --cached --quiet --no-ext-diff --no-textconv --no-renames --ignore-submodules=none HEAD -- 2>$null } catch {
     Write-Error "bootstrap.ps1: the staged-state probe threw while preparing a legacy review-kernel transition. Start with a clean index, then re-run. Nothing has been modified in the target repository."
     exit 1
@@ -8209,7 +8295,7 @@ $crgLegacyRoutingCustody = $null
 $crgLegacyAttrBasePresent = $false
 $crgLegacyAttrBaseMode = $null
 $crgLegacyAttrBaseOid = $null
-if ($crgRetiredPmHead.State -eq 'legacy' -and -not $DispatcherOnly -and -not $RestoreLegacyRoutingCustody) {
+if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal) -and -not $DispatcherOnly -and -not $RestoreLegacyRoutingCustody) {
   $crgLegacyBaseHead = "$($crgRetiredPmHead.Head)"
   if ($crgLegacyBaseHead -cnotmatch '\A[0-9a-f]{40}([0-9a-f]{24})?\z') {
     Write-Error "bootstrap.ps1: the legacy transition base HEAD could not be captured as one commit object ID. Nothing has been modified in the target repository."
@@ -8257,7 +8343,7 @@ Write-Host "[bootstrap] target repo:  $targetRepoAbs"
 if ($selfInstall) {
   Write-Host "[bootstrap] self-install: package root == target repo top-level (gating this package on itself)"
 }
-if ($crgRetiredPmHead.State -eq 'legacy') {
+if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal)) {
   Write-Host "[bootstrap] legacy review kernel detected in HEAD: retired PROJECT-MODE work-blocking behavior needs the bounded review-kernel transition printed below."
 }
 Write-Host ""
@@ -8325,8 +8411,8 @@ $crgManifest = $null
 # uniqueness is a convenience, refusal is the guarantee.
 $crgBackupStamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ', [System.Globalization.CultureInfo]::InvariantCulture) + '-' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
 $crgBackedUp = @()
-$crgInstalledHashes = @{}
-$crgInstalledBuffers = @{}
+$crgInstalledHashes = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
+$crgInstalledBuffers = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 
 # File list: (source-relative-to-package, dest-relative-to-target). The helper
 # above is the single current-package inventory; the frozen v1.7 evidence set is
@@ -8355,7 +8441,7 @@ $crgInstalledBuffers = @{}
 # VERSION/payload leaf is therefore opened no-follow as one ordinary single-link
 # file beneath the retained package-root chain, read once through that handle,
 # and kept held through installation. No pathname re-read participates in proof.
-$crgSrcBuffers = @{}
+$crgSrcBuffers = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 $crgSourceCommit = 'unknown'
 # DispatcherOnly rewrites only the embedded dispatcher; SealManifest hashes only
 # the selected target inventory. Neither consumes package payload, so neither
@@ -8434,7 +8520,7 @@ if ($SealManifest) {
   # later verification). The sanction env makes this trust-minting operation an
   # operator act by design; full -Force replacement and renderer -Check follow
   # immediately before any commit or merge.
-  if ($env:CROSS_REVIEW_ALLOW_SEAL -ne '1') {
+  if (-not [string]::Equals($env:CROSS_REVIEW_ALLOW_SEAL, '1', [System.StringComparison]::Ordinal)) {
     Write-Error "bootstrap.ps1: -SealManifest MINTS local trust from the currently installed bytes and is an OPERATOR act; set CROSS_REVIEW_ALLOW_SEAL=1 for exactly this run (agents must never set it)."
     exit 1
   }
@@ -8499,32 +8585,37 @@ if ($SealManifest) {
     $sealAgentsKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs 'docs/AGENTS.md.template')
     $sealRecoveryList = @(Get-CrgSealRecoveryFileList)
     if ($sealRendererKind -ceq 'file' -and $sealAgentsKind -ceq 'file') {
-      $sealPreRelocationList = @(Get-CrgPreRelocationRecoveryFileList)
-      $sealCurrentBad = @()
-      foreach ($sealCurrentFile in @($sealRecoveryList | Where-Object { -not $_.Retired })) {
-        $sealCurrentKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealCurrentFile.Dst)
-        if ($sealCurrentKind -cne 'file') { $sealCurrentBad += "$($sealCurrentFile.Dst) ($sealCurrentKind)" }
+      # The first catalog whose layout is complete wins. An older frozen
+      # catalog also requires every current path it lacks to be positively
+      # absent, so a partial upgrade never seals as either layout.
+      $sealCatalogs = @(
+        [pscustomobject]@{ Name = 'complete current shared layout'; List = $sealRecoveryList },
+        [pscustomobject]@{ Name = 'complete pre-common shared layout'; List = @(Get-CrgPreCommonRecoveryFileList) },
+        [pscustomobject]@{ Name = 'complete pre-liveness shared layout'; List = @(Get-CrgPreLivenessRecoveryFileList) },
+        [pscustomobject]@{ Name = 'complete pre-relocation v2.1/v2.2'; List = @(Get-CrgPreRelocationRecoveryFileList) }
+      )
+      $sealCatalogRefusals = @()
+      $sealChosenCatalog = $null
+      foreach ($sealCatalog in $sealCatalogs) {
+        $sealCatalogBad = @()
+        foreach ($sealCatalogFile in @($sealCatalog.List | Where-Object { -not $_.Retired })) {
+          $sealCatalogKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealCatalogFile.Dst)
+          if ($sealCatalogKind -cne 'file') { $sealCatalogBad += "$($sealCatalogFile.Dst) ($sealCatalogKind)" }
+        }
+        $sealCatalogPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        foreach ($sealCatalogFile in $sealCatalog.List) { [void]$sealCatalogPaths.Add($sealCatalogFile.Dst) }
+        foreach ($sealCurrentFile in @($sealRecoveryList | Where-Object { -not $sealCatalogPaths.Contains($_.Dst) })) {
+          $sealNewerKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealCurrentFile.Dst)
+          if ($sealNewerKind -cne 'empty') { $sealCatalogBad += "newer path $($sealCurrentFile.Dst) ($sealNewerKind)" }
+        }
+        if ($sealCatalogBad.Count -eq 0) { $sealChosenCatalog = $sealCatalog; break }
+        $sealCatalogRefusals += "$($sealCatalog.Name): $($sealCatalogBad -join ', ')"
       }
-      $sealPreRelocationBad = @()
-      foreach ($sealPreRelocationFile in @($sealPreRelocationList | Where-Object { -not $_.Retired })) {
-        $sealPreRelocationKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealPreRelocationFile.Dst)
-        if ($sealPreRelocationKind -cne 'file') { $sealPreRelocationBad += "$($sealPreRelocationFile.Dst) ($sealPreRelocationKind)" }
+      if ($null -eq $sealChosenCatalog) {
+        throw "current LOCAL recovery inventory matches no complete supported layout with every newer path positively absent ($($sealCatalogRefusals -join '; '))"
       }
-      $sealPreRelocationPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-      foreach ($sealPreRelocationFile in $sealPreRelocationList) { [void]$sealPreRelocationPaths.Add($sealPreRelocationFile.Dst) }
-      $sealCurrentOnlyBad = @()
-      foreach ($sealCurrentFile in @($sealRecoveryList | Where-Object { -not $sealPreRelocationPaths.Contains($_.Dst) })) {
-        $sealCurrentOnlyKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealCurrentFile.Dst)
-        if ($sealCurrentOnlyKind -cne 'empty') { $sealCurrentOnlyBad += "$($sealCurrentFile.Dst) ($sealCurrentOnlyKind)" }
-      }
-      if ($sealCurrentBad.Count -eq 0) {
-        $sealInventoryName = 'complete current shared layout'
-      } elseif ($sealPreRelocationBad.Count -eq 0 -and $sealCurrentOnlyBad.Count -eq 0) {
-        $sealRecoveryList = $sealPreRelocationList
-        $sealInventoryName = 'complete pre-relocation v2.1/v2.2'
-      } else {
-        throw "current LOCAL recovery inventory is neither one complete shared layout nor one complete pre-relocation v2.1/v2.2 layout with every shared-only path positively absent (current: $($sealCurrentBad -join ', '); pre-relocation: $($sealPreRelocationBad -join ', '); shared-only occupants: $($sealCurrentOnlyBad -join ', '))"
-      }
+      $sealRecoveryList = $sealChosenCatalog.List
+      $sealInventoryName = $sealChosenCatalog.Name
       foreach ($sealRecoveryFile in $sealRecoveryList) {
         $sealRecoveryKind = Get-CrgPathOccupantKind -Path (Join-Path $targetRepoAbs $sealRecoveryFile.Dst)
         if ($sealRecoveryKind -ceq 'file') { $sealSelectedList += $sealRecoveryFile }
@@ -8783,7 +8874,7 @@ if (-not $DispatcherOnly) {
 # repository mutation. DispatcherOnly shares only the common dispatcher lock,
 # which is the applicable transaction lock for that mode.
 $crgLockedPmHead = Get-CrgRetiredProjectModeHeadState -Repo $targetRepoAbs
-if ($crgLockedPmHead.State -eq 'error') {
+if ([string]::Equals($crgLockedPmHead.State, 'error', [System.StringComparison]::Ordinal)) {
   Write-Error "bootstrap.ps1: trusted HEAD could not be classified after transaction lock acquisition ($($crgLockedPmHead.Reason)). No repository mutation was performed."
   exit 1
 }
@@ -8842,7 +8933,7 @@ if (-not $DispatcherOnly) {
   }
 }
 
-if ($crgRetiredPmHead.State -eq 'legacy' -and -not $DispatcherOnly) {
+if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal) -and -not $DispatcherOnly) {
   $crgLockedHead = (& git -C $targetRepoAbs rev-parse --verify 'HEAD^{commit}' 2>$null)
   if ($LASTEXITCODE -ne 0 -or
       -not [string]::Equals("$crgLockedHead".Trim(), $crgLegacyBaseHead, [System.StringComparison]::Ordinal)) {
@@ -8872,7 +8963,7 @@ if ($crgNeedsPackagePayload) {
     $crgRoutingResume = $crgLockedResume
     if ($null -ne $crgOldRoutingLease) { Close-CrgLegacyRoutingCustodyLease -Lease $crgOldRoutingLease }
   } else { $crgRoutingResume = $crgLockedResume }
-  if ($crgRoutingResume.State -in @('pre-transition', 'pre-kernel')) {
+  if (([string]::Equals($crgRoutingResume.State, 'pre-transition', [System.StringComparison]::Ordinal) -or [string]::Equals($crgRoutingResume.State, 'pre-kernel', [System.StringComparison]::Ordinal))) {
     $crgLockedCandidate = Get-CrgLegacyRoutingCandidateSourceState -SourceBuffers $crgSrcBuffers -Custody $crgRoutingResume.Custody
     if (-not $crgLockedCandidate.Ready) {
       Write-Error "bootstrap.ps1: verified self-host routing custody is active at the exact recorded legacy base, but the buffered package routing sources are not the captured candidate ($($crgLockedCandidate.Reason)). Run -RestoreLegacyRoutingCustody from this checkout, then retry the full self-bootstrap. No repository mutation was performed."
@@ -8905,12 +8996,12 @@ if (-not $DispatcherOnly) {
   $crgPreHookExposed = $false
   foreach ($crgPreSh in @('scripts/run-gate.sh', 'scripts/git-hooks/pre-commit')) {
     $crgPreState = Get-CrgCheckIgnoreState -Repo $targetRepoAbs -Path $crgPreSh
-    if ($crgPreState -like 'error:*') {
+    if (([string]$crgPreState).StartsWith('error:', [System.StringComparison]::Ordinal)) {
       Write-Error "bootstrap.ps1: git check-ignore failed ($crgPreState) probing '$crgPreSh' in '$targetRepoAbs'; cannot decide the install shape before touching the repository. Diagnose the repository, then re-run."
       exit 1
     }
-    if ($crgPreState -eq 'exposed') {
-      if ($crgPreSh -eq 'scripts/git-hooks/pre-commit') { $crgPreHookExposed = $true } else { $crgPreRgExposed = $true }
+    if ([string]::Equals($crgPreState, 'exposed', [System.StringComparison]::Ordinal)) {
+      if ([string]::Equals($crgPreSh, 'scripts/git-hooks/pre-commit', [System.StringComparison]::Ordinal)) { $crgPreHookExposed = $true } else { $crgPreRgExposed = $true }
     }
   }
   try { $crgRenderOutputAuthority = Get-CrgInstallValueOutputAuthority -RepoRoot $targetRepoAbs }
@@ -8920,15 +9011,15 @@ if (-not $DispatcherOnly) {
   }
   $crgPreCfgNeeded = @()
   if ($crgPreRgExposed -or $crgPreHookExposed) { $crgPreCfgNeeded += '.gitattributes' }
-  if ($crgRenderOutputAuthority.Family -ceq 'TRACKED' -and $crgPreCfgNeeded -notcontains '.gitattributes') { $crgPreCfgNeeded += '.gitattributes' }
+  if ([string]::Equals($crgRenderOutputAuthority.Family, 'TRACKED', [System.StringComparison]::Ordinal) -and -not [System.Linq.Enumerable]::Contains([string[]]@($crgPreCfgNeeded), '.gitattributes', [System.StringComparer]::Ordinal)) { $crgPreCfgNeeded += '.gitattributes' }
   if ($crgPreHookExposed) { $crgPreCfgNeeded += '.gitignore' }
   foreach ($crgPreCfg in $crgPreCfgNeeded) {
     $crgPreCfgState = Get-CrgCheckIgnoreState -Repo $targetRepoAbs -Path $crgPreCfg
-    if ($crgPreCfgState -like 'error:*') {
+    if (([string]$crgPreCfgState).StartsWith('error:', [System.StringComparison]::Ordinal)) {
       Write-Error "bootstrap.ps1: git check-ignore failed ($crgPreCfgState) probing '$crgPreCfg' in '$targetRepoAbs'; cannot confirm the install's config files can be tracked. Diagnose the repository, then re-run."
       exit 1
     }
-    if ($crgPreCfgState -eq 'ignored') {
+    if ([string]::Equals($crgPreCfgState, 'ignored', [System.StringComparison]::Ordinal)) {
       Write-Error "bootstrap.ps1: '$crgPreCfg' is IGNORED in '$targetRepoAbs' (a global excludesfile, info/exclude, or .gitignore rule matches it), so this install shape could never stage it and the documented install commit would fail. Nothing was installed or configured. Remove that ignore rule, then re-run."
       exit 1
     }
@@ -9087,8 +9178,8 @@ if (-not $DispatcherOnly) {
 # buffered candidate and exact BaseHead/index state are already proved under both
 # locks; the retained lease pins active record, directory record, and all custody
 # sources until transition publication succeeds or the run exits.
-if ($crgRetiredPmHead.State -eq 'legacy' -and -not $DispatcherOnly -and $selfInstall) {
-  if ($crgRoutingResume.State -eq 'none') {
+if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal) -and -not $DispatcherOnly -and $selfInstall) {
+  if ([string]::Equals($crgRoutingResume.State, 'none', [System.StringComparison]::Ordinal)) {
     $crgLegacyRoutingCustody = Publish-CrgLegacyRoutingDriverCustody -RepoRoot $targetRepoAbs -GitDir $crgGitDir -BaseHead $crgLegacyBaseHead -SourceBuffers $crgSrcBuffers
     if ($null -eq $crgLegacyRoutingCustody) {
       Write-Error 'bootstrap.ps1: exact routing-driver custody could not be activated before the first install mutation. No transition identity record was published.'
@@ -9096,7 +9187,7 @@ if ($crgRetiredPmHead.State -eq 'legacy' -and -not $DispatcherOnly -and $selfIns
     }
     $crgRoutingLease = $crgLegacyRoutingCustody.Lease
     Write-Host "[bootstrap] preserved self-host routing drivers in base-bound verified custody -> $($crgLegacyRoutingCustody.Directory)"
-  } elseif ($crgRoutingResume.State -in @('pre-transition', 'pre-kernel')) {
+  } elseif (([string]::Equals($crgRoutingResume.State, 'pre-transition', [System.StringComparison]::Ordinal) -or [string]::Equals($crgRoutingResume.State, 'pre-kernel', [System.StringComparison]::Ordinal))) {
     $crgLegacyRoutingCustody = $crgRoutingResume.Custody
   } else {
     Write-Error "bootstrap.ps1: legacy self-install reached the mutation boundary with inadmissible routing-custody state '$($crgRoutingResume.State)'."
@@ -9931,7 +10022,7 @@ if ($crgGitignoreSnapshot.State -ceq 'held') {
     # different (ineffective) pattern -- trimming it into a match would
     # skip the append and leave root logs/ unignored.
     $t = $line.TrimEnd()
-    if ($t -eq $logsEntry -or $t -eq '/logs/' -or $t -eq 'logs' -or $t -eq '/logs') { $needLogsIgnore = $false; break }
+    if ([string]::Equals($t, $logsEntry, [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($t, '/logs/', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($t, 'logs', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($t, '/logs', [System.StringComparison]::OrdinalIgnoreCase)) { $needLogsIgnore = $false; break }
   }
 }
 if ($needLogsIgnore) {
@@ -9946,11 +10037,11 @@ if ($needLogsIgnore) {
   # rule into the tracked .gitignore off an indeterminate answer would
   # do exactly what the local shape forbids.
   $crgHookIgnState = Get-CrgCheckIgnoreState -Repo $targetRepoAbs -Path 'scripts/git-hooks/pre-commit'
-  if ($crgHookIgnState -like 'error:*') {
+  if (([string]$crgHookIgnState).StartsWith('error:', [System.StringComparison]::Ordinal)) {
     Write-Error "bootstrap.ps1: git check-ignore failed ($crgHookIgnState) probing 'scripts/git-hooks/pre-commit' in '$targetRepoAbs'; cannot decide where the logs/ ignore rule belongs. Diagnose the repository, then re-run."
     exit 1
   }
-  if ($crgHookIgnState -eq 'ignored' -and $null -eq $crgCommonDir) {
+  if ([string]::Equals($crgHookIgnState, 'ignored', [System.StringComparison]::Ordinal) -and $null -eq $crgCommonDir) {
     # A positively LOCAL shape with no resolvable common dir must not
     # fall through to the tracked-.gitignore append below -- that write
     # is exactly what the local shape exists to keep out of the
@@ -9958,7 +10049,7 @@ if ($needLogsIgnore) {
     Write-Error "bootstrap.ps1: the gate hook path is ignored (LOCAL shape) but the git common dir of '$targetRepoAbs' cannot be resolved for the info/exclude routing; refusing to touch the tracked .gitignore instead. Diagnose the repository, then re-run."
     exit 1
   }
-  if ($crgHookIgnState -eq 'ignored') {
+  if ([string]::Equals($crgHookIgnState, 'ignored', [System.StringComparison]::Ordinal)) {
     $crgLogsExcl = Join-Path $crgCommonDir 'info'
     $null = Ensure-CrgRootedDirectory -Path $crgLogsExcl -Label 'local-shape exclude directory'
     $crgExclFile = Join-Path $crgLogsExcl 'exclude'
@@ -9974,7 +10065,7 @@ if ($needLogsIgnore) {
       $crgExclText = $crgExclLatin1.GetString($Bytes)
       foreach ($crgExclLine in @($crgExclText -split "`n")) {
         $t = $crgExclLine.TrimEnd()
-        if ($t -eq $logsEntry -or $t -eq '/logs/' -or $t -eq 'logs' -or $t -eq '/logs') { $crgExclState.HadLogs = $true; return [pscustomobject]@{ Ok = $true; Bytes = [byte[]]$Bytes } }
+        if ([string]::Equals($t, $logsEntry, [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($t, '/logs/', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($t, 'logs', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($t, '/logs', [System.StringComparison]::OrdinalIgnoreCase)) { $crgExclState.HadLogs = $true; return [pscustomobject]@{ Ok = $true; Bytes = [byte[]]$Bytes } }
       }
       $crgExclBlock = $crgExclUtf8.GetBytes("`n# cross-review-gate generated artifacts (verdict logs, dispatch-checklist)`nlogs/`n")
       $crgExclOut = New-Object byte[] ($Bytes.Length + $crgExclBlock.Length)
@@ -10012,7 +10103,7 @@ if ($needLogsIgnore) {
     $crgGiCurrent = $crgGiWriteEnc.GetString($Bytes).TrimStart([char]0xFEFF)
     foreach ($crgGiLine in @($crgGiCurrent -split "`r?`n")) {
       $crgGiTrimmed = $crgGiLine.TrimEnd()
-      if ($crgGiTrimmed -eq $logsEntry -or $crgGiTrimmed -eq '/logs/' -or $crgGiTrimmed -eq 'logs' -or $crgGiTrimmed -eq '/logs') { $crgGiState.AlreadyCovered = $true; return [pscustomobject]@{ Ok = $true; Bytes = [byte[]]$Bytes } }
+      if ([string]::Equals($crgGiTrimmed, $logsEntry, [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($crgGiTrimmed, '/logs/', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($crgGiTrimmed, 'logs', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($crgGiTrimmed, '/logs', [System.StringComparison]::OrdinalIgnoreCase)) { $crgGiState.AlreadyCovered = $true; return [pscustomobject]@{ Ok = $true; Bytes = [byte[]]$Bytes } }
     }
     $crgGiAppend = $crgGiWriteEnc.GetBytes($ignoreBlock)
     $crgGiOut = New-Object byte[] ($Bytes.Length + $crgGiAppend.Length)
@@ -10073,11 +10164,11 @@ $crgAttrRules = @()
 $crgAttrVerifyPaths = @()
 foreach ($crgAttrSh in $crgAttrShPaths) {
   $crgAttrShState = Get-CrgCheckIgnoreState -Repo $targetRepoAbs -Path $crgAttrSh
-  if ($crgAttrShState -like 'error:*') {
+  if (([string]$crgAttrShState).StartsWith('error:', [System.StringComparison]::Ordinal)) {
     Write-Error "bootstrap.ps1: git check-ignore failed ($crgAttrShState) probing '$crgAttrSh' in '$targetRepoAbs'; cannot decide whether its LF checkout rule belongs in the tracked .gitattributes. Diagnose the repository. $crgAttrRerunRemedy"
     exit 1
   }
-  if ($crgAttrShState -eq 'ignored') {
+  if ([string]::Equals($crgAttrShState, 'ignored', [System.StringComparison]::Ordinal)) {
     Write-Host "[bootstrap] local-shape path '$crgAttrSh': LF checkout rule not written (an untracked, ignored file is never checkout-rewritten)"
   } else {
     $crgAttrRules += "$crgAttrSh text eol=lf"
@@ -10192,9 +10283,9 @@ if ($crgAttrVerifyPaths.Count -eq 0 -and $crgRetiredPmHead.State -cne 'legacy') 
         # the effective-attribute verification below, not by text guesses
         # here.
         $crgAttrLineMatches = if ($crgInstallValueAttributeRules -ccontains $crgAttrRule) {
-          $crgAttrLine -ceq $crgAttrRule
+          [string]::Equals($crgAttrLine, $crgAttrRule, [System.StringComparison]::Ordinal)
         } else {
-          $crgAttrLine.TrimEnd() -ceq $crgAttrRule
+          [string]::Equals($crgAttrLine.TrimEnd(), $crgAttrRule, [System.StringComparison]::Ordinal)
         }
         if ($crgAttrLineMatches) { $crgAttrHave = $true; break }
       }
@@ -10291,8 +10382,8 @@ if ($crgAttrVerifyPaths.Count -eq 0 -and $crgRetiredPmHead.State -cne 'legacy') 
   $crgAttrIso = Join-Path $crgProofScratchParent ("crg-av-" + [guid]::NewGuid().ToString('N'))
   try {
     $crgAttrFormatRows = @(& git -C $targetRepoAbs rev-parse --show-object-format 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $crgAttrFormatRows.Count -ne 1 -or "$($crgAttrFormatRows[0])" -notin @('sha1', 'sha256')) { throw 'target object format could not be captured for the isolated attribute context' }
-    $crgAttrOidLength = if ("$($crgAttrFormatRows[0])" -ceq 'sha256') { 64 } else { 40 }
+    if ($LASTEXITCODE -ne 0 -or $crgAttrFormatRows.Count -ne 1 -or -not ([string]::Equals("$($crgAttrFormatRows[0])", 'sha1', [System.StringComparison]::Ordinal) -or [string]::Equals("$($crgAttrFormatRows[0])", 'sha256', [System.StringComparison]::Ordinal))) { throw 'target object format could not be captured for the isolated attribute context' }
+    $crgAttrOidLength = if ([string]::Equals("$($crgAttrFormatRows[0])", 'sha256', [System.StringComparison]::Ordinal)) { 64 } else { 40 }
     $crgAttrContext = New-CrgPrivateAttributeContext -ScratchRoot $crgAttrIso -ObjectIdLength $crgAttrOidLength
     $crgAttrBuffers = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
     foreach ($crgAttrSourcePath in @('.gitattributes', 'scripts/.gitattributes', 'scripts/git-hooks/.gitattributes', 'scripts/codex/.gitattributes', 'docs/.gitattributes')) {
@@ -10380,8 +10471,8 @@ if ($crgAttrVerifyPaths.Count -eq 0 -and $crgRetiredPmHead.State -cne 'legacy') 
       if (-not $crgAttrExpectedPathSet.Contains($crgAttrAllEntry.Path) -or $crgAttrAllEntry.Attribute -cnotmatch '\A[A-Za-z0-9_.-]+\z') {
         throw "check-attr --all returned an unexpected path or malformed attribute name (path='$($crgAttrAllEntry.Path)', attribute='$($crgAttrAllEntry.Attribute)')"
       }
-      if ($crgAttrAllEntry.Attribute -in @('filter', 'ident', 'working-tree-encoding') -and
-          ($crgAttrAllEntry.Value -cne 'unset' -or $crgAttrAllEntry.Path -cnotin $crgAttrStatePaths)) {
+      if ([System.Linq.Enumerable]::Contains([string[]]@('filter', 'ident', 'working-tree-encoding'), [string]$crgAttrAllEntry.Attribute, [System.StringComparer]::Ordinal) -and
+          (-not [string]::Equals($crgAttrAllEntry.Value, 'unset', [System.StringComparison]::Ordinal) -or -not [System.Linq.Enumerable]::Contains([string[]]@($crgAttrStatePaths), [string]$crgAttrAllEntry.Path, [System.StringComparer]::Ordinal))) {
         $crgAttrFail.Add("$($crgAttrAllEntry.Path): content-transform attribute '$($crgAttrAllEntry.Attribute)' is specified") | Out-Null
       }
     }
@@ -10392,18 +10483,18 @@ if ($crgAttrVerifyPaths.Count -eq 0 -and $crgRetiredPmHead.State -cne 'legacy') 
     if ($crgAttrNamedEntries.Count -ne ($crgAttrVerifyPaths.Count * 5)) { throw 'check-attr named query returned the wrong bounded inventory' }
     $crgAttrNamedMap = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
     foreach ($crgAttrNamedEntry in $crgAttrNamedEntries) {
-      if (-not $crgAttrExpectedPathSet.Contains($crgAttrNamedEntry.Path) -or $crgAttrNamedEntry.Attribute -notin @('text', 'eol', 'filter', 'ident', 'working-tree-encoding')) { throw 'check-attr named query returned an unexpected path or attribute' }
+      if (-not $crgAttrExpectedPathSet.Contains($crgAttrNamedEntry.Path) -or -not [System.Linq.Enumerable]::Contains([string[]]@('text', 'eol', 'filter', 'ident', 'working-tree-encoding'), [string]$crgAttrNamedEntry.Attribute, [System.StringComparer]::Ordinal)) { throw 'check-attr named query returned an unexpected path or attribute' }
       $crgAttrNamedKey = "$($crgAttrNamedEntry.Path)`0$($crgAttrNamedEntry.Attribute)"
       if ($crgAttrNamedMap.ContainsKey($crgAttrNamedKey)) { throw 'check-attr named query returned a duplicate record' }
       $crgAttrNamedMap[$crgAttrNamedKey] = $crgAttrNamedEntry.Value
     }
     foreach ($crgAttrVerifyPath in $crgAttrVerifyPaths) {
-      if ($crgAttrNamedMap["$crgAttrVerifyPath`0text"] -cne 'set' -or $crgAttrNamedMap["$crgAttrVerifyPath`0eol"] -cne 'lf') {
+      if (-not [string]::Equals($crgAttrNamedMap["$crgAttrVerifyPath`0text"], 'set', [System.StringComparison]::Ordinal) -or -not [string]::Equals($crgAttrNamedMap["$crgAttrVerifyPath`0eol"], 'lf', [System.StringComparison]::Ordinal)) {
         $crgAttrFail.Add("${crgAttrVerifyPath}: exact text=set/eol=lf contract is absent") | Out-Null
       }
       foreach ($crgAttrUnsafeName in @('filter', 'ident', 'working-tree-encoding')) {
-        $crgAttrUnsafeAllowed = if ($crgAttrVerifyPath -cin $crgAttrStatePaths) { @('unset', 'unspecified') } else { @('unspecified') }
-        if ($crgAttrNamedMap["$crgAttrVerifyPath`0$crgAttrUnsafeName"] -cnotin $crgAttrUnsafeAllowed) {
+        $crgAttrUnsafeAllowed = if ([System.Linq.Enumerable]::Contains([string[]]@($crgAttrStatePaths), [string]$crgAttrVerifyPath, [System.StringComparer]::Ordinal)) { @('unset', 'unspecified') } else { @('unspecified') }
+        if (-not [System.Linq.Enumerable]::Contains([string[]]@($crgAttrUnsafeAllowed), [string]$crgAttrNamedMap["$crgAttrVerifyPath`0$crgAttrUnsafeName"], [System.StringComparer]::Ordinal)) {
           $crgAttrFail.Add("${crgAttrVerifyPath}: $crgAttrUnsafeName is active") | Out-Null
         }
       }
@@ -10420,7 +10511,7 @@ if ($crgAttrVerifyPaths.Count -eq 0 -and $crgRetiredPmHead.State -cne 'legacy') 
         [pscustomobject]@{ Label = 'LF'; Bytes = $crgAttrLfBytes }
       )) {
         $crgAttrProbeRun = Invoke-CrgPrivateAttributeGit -Context $crgAttrContext -GitArgs @("--attr-source=$crgAttrTreeOid", '-c', 'core.autocrlf=true', 'hash-object', "--path=$crgAttrVerifyPath", '--stdin') -InputBytes $crgAttrProbe.Bytes
-        if ($crgAttrProbeRun.Exit -ne 0 -or $crgAttrProbeRun.ErrorText.Length -ne 0 -or $crgAttrProbeRun.OutputText.Trim() -cne $crgAttrLfOid) {
+        if ($crgAttrProbeRun.Exit -ne 0 -or $crgAttrProbeRun.ErrorText.Length -ne 0 -or -not [string]::Equals($crgAttrProbeRun.OutputText.Trim(), $crgAttrLfOid, [System.StringComparison]::Ordinal)) {
           $crgAttrFail.Add("${crgAttrVerifyPath}: $($crgAttrProbe.Label) bytes do not resolve to the exact LF object under the immutable conversion domain") | Out-Null
         }
       }
@@ -11629,7 +11720,9 @@ crg_legacy_review_kernel_touched() {
     scripts/git-hooks/pre-commit \
     scripts/codex/auto-review.ps1 \
     scripts/claude/auto-review.ps1 \
-    scripts/codex/review-prompt-template.md 2>/dev/null
+    scripts/codex/review-prompt-template.md \
+    scripts/review-liveness.psm1 \
+    scripts/review-common.ps1 2>/dev/null
   _crg_lk_touch_rc=$?
   case "$_crg_lk_touch_rc" in
     0) return 1 ;;
@@ -11663,6 +11756,8 @@ crg_legacy_review_kernel_stage() {
       if (p == "scripts/codex/auto-review.ps1") return 3
       if (p == "scripts/claude/auto-review.ps1") return 4
       if (p == "scripts/codex/review-prompt-template.md") return 5
+      if (p == "scripts/review-liveness.psm1") return 6
+      if (p == "scripts/review-common.ps1") return 7
       return 0
     }
     { bytes += length($0) + 1 }
@@ -11681,7 +11776,7 @@ crg_legacy_review_kernel_stage() {
       n++
       print $2 "\t" $3 "\t" $4
     }
-    END { if (bad || bytes != bytes_expected || NR < 3 || NR > 7 || n < 1 || core < 1) exit 1 }
+    END { if (bad || bytes != bytes_expected || NR < 3 || NR > 9 || n < 1 || core < 1) exit 1 }
   ' 2>/dev/null)
   _crg_lk_parse_rc=$?
   [ "$_crg_lk_parse_rc" -eq 0 ] && [ -n "$_crg_lk_expected" ] || return 1
@@ -11692,7 +11787,9 @@ crg_legacy_review_kernel_stage() {
     scripts/git-hooks/pre-commit \
     scripts/codex/auto-review.ps1 \
     scripts/claude/auto-review.ps1 \
-    scripts/codex/review-prompt-template.md
+    scripts/codex/review-prompt-template.md \
+    scripts/review-liveness.psm1 \
+    scripts/review-common.ps1
   do
     _crg_lk_row=$(printf '%s\n' "$_crg_lk_expected" | LC_ALL=C awk -F '\t' -v p="$_crg_lk_path" '
       $3 == p { if (++n > 1) exit 2; row = $0 }
@@ -11721,7 +11818,9 @@ crg_legacy_review_kernel_stage() {
     ':(exclude)scripts/git-hooks/pre-commit' \
     ':(exclude)scripts/codex/auto-review.ps1' \
     ':(exclude)scripts/claude/auto-review.ps1' \
-    ':(exclude)scripts/codex/review-prompt-template.md' 2>/dev/null
+    ':(exclude)scripts/codex/review-prompt-template.md' \
+    ':(exclude)scripts/review-liveness.psm1' \
+    ':(exclude)scripts/review-common.ps1' 2>/dev/null
   _crg_lk_extra_rc=$?
   case "$_crg_lk_extra_rc" in
     0) return 0 ;;
@@ -11748,6 +11847,8 @@ scripts/claude/commit.ps1
 scripts/git-hooks/pre-commit
 scripts/run-gate.sh
 scripts/render-project-values.ps1
+scripts/review-liveness.psm1
+scripts/review-common.ps1
 docs/AGENTS.md.template
 docs/audit-protocol.md'
 if [ "$CROSS_REVIEW_ALLOW_GATE_UNTRACK" != "1" ]; then
@@ -12302,7 +12403,7 @@ exit "$status"
         if ($null -ne $crgDispFs) { $null = Remove-CrgOwnedScratchHandle -Path $dispatcherPath -Stream $crgDispFs -Label 'fresh dispatcher'; $crgDispFs = $null }
         elseif ($null -ne $crgDispNew -and -not $crgDispNew.IsInvalid) { $null = Remove-CrgOwnedScratchHandle -Path $dispatcherPath -Handle $crgDispNew -Label 'fresh dispatcher'; $crgDispNew = $null }
         $crgDispKind = Get-CrgPathOccupantKind -Path $dispatcherPath
-        if ($crgDispKind -eq 'reparse') {
+        if ([string]::Equals($crgDispKind, 'reparse', [System.StringComparison]::Ordinal)) {
           Write-Error "bootstrap.ps1: creating the dispatcher at '$dispatcherPath' failed ($crgDispErr): a REPARSE-POINT occupant (a symlink or junction, possibly dangling -- a pathname probe reads it as absent) holds the hook name, and no re-run can replace it. Remove the link by hand, then re-run."
           exit 1
         }
@@ -12490,12 +12591,12 @@ if (-not $DispatcherOnly) {
     Write-Error "bootstrap.ps1: the gate files and manifest are installed and verified, but the install version record could not be published and was removed. Re-run the retained package explicitly: powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -TargetRepo `"$targetRepoAbs`" -Force. This run is incomplete and reports failure."
     exit 1
   }
-  if ($crgRetiredPmHead.State -eq 'legacy') {
+  if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal)) {
     # No transition identity may be published for a HEAD that moved after the
     # locked snapshot. A self-host failure here deliberately leaves the active
     # custody epoch in its admitted pre-transition state for an exact-base retry.
     $crgBeforeTransitionHead = Get-CrgRetiredProjectModeHeadState -Repo $targetRepoAbs
-    if ($crgBeforeTransitionHead.State -eq 'error' -or
+    if ([string]::Equals($crgBeforeTransitionHead.State, 'error', [System.StringComparison]::Ordinal) -or
         -not [string]::Equals("$($crgBeforeTransitionHead.Identity)", "$($crgRetiredPmHead.Identity)", [System.StringComparison]::Ordinal) -or
         -not [string]::Equals($crgBeforeTransitionHead.State, $crgRetiredPmHead.State, [System.StringComparison]::Ordinal)) {
       Write-Error "bootstrap.ps1: trusted HEAD changed before legacy transition publication. No transition or completion identity was published; any active self-host custody remains bound to '$crgLegacyBaseHead' for an exact-base retry."
@@ -12527,7 +12628,7 @@ if (-not $DispatcherOnly) {
 # comparison additionally prevents a concurrent commit from crossing the last
 # check and still receiving a successful install report.
 $crgSuccessHead = Get-CrgRetiredProjectModeHeadState -Repo $targetRepoAbs
-if ($crgSuccessHead.State -eq 'error' -or
+if ([string]::Equals($crgSuccessHead.State, 'error', [System.StringComparison]::Ordinal) -or
     -not [string]::Equals("$($crgSuccessHead.Identity)", "$($crgRetiredPmHead.Identity)", [System.StringComparison]::Ordinal) -or
     -not [string]::Equals($crgSuccessHead.State, $crgRetiredPmHead.State, [System.StringComparison]::Ordinal)) {
   $crgFinalIdentityState = 'no new transition identity was published by this run'
@@ -12591,7 +12692,7 @@ if ($DispatcherOnly) {
   Write-Host "[bootstrap] -DispatcherOnly complete: the per-clone dispatcher at"
   Write-Host "[bootstrap] $dispatcherPath"
   Write-Host "[bootstrap] now carries the gate-untracking guard and no longer enforces project mode itself."
-  if ($crgRetiredPmHead.State -eq 'legacy') {
+  if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal)) {
     Write-Host "[bootstrap] WARNING: trusted tracked HEAD still carries retired project-mode enforcement."
     Write-Host "[bootstrap] Run the full package bootstrap with -Force. A full successful install publishes"
     Write-Host "[bootstrap] the base-HEAD-bound staged-blob identity record needed for the narrow transition"
@@ -12659,15 +12760,15 @@ $crgShapeIgnored = @()
 $crgShapeExposed = @()
 foreach ($f in $fileList) {
   $crgDstIgnState = Get-CrgCheckIgnoreState -Repo $targetRepoAbs -Path $f.Dst
-  if ($crgDstIgnState -like 'error:*') {
+  if (([string]$crgDstIgnState).StartsWith('error:', [System.StringComparison]::Ordinal)) {
     Write-Error "bootstrap.ps1: git check-ignore failed ($crgDstIgnState) probing '$($f.Dst)' in '$targetRepoAbs'; cannot classify the install shape. Diagnose the repository, then re-run."
     exit 1
   }
-  if ($crgDstIgnState -eq 'ignored') { $crgShapeIgnored += $f.Dst } else { $crgShapeExposed += $f.Dst }
+  if ([string]::Equals($crgDstIgnState, 'ignored', [System.StringComparison]::Ordinal)) { $crgShapeIgnored += $f.Dst } else { $crgShapeExposed += $f.Dst }
 }
 $crgShapeLocal = ($crgShapeExposed.Count -eq 0)
 $crgShapeMixed = ((-not $crgShapeLocal) -and ($crgShapeIgnored.Count -gt 0))
-if ($crgRetiredPmHead.State -eq 'legacy') {
+if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison]::Ordinal)) {
 $crgLegacyStagePaths = @($crgLegacyTransitionRecord.Paths)
 Write-Host "5. PRE-REDESIGN TRACKED REVIEW KERNEL DETECTED -- USE TWO LANDINGS."
 Write-Host "   HEAD still tells the old hook/wrappers/prompt to block project work"

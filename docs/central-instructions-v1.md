@@ -26,7 +26,15 @@ section grammar and exact section equality are checked; a duplicate or modified
 section refuses. Candidate instructions remain review data and never supply the
 rules used to approve that candidate.
 
-The coordinator calls this assertion before review. Opening a project never
+The coordinator calls this assertion before review, adding `-RequireWorkingBytes`
+for first attachment. That mode compares each working instruction file to the
+actual captured private blob without applying text or line-ending normalization.
+Missing files or different bytes stop before reviewer dispatch and publication;
+existing edits are preserved. Final activation still repeats the exact-byte check
+under instruction custody. Ordinary paired commits do not require working bytes
+to match staged instructions during this precheck.
+
+Opening a project never
 injects a missing section or upgrades instruction prose merely because a new
 central runtime was activated.
 
@@ -125,5 +133,6 @@ without overwriting and records the matching approved baseline. A root missing
 after interruption remains a preserved deletion/conflict requiring explicit
 resolution. No recursive cleanup or temporary-fixture process is introduced;
 verification uses source inspection, parser/build checks, mandatory review,
-ordinary program operation and applicable functional testing. Code unit tests
-remain prohibited, without categorically prohibiting other test harnesses.
+ordinary program operation and functional validation. Code unit tests remain
+prohibited; live testing, manual checks, ordinary program runs, and functional
+validation remain permitted.

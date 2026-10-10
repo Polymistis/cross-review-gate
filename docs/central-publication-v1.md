@@ -86,6 +86,15 @@ both refs reach their results, including when the public ref was already advance
 at recovery admission. Interrupted first attachment uses the exact pending
 proposal and private-ref association before finishing activation.
 
+For the bounded published instruction correction in `first-attachment-v1.md`,
+ordinary Attach starts a freshly reviewed successor instead of resuming the old
+candidate. The prior exact handoff remains part of the captured-state checks
+through review. After PASS and new immutable retention, the normal expected-byte
+writer replaces that handoff; publication then follows the ordinary first-origin
+sequence. The old receipt grants no authority and remains retained. This path
+requires unchanged public content and governing configuration and is unavailable
+after activation or completed-pair publication. Resume itself is unchanged.
+
 ## Lifetime and evidence
 
 Actual process ownership and confirmed descendant drain govern cleanup. Native
@@ -97,4 +106,5 @@ durable forensic data and release only owned resources.
 Static parsing, literal native compilation and mandatory source reviews remain
 separate evidence from actual installed operation. Code unit tests, renamed code
 unit tests, and synthetic review receipts are not authorized by this integration;
-applicable functional testing remains allowed and important.
+live testing, manual checks, ordinary program runs, and functional validation
+remain permitted and important.

@@ -138,6 +138,22 @@
                    and always drift; the reviewer-side contract is in
                    review-prompt-template.md.)
     ADVISORY-tier (reported; does NOT by itself set the findings exit):
+      CULTURE-COMPARE
+                   a likely culture-sensitive string comparison on an ADDED line of a
+                   staged .ps1/.psm1 file, read with PowerShell's parser
+                   (Get-CultureComparisonFindings): a -c/-i prefixed comparison operator,
+                   or one with a quoted, [string] or [char] operand, unless the operand
+                   that decides the comparison (the left one; the collection for
+                   -contains/-in) is a [char], other numeric cast or a number;
+                   case-insensitive -like; StartsWith/EndsWith, and IndexOf/LastIndexOf on
+                   a quoted string, without a written-out Ordinal or OrdinalIgnoreCase
+                   StringComparison last; ValidateSet; and an enabled Unique switch or
+                   the Unique cmdlet. Windows PowerShell 5.1 compares those by culture,
+                   which ignores characters such as U+00AD. A pointer, not a gate: an
+                   operand's run-time type is not in the syntax, so the rule can miss a
+                   comparison or name one that is exact; checklist item 11 and review
+                   keep comparisons exact. Added lines only. A file the parser cannot
+                   read gets one finding saying so.
       UNSUPPORTED-SYNTAX
                    a GOVERNED file whose line-oriented classes could not run over
                    it, and why. The ways a file reaches it:
@@ -482,6 +498,11 @@ $script:NarrativeDocPattern = '\.md\z'
 # where it lives). The comment syntax is resolved per extension (Get-SourceLineParts).
 $script:SourceExtPattern = '\.(rs|ps1|toml|sh)\z'
 
+# PowerShell files whose ADDED lines CULTURE-COMPARE reads, code included
+# (Get-CultureComparisonFindings). Separate from the count classes' set above, which
+# does not take .psm1.
+$script:PowerShellExtPattern = '\.(ps1|psm1)\z'
+
 # Repo-relative PATHS of KNOWN machine-generated reports whose body is intended
 # FORMAT (file:line cites, counts), not authored prose -- the ONLY files eligible
 # for the generated-doc skip. This is the security boundary: an authored doc at
@@ -770,8 +791,8 @@ function Build-PathSetFromFileList {
   $set = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
   if (-not $Files) { return $set }
   foreach ($raw in $Files) {
-    $f = ([string]$raw -replace '\\', '/').Trim()
-    if ([string]::IsNullOrWhiteSpace($f)) { continue }
+    $f = [string]$raw -replace '\\', '/'
+    if ($f.Length -eq 0) { continue }
     $set[$f] = $true
     $parts = $f -split '/'
     $acc = ''
@@ -792,7 +813,7 @@ function Get-TopLevelDirSet {
   # prose depending on environment. Tracked dirs come from the index; gitignored
   # evidence/build roots come from .gitignore. Pure (no I/O). (Codex BLOCKER.)
   param([string[]]$IndexFiles, [string]$GitignoreText)
-  # CASE-INSENSITIVE on purpose (default `@{}`), in deliberate ASYMMETRY with the
+  # CASE-INSENSITIVE on purpose (OrdinalIgnoreCase), in deliberate ASYMMETRY with the
   # ORDINAL index resolver (Build-PathSetFromFileList). This set is only the
   # first-segment INTENT gate in Get-DeadRefFindings: "does this token even look
   # like a repo-relative path?". A wrong-cased top-level segment (`Scripts/...`)
@@ -802,17 +823,18 @@ function Get-TopLevelDirSet {
   # be dropped as prose -- silently skipping the exact wrong-case class the ordinal
   # resolver exists to catch. (Codex BLOCKER: ordinal-here defeated
   # the case-sensitivity fix.)
-  $set = @{}
+  # Ordinal: string overloads, -eq/-ceq, switch and @{} keys compare by culture and ignore characters such as U+00AD.
+  $set = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
   if ($IndexFiles) {
     foreach ($f in $IndexFiles) {
-      $n = ([string]$f -replace '\\', '/').Trim()
+      $n = [string]$f -replace '\\', '/'
       if ($n -match '^([^/]+)/') { $set[$Matches[1]] = $true }   # first seg of a tracked path
     }
   }
   if ($GitignoreText) {
     foreach ($line in ($GitignoreText -split "`n")) {
       $l = ($line -replace '\\', '/').Trim()
-      if (-not $l -or $l.StartsWith('#') -or $l.StartsWith('!')) { continue }
+      if (-not $l -or $l.StartsWith('#', [System.StringComparison]::Ordinal) -or $l.StartsWith('!', [System.StringComparison]::Ordinal)) { continue }
       $l = $l.TrimStart('/')
       if ($l -match '^([^/*?]+)/') { $set[$Matches[1]] = $true }   # dir pattern with a slash (logs/, target/build)
       elseif ($l -match '^([^/*?]+)$' -and $l -notmatch '\.[A-Za-z0-9]+$') { $set[$l] = $true }   # bare root dir, e.g. /target
@@ -858,7 +880,7 @@ function Get-FencedLineFlags {
       if (-not $inFence) {
         $inFence = $true; $fenceChar = $delim; $fenceLen = $runLen   # open (info string allowed)
         $flags[$i] = $true
-      } elseif ($delim -eq $fenceChar -and $runLen -ge $fenceLen -and $bare) {
+      } elseif ([string]::Equals($delim, $fenceChar, [System.StringComparison]::Ordinal) -and $runLen -ge $fenceLen -and $bare) {
         $inFence = $false; $fenceChar = ''; $fenceLen = 0            # valid close: same char, >= len, no trailing content
         $flags[$i] = $true
       } else {
@@ -968,9 +990,9 @@ function Get-DeadRefFindings {
       # separator/colon to test. (Codex QUALITY: separator+underscore
       # bypassed the absolute guard.)
       $j = $m.Index - 1
-      while ($j -ge 0 -and $lineText[$j] -eq '_') { $j-- }
+      while ($j -ge 0 -and [char]$lineText[$j] -ceq '_') { $j-- }
       $effPrev = if ($j -ge 0) { $lineText[$j] } else { '' }
-      if ($effPrev -eq '/' -or $effPrev -eq '\' -or $effPrev -eq ':') { continue }
+      if ([string]::Equals([string]$effPrev, '/', [System.StringComparison]::Ordinal) -or [string]::Equals([string]$effPrev, '\', [System.StringComparison]::Ordinal) -or [string]::Equals([string]$effPrev, ':', [System.StringComparison]::Ordinal)) { continue }
       $tok = $m.Value -replace '[.,;:`''")\]\}>]+$', ''
       # Strip a leading angle wrapper BEFORE the dot-relative strip (order matters):
       # `<./logs/...>` must become `logs/...`, so the `<` is removed first, then the
@@ -1020,7 +1042,7 @@ function Get-DeadRefFindings {
         # Markdown ITALIC close (`*path*`) when the match opens with a leading `*`;
         # otherwise a glob (`dir/*`, `*.md`, `prefix-*`). (Codex SILENT-FAILURE
         #: single-* emphasis around a dead path must still flag.)
-        if ($prevChar -ne '*') { continue }
+        if (-not [string]::Equals([string]$prevChar, '*', [System.StringComparison]::Ordinal)) { continue }
       }
       elseif ($afterCtx -match '^\?[\w.]') { continue }                # ?-glob single char (name?.txt), not a bare trailing ?
       # Machine-local / non-repo-relative starts the token char-class CAN produce
@@ -1059,7 +1081,9 @@ function Get-DefinedMilestoneTags {
   # `#### M1 Acceptance Criteria`. Return the set of top-level milestone tokens
   # (M<n>) that have at least one defining header.
   param([string]$PlanContent)
-  $defined = @{}
+  # OrdinalIgnoreCase: the header match below ignores case, so `### m1:`
+  # defines the `M1` that references spell in upper case.
+  $defined = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($line in ($PlanContent -split "`n")) {
     if ($line -match '^#{2,4}\s+(M\d+)(?:[.:\s]|$)') {
       $defined[$Matches[1]] = $true
@@ -1080,7 +1104,7 @@ function Get-MilestoneTagFindings {
   $lines = $PlanContent -split "`n"
   $fenced = Get-FencedLineFlags -Lines $lines
   $rx = [regex]('\bM\d+(?:\.[A-Za-z0-9]+)*\b')
-  $seen = @{}
+  $seen = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
   for ($i = 0; $i -lt $lines.Count; $i++) {
     if ($fenced[$i]) { continue }
     foreach ($m in $rx.Matches($lines[$i])) {
@@ -1338,10 +1362,11 @@ function Get-SelfNarrationFindings {
     if ($fenced[$i]) { continue }
     $text = [string]$Records[$i].Text
     $hits = @()
+    $hitSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     foreach ($rx in $patterns) {
-      foreach ($m in $rx.Matches($text)) { $hits += $m.Value }
+      foreach ($m in $rx.Matches($text)) { if ($hitSeen.Add($m.Value)) { $hits += $m.Value } }
     }
-    foreach ($h in ($hits | Select-Object -Unique)) {
+    foreach ($h in $hits) {
       $out += @{
         Class = 'SELF-NARR'
         Tier  = $tier
@@ -1610,7 +1635,7 @@ function Get-InventoryAssertionFindings {
     $flatSb = New-Object System.Text.StringBuilder
     $map = New-Object 'System.Collections.Generic.List[int]'
     for ($k = 0; $k -lt $text.Length; $k++) {
-      if ($text[$k] -eq '`') { continue }
+      if ([char]$text[$k] -ceq '`') { continue }
       [void]$flatSb.Append($text[$k]); $map.Add($k)
     }
     $flat = $flatSb.ToString()
@@ -1660,8 +1685,8 @@ function Get-InventoryAssertionFindings {
         # error-tier list does NOT name carries no such mandate, so it stays at the
         # softer tier: a SPELLED cardinal (the shapes' only spelled position, so a
         # match with no digit run is exactly one) and the `names` verb.
-        if ($tier -eq 'ERROR' -and (($val -notmatch '\d') -or ($val -match '(?i)^names\b'))) { $tier = 'ADVISORY' }
-        if ($tier -eq 'ERROR' -and $p.CardinalLeads -and
+        if ([string]::Equals($tier, 'ERROR', [System.StringComparison]::Ordinal) -and (($val -notmatch '\d') -or ($val -match '(?i)^names\b'))) { $tier = 'ADVISORY' }
+        if ([string]::Equals($tier, 'ERROR', [System.StringComparison]::Ordinal) -and $p.CardinalLeads -and
             ($text.Substring(0, $origStart) -match "^$script:LineLeadMarkupPattern$")) { $tier = 'ADVISORY' }
         $out += @{
           Class = 'INVENTORY'
@@ -1724,11 +1749,11 @@ function Get-SourceLineParts {
   # enough to tell. Blanking once here fixes every numeric consumer at the source
   # rather than per-regex.
   $codeNoStr = New-Object System.Text.StringBuilder
-  $hasBlock = ($Ext -eq 'rs' -or $Ext -eq 'ps1')
-  $blkOpen = switch ($Ext) { 'rs' { '/*' } 'ps1' { '<#' } default { '' } }
-  $blkClose = switch ($Ext) { 'rs' { '*/' } 'ps1' { '#>' } default { '' } }
+  $hasBlock = ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal))
+  $blkOpen = switch ($Ext) { { [string]::Equals($_, 'rs', [System.StringComparison]::Ordinal) } { '/*' } { [string]::Equals($_, 'ps1', [System.StringComparison]::Ordinal) } { '<#' } default { '' } }
+  $blkClose = switch ($Ext) { { [string]::Equals($_, 'rs', [System.StringComparison]::Ordinal) } { '*/' } { [string]::Equals($_, 'ps1', [System.StringComparison]::Ordinal) } { '#>' } default { '' } }
   # Rust: only `"` is a string delim here (a bare `'` is a lifetime, not a string).
-  $strChars = if ($Ext -eq 'rs') { @('"') } else { @('"', "'") }
+  $strChars = if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) { @('"') } else { @('"', "'") }
   $inStr = $InString; $strCh = $StrChar
   # PER-FRAGMENT comment emission for the staged-source segmenter. A line can
   # hold several comment FRAGMENTS with code between them (`*/ let x = 1; //
@@ -1756,7 +1781,7 @@ function Get-SourceLineParts {
   while ($i -lt $n) {
     $ch = [string]$s[$i]
     if ($InBlock) {
-      if ($hasBlock -and ($i + 1 -lt $n) -and $s.Substring($i, 2) -eq $blkClose) {
+      if ($hasBlock -and ($i + 1 -lt $n) -and [string]::CompareOrdinal($s, $i, $blkClose, 0, 2) -eq 0) {
         $InBlock = $false
         $frags.Add(@{ Text = $fragSb.ToString(); WasInBlock = $fragWasInBlock; CodeBefore = $fragCodeBefore; CodeAfter = $false })
         [void]$comment.Append($fragSb.ToString())
@@ -1780,8 +1805,8 @@ function Get-SourceLineParts {
       # single-quoted string no escapes at all, so consuming a backtick there ate the
       # closing quote, ran the string on past its real end, and could put a following
       # quoted value on the string side while a `#` after it read as string text.
-      if ($Ext -eq 'rs' -and $ch -eq '\') { [void]$code.Append($ch); [void]$codeNoStr.Append(' '); if ($i + 1 -lt $n) { [void]$code.Append($s[$i + 1]); [void]$codeNoStr.Append(' ') }; $i += 2; continue }
-      if ($Ext -eq 'ps1' -and $strCh -eq '"' -and $ch -eq '`') { [void]$code.Append($ch); [void]$codeNoStr.Append(' '); if ($i + 1 -lt $n) { [void]$code.Append($s[$i + 1]); [void]$codeNoStr.Append(' ') }; $i += 2; continue }
+      if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '\', [System.StringComparison]::Ordinal)) { [void]$code.Append($ch); [void]$codeNoStr.Append(' '); if ($i + 1 -lt $n) { [void]$code.Append($s[$i + 1]); [void]$codeNoStr.Append(' ') }; $i += 2; continue }
+      if ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -and [string]::Equals($strCh, '"', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '`', [System.StringComparison]::Ordinal)) { [void]$code.Append($ch); [void]$codeNoStr.Append(' '); if ($i + 1 -lt $n) { [void]$code.Append($s[$i + 1]); [void]$codeNoStr.Append(' ') }; $i += 2; continue }
       # A `${...}` inside an EXPANDABLE string is a NAME, and its body is not string
       # text: MEASURED against the PowerShell tokenizer, `"${a" 3 "b}"` lexes as ONE
       # StringExpandable whose nested token is the single variable `${a" 3 "b}` -- the
@@ -1793,7 +1818,7 @@ function Get-SourceLineParts {
       # SINGLE-quoted strings are excluded, and that is a decision rather than an
       # omission: neither language interpolates in them (MEASURED: `'${a" 3 "b}'`
       # lexes as one StringLiteral), so there the braces are ordinary literal text.
-      if ($strCh -eq '"' -and ($Ext -eq 'ps1' -or $Ext -eq 'sh') -and $ch -eq '$' -and ($i + 1 -lt $n) -and [string]$s[$i + 1] -eq '{') {
+      if ([string]::Equals($strCh, '"', [System.StringComparison]::Ordinal) -and ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) -and [string]::Equals($ch, '$', [System.StringComparison]::Ordinal) -and ($i + 1 -lt $n) -and [string]::Equals([string]$s[$i + 1], '{', [System.StringComparison]::Ordinal)) {
         $inStrBraced = Get-BracedVariableTokenLength -Text $s -Index $i -Ext $Ext
         $inStrTake = if ($inStrBraced -gt 0) { $inStrBraced } else { $n - $i }
         [void]$code.Append($s.Substring($i, $inStrTake))
@@ -1801,11 +1826,11 @@ function Get-SourceLineParts {
         $i += $inStrTake; continue
       }
       [void]$code.Append($ch)
-      [void]$codeNoStr.Append($(if ($ch -eq $strCh) { $ch } else { ' ' }))
-      if ($ch -eq $strCh) { $inStr = $false; $strCh = '' }
+      [void]$codeNoStr.Append($(if ([string]::Equals($ch, $strCh, [System.StringComparison]::Ordinal)) { $ch } else { ' ' }))
+      if ([string]::Equals($ch, $strCh, [System.StringComparison]::Ordinal)) { $inStr = $false; $strCh = '' }
       $i++; continue
     }
-    if ($hasBlock -and ($i + 1 -lt $n) -and $s.Substring($i, 2) -eq $blkOpen) {
+    if ($hasBlock -and ($i + 1 -lt $n) -and [string]::CompareOrdinal($s, $i, $blkOpen, 0, 2) -eq 0) {
       $fragSb = New-Object System.Text.StringBuilder
       $fragWasInBlock = $false
       $fragCodeBefore = ($code.ToString().Substring($fragMark).Trim().Length -gt 0)
@@ -1819,7 +1844,7 @@ function Get-SourceLineParts {
     # dispatching the braced-token branch on that escaped `$` consumed the comment as a
     # name and let the file certify as fully scanned. The support checker already
     # consumed the escape this way, so this is also what keeps them in agreement.
-    if (($Ext -eq 'ps1' -and $ch -eq '`') -or ($Ext -eq 'sh' -and $ch -eq '\')) {
+    if (([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '`', [System.StringComparison]::Ordinal)) -or ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '\', [System.StringComparison]::Ordinal))) {
       $escTake = if ($i + 1 -lt $n) { 2 } else { 1 }
       $escSeg = $s.Substring($i, $escTake)
       [void]$code.Append($escSeg); [void]$codeNoStr.Append($escSeg)
@@ -1832,7 +1857,7 @@ function Get-SourceLineParts {
     # the rest of the record as code: whatever follows is inside a name, and it
     # certainly does not start a comment. The support checker refuses that record, so
     # nothing is ever scanned on the strength of this fallback.
-    if (($Ext -eq 'ps1' -or $Ext -eq 'sh') -and $ch -eq '$' -and ($i + 1 -lt $n) -and [string]$s[$i + 1] -eq '{') {
+    if (([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) -and [string]::Equals($ch, '$', [System.StringComparison]::Ordinal) -and ($i + 1 -lt $n) -and [string]::Equals([string]$s[$i + 1], '{', [System.StringComparison]::Ordinal)) {
       $bracedLen = Get-BracedVariableTokenLength -Text $s -Index $i -Ext $Ext
       $take = if ($bracedLen -gt 0) { $bracedLen } else { $n - $i }
       [void]$code.Append($s.Substring($i, $take))
@@ -1841,14 +1866,14 @@ function Get-SourceLineParts {
       [void]$codeNoStr.Append((Get-BracedTokenCodeProjection -Text $s -Index $i -Length $take -Ext $Ext))
       $i += $take; continue
     }
-    if ($Ext -eq 'rs') {
-      if (($i + 1 -lt $n) -and $s.Substring($i, 2) -eq '//') {
+    if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) {
+      if (($i + 1 -lt $n) -and [string]::CompareOrdinal($s, $i, '//', 0, 2) -eq 0) {
         $frags.Add(@{ Text = $s.Substring($i); WasInBlock = $false; CodeBefore = ($code.ToString().Substring($fragMark).Trim().Length -gt 0); CodeAfter = $false })
         $lastCloseFragIndex = -1
         [void]$comment.Append($s.Substring($i)); break
       }
     } else {
-      if ($ch -eq '#') {
+      if ([string]::Equals($ch, '#', [System.StringComparison]::Ordinal)) {
         $prev = if ($i -gt 0) { [string]$s[$i - 1] } else { '' }
         # toml: `#` anywhere outside a string is a comment; sh/ps1 accept line
         # start, whitespace, or a command separator before `#` (`cmd;# note` is
@@ -1883,16 +1908,16 @@ function Get-SourceLineParts {
         # tokenizer lexes that same shape as Identifier + Comment. A shared `\s` matches
         # U+00A0 and so certified a shell comment the language does not have, inventing
         # count claims out of ordinary word text.
-        $sepClass = if ($Ext -eq 'sh') { '[ \t;&|]' } else { '[\s;&|(){}]' }
+        $sepClass = if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) { '[ \t;&|]' } else { '[\s;&|(){}]' }
         $atCommentPos = ($i -eq 0 -or $prev -match $sepClass)
-        if (($Ext -eq 'toml') -or $atCommentPos) {
+        if (([string]::Equals($Ext, 'toml', [System.StringComparison]::Ordinal)) -or $atCommentPos) {
           $frags.Add(@{ Text = $s.Substring($i); WasInBlock = $false; CodeBefore = ($code.ToString().Substring($fragMark).Trim().Length -gt 0); CodeAfter = $false })
           $lastCloseFragIndex = -1
           [void]$comment.Append($s.Substring($i)); break
         }
       }
     }
-    if ($strChars -contains $ch) { $inStr = $true; $strCh = $ch; [void]$code.Append($ch); [void]$codeNoStr.Append($ch); $i++; continue }
+    if ([Array]::IndexOf([string[]]$strChars, [string]$ch) -ge 0) { $inStr = $true; $strCh = $ch; [void]$code.Append($ch); [void]$codeNoStr.Append($ch); $i++; continue }
     [void]$code.Append($ch); [void]$codeNoStr.Append($ch); $i++
   }
   # A block fragment still OPEN at EOL is emitted for THIS line (its
@@ -1959,10 +1984,10 @@ function Get-SourceSupportDiagnostic {
   # check. Where the two would disagree is exactly where this one refuses.
   param([object[]]$Records, [string]$Ext)
   if (-not $Records) { return $null }
-  $hasBlock = ($Ext -eq 'rs' -or $Ext -eq 'ps1')
-  $blkOpen = switch ($Ext) { 'rs' { '/*' } 'ps1' { '<#' } default { '' } }
-  $blkClose = switch ($Ext) { 'rs' { '*/' } 'ps1' { '#>' } default { '' } }
-  $strChars = if ($Ext -eq 'rs') { @('"') } else { @('"', "'") }
+  $hasBlock = ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal))
+  $blkOpen = switch ($Ext) { { [string]::Equals($_, 'rs', [System.StringComparison]::Ordinal) } { '/*' } { [string]::Equals($_, 'ps1', [System.StringComparison]::Ordinal) } { '<#' } default { '' } }
+  $blkClose = switch ($Ext) { { [string]::Equals($_, 'rs', [System.StringComparison]::Ordinal) } { '*/' } { [string]::Equals($_, 'ps1', [System.StringComparison]::Ordinal) } { '#>' } default { '' } }
+  $strChars = if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) { @('"') } else { @('"', "'") }
   $inBlock = $false; $inStr = $false; $strCh = ''
   # INDEXED, not foreach: the trailing-continuation test below has to read the NEXT
   # record's first character, which is one of the two seam characters its join proof
@@ -1991,8 +2016,8 @@ function Get-SourceSupportDiagnostic {
       if ($inBlock) {
         if ($hasBlock -and ($i + 1) -lt $n) {
           $pair = $s.Substring($i, 2)
-          if ($pair -eq $blkOpen) { return @{ Line = [int]$r.Line; Construct = 'a NESTED block comment' } }
-          if ($pair -eq $blkClose) { $inBlock = $false; $i += 2; continue }
+          if ([string]::Equals($pair, $blkOpen, [System.StringComparison]::Ordinal)) { return @{ Line = [int]$r.Line; Construct = 'a NESTED block comment' } }
+          if ([string]::Equals($pair, $blkClose, [System.StringComparison]::Ordinal)) { $inBlock = $false; $i += 2; continue }
         }
         $i++; continue
       }
@@ -2004,37 +2029,37 @@ function Get-SourceSupportDiagnostic {
         # grammar, which is the fork this check exists to avoid. Refuse instead.
         # A ps1 backtick is the string ESCAPE (consumed below); an sh backtick in a
         # double-quoted string is command substitution, so only sh refuses on it.
-        if ($strCh -eq '"' -and ($Ext -eq 'ps1' -or $Ext -eq 'sh')) {
-          if ($ch -eq '$' -and ($i + 1) -lt $n -and [string]$s[$i + 1] -eq '(') {
+        if ([string]::Equals($strCh, '"', [System.StringComparison]::Ordinal) -and ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal))) {
+          if ([string]::Equals($ch, '$', [System.StringComparison]::Ordinal) -and ($i + 1) -lt $n -and [string]::Equals([string]$s[$i + 1], '(', [System.StringComparison]::Ordinal)) {
             return @{ Line = [int]$r.Line; Construct = 'a `$(...)` substitution inside a quoted string' }
           }
-          if ($Ext -eq 'sh' -and $ch -eq '`') {
+          if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '`', [System.StringComparison]::Ordinal)) {
             return @{ Line = [int]$r.Line; Construct = 'a backtick substitution inside a quoted string' }
           }
         }
-        if ($Ext -eq 'rs' -and $ch -eq '\') { $i += 2; continue }
+        if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '\', [System.StringComparison]::Ordinal)) { $i += 2; continue }
         # EXPANDABLE only, exactly as the splitter consumes it: a single-quoted
         # PowerShell string has no backtick escape, and consuming one there would
         # certify a split that had already run the string past its closing quote.
-        if ($Ext -eq 'ps1' -and $strCh -eq '"' -and $ch -eq '`') { $i += 2; continue }
+        if ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -and [string]::Equals($strCh, '"', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '`', [System.StringComparison]::Ordinal)) { $i += 2; continue }
         # The braced NAME inside an EXPANDABLE string, consumed exactly as the
         # splitter consumes it -- its body is name text whose quotes are not
         # delimiters, so scanning it characterwise closes the string in the wrong
         # place and certifies a split that put name text on the code side. A
         # SINGLE-quoted string interpolates in neither language, so it is excluded.
-        if ($strCh -eq '"' -and ($Ext -eq 'ps1' -or $Ext -eq 'sh') -and $ch -eq '$' -and ($i + 1) -lt $n -and [string]$s[$i + 1] -eq '{') {
+        if ([string]::Equals($strCh, '"', [System.StringComparison]::Ordinal) -and ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) -and [string]::Equals($ch, '$', [System.StringComparison]::Ordinal) -and ($i + 1) -lt $n -and [string]::Equals([string]$s[$i + 1], '{', [System.StringComparison]::Ordinal)) {
           $inStrBraced = Get-BracedVariableTokenLength -Text $s -Index $i -Ext $Ext
           if ($inStrBraced -le 0) { return @{ Line = [int]$r.Line; Construct = 'a braced variable name inside a string that this model cannot read' } }
           $i += $inStrBraced; continue
         }
         # An escape the model does NOT apply ends the string in the wrong place.
-        if ($ch -eq '\' -and ($Ext -eq 'toml' -or $Ext -eq 'sh') -and $strCh -eq '"') {
+        if ([string]::Equals($ch, '\', [System.StringComparison]::Ordinal) -and ([string]::Equals($Ext, 'toml', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) -and [string]::Equals($strCh, '"', [System.StringComparison]::Ordinal)) {
           return @{ Line = [int]$r.Line; Construct = 'a backslash escape inside a quoted string' }
         }
-        if ($ch -eq $strCh) {
+        if ([string]::Equals($ch, $strCh, [System.StringComparison]::Ordinal)) {
           # PowerShell escapes a quote by DOUBLING it; the model reads the pair as
           # close-then-reopen.
-          if ($Ext -eq 'ps1' -and ($i + 1) -lt $n -and [string]$s[$i + 1] -eq $strCh) {
+          if ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -and ($i + 1) -lt $n -and [string]::Equals([string]$s[$i + 1], $strCh, [System.StringComparison]::Ordinal)) {
             return @{ Line = [int]$r.Line; Construct = 'a doubled-quote escape inside a string' }
           }
           $inStr = $false; $strCh = ''
@@ -2042,16 +2067,16 @@ function Get-SourceSupportDiagnostic {
         $i++; continue
       }
       if ([char]::IsWhiteSpace($s[$i])) { $i++; continue }
-      if ($hasBlock -and ($i + 1) -lt $n -and $s.Substring($i, 2) -eq $blkOpen) { $inBlock = $true; $i += 2; continue }
-      if ($Ext -eq 'rs') {
-        if (($i + 1) -lt $n -and $s.Substring($i, 2) -eq '//') { break }
-        if ($ch -eq "'") {
+      if ($hasBlock -and ($i + 1) -lt $n -and [string]::CompareOrdinal($s, $i, $blkOpen, 0, 2) -eq 0) { $inBlock = $true; $i += 2; continue }
+      if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) {
+        if (($i + 1) -lt $n -and [string]::CompareOrdinal($s, $i, '//', 0, 2) -eq 0) { break }
+        if ([string]::Equals($ch, "'", [System.StringComparison]::Ordinal)) {
           $lit = Get-RustQuoteTokenLength -Text $s -Index $i
           if ($lit -le 0) { return @{ Line = [int]$r.Line; Construct = 'a char literal this model cannot read' } }
           $i += $lit; continue
         }
       } else {
-        if ($Ext -eq 'sh' -and ($i + 1) -lt $n -and $s.Substring($i, 2) -eq '<<') {
+        if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal) -and ($i + 1) -lt $n -and [string]::CompareOrdinal($s, $i, '<<', 0, 2) -eq 0) {
           return @{ Line = [int]$r.Line; Construct = 'a shell here-document' }
         }
         # An escape in CODE position matters when it suppresses a character the SPLIT
@@ -2070,7 +2095,7 @@ function Get-SourceSupportDiagnostic {
         #     separator ends the word in both, and there the `#` really is a comment.
         #   CROSS-RECORD: a TRAILING escape, which is a LINE CONTINUATION. Its own rule
         #     is below, because that one is not a `#` question at all.
-        if (($Ext -eq 'sh' -and $ch -eq '\') -or ($Ext -eq 'ps1' -and $ch -eq '`')) {
+        if (([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '\', [System.StringComparison]::Ordinal)) -or ([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -and [string]::Equals($ch, '`', [System.StringComparison]::Ordinal))) {
           # ABSENCE IS AN INDEX QUESTION, never an equality one. MEASURED: PowerShell
           # collates zero-weight code points away on BOTH `-eq` and `-ceq`, so
           # `([string][char]0xFEFF) -eq ''` and its `-ceq` twin are each True. A
@@ -2138,7 +2163,7 @@ function Get-SourceSupportDiagnostic {
             # construction, and anything outside it refuses rather than being judged.
             # PowerShell's own whitespace set is wider than ASCII; the narrow set is
             # used for both languages because over-refusal costs one advisory row.
-            $joinSepClass = if ($Ext -eq 'sh') { '[ \t;&|]' } else { '[ \t;&|(){}]' }
+            $joinSepClass = if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) { '[ \t;&|]' } else { '[ \t;&|(){}]' }
             # An ESCAPED separator is not a separator: the escape pulls it into the
             # active word, so the join leaves a following `#` word-internal while a raw
             # look at the character says the seam is safe. Parity is read from the scan
@@ -2150,7 +2175,7 @@ function Get-SourceSupportDiagnostic {
             if (-not $joinProven) {
               return @{ Line = [int]$r.Line; Construct = 'a line continuation whose join this model cannot prove leaves the record-wise reading unchanged' }
             }
-          } elseif ((($i + 2) -lt $n) -and ([string]$s[$i + 2] -eq '#')) {
+          } elseif ((($i + 2) -lt $n) -and [string]::Equals([string]$s[$i + 2], '#', [System.StringComparison]::Ordinal)) {
             # THE REFUSAL CLASS MIRRORS THE CLASSIFIER'S, character for character, and
             # the two ask opposite questions of it. A refusal keys on where the MODEL
             # would read a comment the language does not have: an ESCAPE pulls the
@@ -2160,7 +2185,7 @@ function Get-SourceSupportDiagnostic {
             # proof class above keys on where the LANGUAGE guarantees a boundary, and
             # so requires the seam separator to be UNESCAPED; that, not a different
             # character set, is what separates the two.
-            $escSep = if ($Ext -eq 'sh') { '[ \t;&|]' } else { '[\s;&|(){}]' }
+            $escSep = if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) { '[ \t;&|]' } else { '[\s;&|(){}]' }
             if ($nx -match $escSep) {
               return @{ Line = [int]$r.Line; Construct = 'a `#` after an ESCAPED separator, which the escape keeps inside the word' }
             }
@@ -2171,12 +2196,12 @@ function Get-SourceSupportDiagnostic {
         }
         # The `${...}` NAME, consumed whole exactly as the splitter consumes it, so the
         # `#` and quote characters a name may legally hold never reach the tests below.
-        if (($Ext -eq 'ps1' -or $Ext -eq 'sh') -and $ch -eq '$' -and ($i + 1) -lt $n -and [string]$s[$i + 1] -eq '{') {
+        if (([string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -or [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) -and [string]::Equals($ch, '$', [System.StringComparison]::Ordinal) -and ($i + 1) -lt $n -and [string]::Equals([string]$s[$i + 1], '{', [System.StringComparison]::Ordinal)) {
           $bracedLen = Get-BracedVariableTokenLength -Text $s -Index $i -Ext $Ext
           if ($bracedLen -le 0) { return @{ Line = [int]$r.Line; Construct = 'a braced variable name this model cannot read' } }
           $i += $bracedLen; $afterBraced = $i; continue
         }
-        if ($ch -eq '#') {
+        if ([string]::Equals($ch, '#', [System.StringComparison]::Ordinal)) {
           # THE COMMENT POSITION IS RECOGNIZED, NOT ASSUMED, and per language -- because
           # the splitter's shared preceding-character test is not either language's rule
           # and was wrong in each direction.
@@ -2210,11 +2235,11 @@ function Get-SourceSupportDiagnostic {
           #     already covers.
           # A `#` immediately after a consumed `${...}` is the one such position that
           # IS decidable: the expansion is part of the word, so the `#` continues it.
-          if ($Ext -eq 'toml') { break }
+          if ([string]::Equals($Ext, 'toml', [System.StringComparison]::Ordinal)) { break }
           $prev = if ($i -gt 0) { [string]$s[$i - 1] } else { '' }
-          $sepClass = if ($Ext -eq 'sh') { '[ \t;&|]' } else { '[\s;&|(){}]' }
+          $sepClass = if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) { '[ \t;&|]' } else { '[\s;&|(){}]' }
           if (($i -eq 0) -or ($prev -match $sepClass)) { break }
-          if ($Ext -eq 'sh') {
+          if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) {
             if ($i -eq $afterBraced) { $i++; continue }
             if ($prev -notmatch '[(){}<>`]') { $i++; continue }
             return @{ Line = [int]$r.Line; Construct = 'a `#` after a shell grouping or substitution character, where a comment and a word suffix are indistinguishable' }
@@ -2222,7 +2247,7 @@ function Get-SourceSupportDiagnostic {
           return @{ Line = [int]$r.Line; Construct = 'a `#` in a position this model cannot classify as comment or code' }
         }
       }
-      if ($strChars -contains $ch) {
+      if ([Array]::IndexOf([string[]]$strChars, [string]$ch) -ge 0) {
         $prev = if ($i -gt 0) { [string]$s[$i - 1] } else { '' }
         if ($prev -cmatch '[\w#@$"'']') {
           # A PREFIX is admitted only when it leaves the string's own rules alone.
@@ -2233,15 +2258,15 @@ function Get-SourceSupportDiagnostic {
           # triple-quote or doubled-quote form, and an UNKNOWN prefix is refused
           # because nothing here can know its rules -- which is what keeps the accept
           # list bounded and the refusal open-ended.
-          $why = if ($prev -ceq '@' -or $prev -ceq '$') { 'a here-string or ansi-C string opener' }
-                 elseif ($prev -ceq '"' -or $prev -ceq "'") { 'a triple-quoted or doubled-quote string form' }
+          $why = if ([string]::Equals($prev, '@', [System.StringComparison]::Ordinal) -or [string]::Equals($prev, '$', [System.StringComparison]::Ordinal)) { 'a here-string or ansi-C string opener' }
+                 elseif ([string]::Equals($prev, '"', [System.StringComparison]::Ordinal) -or [string]::Equals($prev, "'", [System.StringComparison]::Ordinal)) { 'a triple-quoted or doubled-quote string form' }
                  else { 'a quote glued to the preceding token (a prefixed literal, or an apostrophe inside a word)' }
-          if ($Ext -eq 'rs' -and $prev -cmatch '\w') {
+          if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal) -and $prev -cmatch '\w') {
             $j = $i - 1
-            while ($j -ge 0 -and ([char]::IsLetterOrDigit($s[$j]) -or $s[$j] -eq '_')) { $j-- }
+            while ($j -ge 0 -and ([char]::IsLetterOrDigit($s[$j]) -or [char]$s[$j] -ceq '_')) { $j-- }
             $pfx = $s.Substring($j + 1, $i - $j - 1)
             $before = if ($j -ge 0) { [string]$s[$j] } else { '' }
-            if (($pfx -ceq 'b' -or $pfx -ceq 'c') -and $before -notmatch '[\w#@$"'']') {
+            if (([string]::Equals($pfx, 'b', [System.StringComparison]::Ordinal) -or [string]::Equals($pfx, 'c', [System.StringComparison]::Ordinal)) -and $before -notmatch '[\w#@$"'']') {
               $inStr = $true; $strCh = $ch; $i++; continue
             }
           }
@@ -2256,7 +2281,7 @@ function Get-SourceSupportDiagnostic {
     # of a construct read wrong -- not a claim that those languages lack multi-line
     # strings (TOML triple-quoted and PowerShell here-strings are perfectly legal;
     # this model simply does not implement them, which is why they are refused above).
-    if ($inStr -and $Ext -ne 'rs') { return @{ Line = [int]$r.Line; Construct = 'a quote left open at end of line' } }
+    if ($inStr -and -not [string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) { return @{ Line = [int]$r.Line; Construct = 'a quote left open at end of line' } }
   }
   return $null
 }
@@ -2301,7 +2326,7 @@ function Get-ShellParameterExpansionMatch {
   $s = [string]$Text
   $n = $s.Length
   if ($Index -lt 0 -or ($Index + 1) -ge $n) { return $null }
-  if ([string]$s[$Index] -ne '$' -or [string]$s[$Index + 1] -ne '{') { return $null }
+  if (-not [string]::Equals([string]$s[$Index], '$', [System.StringComparison]::Ordinal) -or -not [string]::Equals([string]$s[$Index + 1], '{', [System.StringComparison]::Ordinal)) { return $null }
   # THE FIRST `}` IS THE ONLY CANDIDATE TERMINATOR, and that follows from the grammar
   # rather than from convenience: every operand class excludes `{}`, and no literal
   # part of a production holds one, so a body reaching a LATER `}` necessarily
@@ -2309,7 +2334,7 @@ function Get-ShellParameterExpansionMatch {
   # braces was written and REMOVED (2026-08-03): a body containing an earlier
   # terminator cannot match the grammar. Reintroducing a retry requires a
   # brace-bearing production first; otherwise the retry is unreachable.
-  $close = $s.IndexOf('}', $Index + 2)
+  $close = $s.IndexOf([char]'}', $Index + 2)
   if ($close -lt 0) { return $null }
   $body = $s.Substring($Index + 2, $close - ($Index + 2))
   $m = $script:ShellParamExpansionPattern.Match($body)
@@ -2321,7 +2346,7 @@ function Get-ShellParameterExpansionMatch {
   # `-`, `=` and `+` each really do yield theirs. One capture shared across all four put
   # prose on the numeric surface, where `: "${ICONS:?expected 3 icons}"` minted the
   # constant 3 and let the code-echo exemption suppress an adjacent count finding.
-  if ($m.Groups['word'].Success -and ([string]$m.Groups['wordop'].Value -ne '?')) {
+  if ($m.Groups['word'].Success -and -not [string]::Equals([string]$m.Groups['wordop'].Value, '?', [System.StringComparison]::Ordinal)) {
     $wordStart = $Index + 2 + $m.Groups['word'].Index
     $wordLength = $m.Groups['word'].Length
   }
@@ -2341,7 +2366,7 @@ function Get-BracedTokenCodeProjection {
   param([string]$Text, [int]$Index, [int]$Length, [string]$Ext)
   $keepStart = -1
   $keepLength = 0
-  if ($Ext -eq 'sh') {
+  if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) {
     $m = Get-ShellParameterExpansionMatch -Text $Text -Index $Index
     if ($null -ne $m -and [int]$m.Length -eq $Length -and [int]$m.WordStart -ge 0) {
       # THE WHOLE OPERAND MUST BE THE NUMBER, not merely contain one. A default word is
@@ -2399,9 +2424,9 @@ function Get-BracedVariableTokenLength {
   $s = [string]$Text
   $n = $s.Length
   if ($Index -lt 0 -or ($Index + 1) -ge $n) { return 0 }
-  if ([string]$s[$Index] -ne '$' -or [string]$s[$Index + 1] -ne '{') { return 0 }
-  if ($Ext -ne 'ps1' -and $Ext -ne 'sh') { return 0 }
-  if ($Ext -eq 'sh') {
+  if (-not [string]::Equals([string]$s[$Index], '$', [System.StringComparison]::Ordinal) -or -not [string]::Equals([string]$s[$Index + 1], '{', [System.StringComparison]::Ordinal)) { return 0 }
+  if (-not [string]::Equals($Ext, 'ps1', [System.StringComparison]::Ordinal) -and -not [string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) { return 0 }
+  if ([string]::Equals($Ext, 'sh', [System.StringComparison]::Ordinal)) {
     $shMatch = Get-ShellParameterExpansionMatch -Text $s -Index $Index
     if ($null -eq $shMatch) { return 0 }
     return [int]$shMatch.Length
@@ -2409,9 +2434,9 @@ function Get-BracedVariableTokenLength {
   $j = $Index + 2
   while ($j -lt $n) {
     $c = [string]$s[$j]
-    if ($c -eq '`') { $j += 2; continue }
-    if ($c -eq '$' -and ($j + 1) -lt $n -and [string]$s[$j + 1] -eq '{') { return 0 }
-    if ($c -eq '}') { return ($j - $Index + 1) }
+    if ([string]::Equals($c, '`', [System.StringComparison]::Ordinal)) { $j += 2; continue }
+    if ([string]::Equals($c, '$', [System.StringComparison]::Ordinal) -and ($j + 1) -lt $n -and [string]::Equals([string]$s[$j + 1], '{', [System.StringComparison]::Ordinal)) { return 0 }
+    if ([string]::Equals($c, '}', [System.StringComparison]::Ordinal)) { return ($j - $Index + 1) }
     $j++
   }
   return 0
@@ -2438,30 +2463,30 @@ function Get-RustQuoteTokenLength {
   $n = $Text.Length
   $c1 = if (($Index + 1) -lt $n) { $Text[$Index + 1] } else { [char]0 }
   # LIFETIME: `'` + identifier NOT followed by a closing quote.
-  if ([char]::IsLetter($c1) -or $c1 -eq '_') {
+  if ([char]::IsLetter($c1) -or [char]$c1 -ceq '_') {
     $k = $Index + 1
-    while ($k -lt $n -and ([char]::IsLetterOrDigit($Text[$k]) -or $Text[$k] -eq '_')) { $k++ }
-    if ($k -ge $n -or $Text[$k] -ne "'") { return $k - $Index }
+    while ($k -lt $n -and ([char]::IsLetterOrDigit($Text[$k]) -or [char]$Text[$k] -ceq '_')) { $k++ }
+    if ($k -ge $n -or [char]$Text[$k] -cne "'") { return $k - $Index }
   }
   # CHAR literal, plain body: one character that is neither a quote nor an escape.
-  if ($c1 -ne [char]0 -and $c1 -ne '"' -and $c1 -ne "'" -and $c1 -ne '\') {
-    if (($Index + 2) -lt $n -and $Text[$Index + 2] -eq "'") { return 3 }
+  if ([char]$c1 -cne [char]0 -and [char]$c1 -cne '"' -and [char]$c1 -cne "'" -and [char]$c1 -cne '\') {
+    if (($Index + 2) -lt $n -and [char]$Text[$Index + 2] -ceq "'") { return 3 }
     return 0
   }
   # CHAR literal, ESCAPED body -- bounded by the escape's own grammar.
-  if ($c1 -eq '\') {
+  if ([char]$c1 -ceq '\') {
     $c2 = if (($Index + 2) -lt $n) { $Text[$Index + 2] } else { [char]0 }
-    if ($c2 -eq '"') { return 0 }
-    if ($c2 -eq 'x') {
-      if (($Index + 5) -lt $n -and ([string]$Text.Substring($Index + 3, 2)) -match '^[0-9A-Fa-f]{2}$' -and $Text[$Index + 5] -eq "'") { return 6 }
+    if ([char]$c2 -ceq '"') { return 0 }
+    if ([char]$c2 -ceq 'x') {
+      if (($Index + 5) -lt $n -and ([string]$Text.Substring($Index + 3, 2)) -match '^[0-9A-Fa-f]{2}$' -and [char]$Text[$Index + 5] -ceq "'") { return 6 }
       return 0
     }
-    if ($c2 -eq 'u') {
+    if ([char]$c2 -ceq 'u') {
       $m = [regex]::Match($Text.Substring($Index + 2), "^u\{[0-9A-Fa-f_]{1,6}\}'")
       if ($m.Success) { return 2 + $m.Length }
       return 0
     }
-    if ($c2 -ne [char]0 -and ($Index + 3) -lt $n -and $Text[$Index + 3] -eq "'") { return 4 }
+    if ([char]$c2 -cne [char]0 -and ($Index + 3) -lt $n -and [char]$Text[$Index + 3] -ceq "'") { return 4 }
     return 0
   }
   return 0
@@ -2539,7 +2564,7 @@ function Get-SourceCodeNumbersByLine {
     $parts = Get-SourceLineParts -Line ([string]$r.Text) -Ext $Ext -InBlock $inBlock -InString $inStr -StrChar $strCh
     $inBlock = [bool]$parts.InBlock
     $inStr = [bool]$parts.InString; $strCh = [string]$parts.StrChar
-    $s = @{}
+    $s = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
     # STANDALONE numeric literals -- integer OR decimal, keyed by the NUMERIC
     # token ("223", "0.25"): a digit run adjacent to a word char or a QUOTE is
     # part of an identifier / string (`ICON_223_NAME`, `"223"`, `"v223"`,
@@ -2565,7 +2590,7 @@ function Get-SourceCodeNumbersByLine {
     # legal TOML and PowerShell; per-language token regexes shipped for that reason
     # and were removed on measuring that nothing consumes them.) So the value rule
     # stays Rust-only, and no language's text is reinterpreted through another's.
-    $numRx = if ($Ext -eq 'rs') {
+    $numRx = if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) {
       '(?<![\w."''$+{-])(0x[0-9a-fA-F_]+|0o[0-7_]+|0b[01_]+|\d[\d_]*(?:\.\d+)?)(?:[iu](?:8|16|32|64|128|size)|f32|f64)?(?![\w."''])'
     } else {
       '(?<![\w."''$+{-])(\d+(?:\.\d+)?)(?![\w."''])'
@@ -2610,10 +2635,10 @@ function Split-NulSeparatedList {
   # payload into a well-formed-looking one and resynchronizes the walk on the next field.
   param([string]$Text)
   if ([string]::IsNullOrEmpty($Text)) { return @{ Valid = $true; Paths = @(); Fields = @() } }
-  if ($Text[$Text.Length - 1] -ne [char]0) { return @{ Valid = $false; Paths = @(); Fields = @() } }
+  if ([char]$Text[$Text.Length - 1] -cne [char]0) { return @{ Valid = $false; Paths = @(); Fields = @() } }
   $parts = @($Text -split "`0")
   $fields = @($parts[0..($parts.Count - 2)])
-  return @{ Valid = $true; Paths = @($parts | Where-Object { $_ -ne '' }); Fields = $fields }
+  return @{ Valid = $true; Paths = @($parts | Where-Object { $_.Length -ne 0 }); Fields = $fields }
 }
 
 function ConvertTo-ProcessArgumentList {
@@ -2637,6 +2662,9 @@ function ConvertTo-ProcessArgumentList {
 # Start-Process on Windows PowerShell 5.1 rejects a raw process environment
 # carrying both Path and PATH. Preserve effective lookup order first,
 # append raw-only directories, then collapse to one verified canonical entry.
+# These PATH helpers equal the shared ones in scripts/review-common.ps1 but stay
+# local: the pre-commit hook runs this file as a standalone single-file trusted
+# copy, so it cannot dot-source a sibling. Keep the copies equivalent.
 function Get-PrependedToolPathParts {
   param([string[]]$CandidateDirs, [string]$CurrentPath)
   $parts = New-Object 'System.Collections.Generic.List[string]'
@@ -2703,7 +2731,7 @@ function Set-CanonicalProcessPathEnvironment {
   $finalKeys = @($final.Keys | Where-Object {
     [string]::Equals([string]$_, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)
   })
-  if ($finalKeys.Count -ne 1 -or [string]$finalKeys[0] -cne 'Path' -or
+  if ($finalKeys.Count -ne 1 -or -not [string]::Equals([string]$finalKeys[0], 'Path', [System.StringComparison]::Ordinal) -or
       -not [string]::Equals([string]$final['Path'], $Value, [System.StringComparison]::Ordinal)) {
     throw [System.InvalidOperationException]::new("canonical Path postcondition failed (raw spelling count=$($finalKeys.Count))")
   }
@@ -2797,7 +2825,7 @@ function Get-SpelledCardinalMap {
   # $script:SpelledCardinalAlternation's documented ascending-from-two ordering, so
   # the map itself never needs editing. "both" is the one entry with no position.
   $tokens = @($script:SpelledCardinalAlternation -split '\|')
-  $map = @{ both = '2' }
+  $map = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal); $map['both'] = '2'
   for ($k = 0; $k -lt $tokens.Count; $k++) { $map[$tokens[$k]] = [string]($k + 2) }
   return $map
 }
@@ -2883,62 +2911,62 @@ function Get-RustLexedCodeRecords {
     $chars = $s.ToCharArray()
     $i = 0
     while ($i -lt $chars.Length) {
-      if ($mode -eq 'block') {
-        if (($i + 1) -lt $chars.Length -and $chars[$i] -eq '/' -and $chars[$i + 1] -eq '*') {
+      if ([string]::Equals($mode, 'block', [System.StringComparison]::Ordinal)) {
+        if (($i + 1) -lt $chars.Length -and [char]$chars[$i] -ceq '/' -and [char]$chars[$i + 1] -ceq '*') {
           $blockDepth++; $chars[$i] = ' '; $chars[$i + 1] = ' '; $i += 2; continue
         }
-        if (($i + 1) -lt $chars.Length -and $chars[$i] -eq '*' -and $chars[$i + 1] -eq '/') {
+        if (($i + 1) -lt $chars.Length -and [char]$chars[$i] -ceq '*' -and [char]$chars[$i + 1] -ceq '/') {
           $blockDepth--; $chars[$i] = ' '; $chars[$i + 1] = ' '; $i += 2
           if ($blockDepth -le 0) { $blockDepth = 0; $mode = 'code' }
           continue
         }
         $chars[$i] = ' '; $i++; continue
       }
-      if ($mode -eq 'str') {
-        if ($chars[$i] -eq '\') {
+      if ([string]::Equals($mode, 'str', [System.StringComparison]::Ordinal)) {
+        if ([char]$chars[$i] -ceq '\') {
           $chars[$i] = ' '
           if ($i + 1 -lt $chars.Length) { $chars[$i + 1] = ' ' }
           $i += 2; continue
         }
-        if ($chars[$i] -eq '"') { $mode = 'code'; $i++; continue }
+        if ([char]$chars[$i] -ceq '"') { $mode = 'code'; $i++; continue }
         $chars[$i] = ' '; $i++; continue
       }
-      if ($mode -eq 'raw') {
-        if ($chars[$i] -eq '"') {
+      if ([string]::Equals($mode, 'raw', [System.StringComparison]::Ordinal)) {
+        if ([char]$chars[$i] -ceq '"') {
           $k = 0
-          while (($i + 1 + $k) -lt $chars.Length -and $chars[$i + 1 + $k] -eq '#' -and $k -lt $rawHashes) { $k++ }
+          while (($i + 1 + $k) -lt $chars.Length -and [char]$chars[$i + 1 + $k] -ceq '#' -and $k -lt $rawHashes) { $k++ }
           if ($k -eq $rawHashes) { $mode = 'code'; $i += 1 + $k; continue }
         }
         $chars[$i] = ' '; $i++; continue
       }
       $ch = $chars[$i]
-      if (($i + 1) -lt $chars.Length -and $ch -eq '/' -and $chars[$i + 1] -eq '/') {
+      if (($i + 1) -lt $chars.Length -and [char]$ch -ceq '/' -and [char]$chars[$i + 1] -ceq '/') {
         for ($k = $i; $k -lt $chars.Length; $k++) { $chars[$k] = ' ' }
         break
       }
-      if (($i + 1) -lt $chars.Length -and $ch -eq '/' -and $chars[$i + 1] -eq '*') {
+      if (($i + 1) -lt $chars.Length -and [char]$ch -ceq '/' -and [char]$chars[$i + 1] -ceq '*') {
         $mode = 'block'; $blockDepth = 1; $chars[$i] = ' '; $chars[$i + 1] = ' '; $i += 2; continue
       }
-      if ($ch -eq '"') { $mode = 'str'; $i++; continue }
-      if ($ch -eq 'r' -or $ch -eq 'b' -or $ch -eq 'c') {
+      if ([char]$ch -ceq '"') { $mode = 'str'; $i++; continue }
+      if ([char]$ch -ceq 'r' -or [char]$ch -ceq 'b' -or [char]$ch -ceq 'c') {
         # String prefixes: byte (`b`), C (`c`, Rust 2021) and raw (`r`), including
         # the `br`/`cr` combinations. A prefix counts only when it opens a token,
         # never as the tail of an identifier (`arr"` is not a raw string).
         $prevOk = ($i -eq 0) -or ($s[$i - 1] -notmatch '[A-Za-z0-9_]')
         if ($prevOk) {
           $j = $i
-          if ($chars[$j] -eq 'b' -or $chars[$j] -eq 'c') { $j++ }
-          if ($j -lt $chars.Length -and $chars[$j] -eq 'r') {
+          if ([char]$chars[$j] -ceq 'b' -or [char]$chars[$j] -ceq 'c') { $j++ }
+          if ($j -lt $chars.Length -and [char]$chars[$j] -ceq 'r') {
             $j++
             $h = 0
-            while ($j -lt $chars.Length -and $chars[$j] -eq '#') { $h++; $j++ }
-            if ($j -lt $chars.Length -and $chars[$j] -eq '"') { $mode = 'raw'; $rawHashes = $h; $i = $j + 1; continue }
-          } elseif ($j -gt $i -and $j -lt $chars.Length -and $chars[$j] -eq '"') {
+            while ($j -lt $chars.Length -and [char]$chars[$j] -ceq '#') { $h++; $j++ }
+            if ($j -lt $chars.Length -and [char]$chars[$j] -ceq '"') { $mode = 'raw'; $rawHashes = $h; $i = $j + 1; continue }
+          } elseif ($j -gt $i -and $j -lt $chars.Length -and [char]$chars[$j] -ceq '"') {
             $mode = 'str'; $i = $j + 1; continue
           }
         }
       }
-      if ($ch -eq "'") {
+      if ([char]$ch -ceq "'") {
         # Every Rust char-literal escape form, longest first: unicode `\u{...}`,
         # hex `\xNN`, then the single-character escapes and a bare character.
         $cm = [regex]::Match($s.Substring($i), "^'(?:\\u\{[0-9a-fA-F]{1,6}\}|\\x[0-9a-fA-F]{2}|\\.|[^\\'])'")
@@ -2992,7 +3020,7 @@ function Test-TokenEndsExpression {
   # -- not `break` -- immediately before the angle.
   param([string]$Text, [int]$Index)
   $c = $Text[$Index]
-  if ([char]::IsLetterOrDigit($c) -or $c -eq '_') {
+  if ([char]::IsLetterOrDigit($c) -or [char]$c -ceq '_') {
     # MID-identifier there is no token yet, so no keyword judgement is possible and the
     # name simply continues; the real answer arrives at the identifier's last character.
     $word = Get-IdentifierEndingAt -Text $Text -Index $Index
@@ -3002,12 +3030,12 @@ function Test-TokenEndsExpression {
     # before the angle. The lexer blanks char-literal CONTENT, so the only identifier
     # a bare `'` can precede here is a lifetime.
     $wordStart = $Index - $word.Length + 1
-    if ($wordStart -gt 0 -and $Text[$wordStart - 1] -eq "'") { return $false }
+    if ($wordStart -gt 0 -and [char]$Text[$wordStart - 1] -ceq "'") { return $false }
     return (-not ($word -cmatch '^(?:as|return|break|if|else|match|in|where)$'))
   }
-  if ($c -eq ')' -or $c -eq ']' -or $c -eq '}') { return $true }
-  if ($c -eq '"' -or $c -eq "'") { return $true }
-  if ($c -eq '?') { return $true }
+  if ([char]$c -ceq ')' -or [char]$c -ceq ']' -or [char]$c -ceq '}') { return $true }
+  if ([char]$c -ceq '"' -or [char]$c -ceq "'") { return $true }
+  if ([char]$c -ceq '?') { return $true }
   return $false
 }
 
@@ -3022,15 +3050,15 @@ function Get-IdentifierEndingAt {
   # Shared so the token tests and the type-context tracker read the same tokens.
   param([string]$Text, [int]$Index)
   $c = $Text[$Index]
-  if (-not ([char]::IsLetterOrDigit($c) -or $c -eq '_')) { return '' }
+  if (-not ([char]::IsLetterOrDigit($c) -or [char]$c -ceq '_')) { return '' }
   if (($Index + 1) -lt $Text.Length) {
     $nx = $Text[$Index + 1]
-    if ([char]::IsLetterOrDigit($nx) -or $nx -eq '_') { return '' }
+    if ([char]::IsLetterOrDigit($nx) -or [char]$nx -ceq '_') { return '' }
   }
   $start = $Index
   while ($start -gt 0) {
     $p = $Text[$start - 1]
-    if ([char]::IsLetterOrDigit($p) -or $p -eq '_') { $start-- } else { break }
+    if ([char]::IsLetterOrDigit($p) -or [char]$p -ceq '_') { $start-- } else { break }
   }
   return $Text.Substring($start, $Index - $start + 1)
 }
@@ -3048,11 +3076,11 @@ function Get-AngleOperatorLength {
   # (Codex BLOCKER.)
   param([string]$Text, [int]$Index)
   $c = $Text[$Index]
-  if ($c -ne '<' -and $c -ne '>') { return 0 }
+  if ([char]$c -cne '<' -and [char]$c -cne '>') { return 0 }
   $n1 = if (($Index + 1) -lt $Text.Length) { $Text[$Index + 1] } else { [char]0 }
   $n2 = if (($Index + 2) -lt $Text.Length) { $Text[$Index + 2] } else { [char]0 }
-  if ($n1 -eq $c -and $n2 -eq '=') { return 3 }
-  if ($n1 -eq $c -or $n1 -eq '=') { return 2 }
+  if ([char]$n1 -ceq [char]$c -and [char]$n2 -ceq '=') { return 3 }
+  if ([char]$n1 -ceq [char]$c -or [char]$n1 -ceq '=') { return 2 }
   return 1
 }
 
@@ -3081,19 +3109,19 @@ function Get-TypeContextDisposition {
   if ([char]::IsWhiteSpace($c)) { return 'continue' }
   # Identifiers carry every type keyword (`const`, `mut`, `dyn`, `impl`, `fn`) and an
   # array length; `'` opens a lifetime.
-  if ([char]::IsLetterOrDigit($c) -or $c -eq '_' -or $c -eq "'") { return 'continue' }
-  if ($c -eq '&') { if ($n -eq '&') { return 'end' } return 'continue' }
-  if ($c -eq '|') { if ($n -eq '|') { return 'end' } return 'unknown' }
-  if ($c -eq '=') { if ($n -eq '=') { return 'end' } return 'unknown' }
-  if ($c -eq '!') { if ($n -eq '=') { return 'end' } return 'unknown' }
-  if ($c -eq '-') { if ($n -eq '>') { return 'continue' } return 'unknown' }
-  if ($c -eq ',') { if ($AtEntryDepth) { return 'end' } return 'continue' }
-  if ($c -eq ';') { if ($AtEntryDepth) { return 'unknown' } return 'continue' }
+  if ([char]::IsLetterOrDigit($c) -or [char]$c -ceq '_' -or [char]$c -ceq "'") { return 'continue' }
+  if ([char]$c -ceq '&') { if ([char]$n -ceq '&') { return 'end' } return 'continue' }
+  if ([char]$c -ceq '|') { if ([char]$n -ceq '|') { return 'end' } return 'unknown' }
+  if ([char]$c -ceq '=') { if ([char]$n -ceq '=') { return 'end' } return 'unknown' }
+  if ([char]$c -ceq '!') { if ([char]$n -ceq '=') { return 'end' } return 'unknown' }
+  if ([char]$c -ceq '-') { if ([char]$n -ceq '>') { return 'continue' } return 'unknown' }
+  if ([char]$c -ceq ',') { if ($AtEntryDepth) { return 'end' } return 'continue' }
+  if ([char]$c -ceq ';') { if ($AtEntryDepth) { return 'unknown' } return 'continue' }
   # Path separator, pointer sigil, trait-bound `+`, and the delimiters a type nests:
   # fn-pointer argument lists, array/slice brackets, generic angles.
-  if ($c -eq ':' -or $c -eq '*' -or $c -eq '+' -or
-      $c -eq '(' -or $c -eq ')' -or $c -eq '[' -or $c -eq ']' -or
-      $c -eq '<' -or $c -eq '>') { return 'continue' }
+  if ([char]$c -ceq ':' -or [char]$c -ceq '*' -or [char]$c -ceq '+' -or
+      [char]$c -ceq '(' -or [char]$c -ceq ')' -or [char]$c -ceq '[' -or [char]$c -ceq ']' -or
+      [char]$c -ceq '<' -or [char]$c -ceq '>') { return 'continue' }
   return 'unknown'
 }
 
@@ -3136,11 +3164,11 @@ function Get-OpenerCloser {
   # turbofish, which the position rule decides without naming either shape.
   param([string]$Text, [int]$Index, [char]$InnermostCloser, [bool]$PrevEndsExpression, [bool]$InTypeContext = $false)
   $c = $Text[$Index]
-  if ($c -eq '(') { return [char]')' }
-  if ($c -eq '[') { return [char]']' }
-  if ($c -eq '{') { return [char]'}' }
-  if ($c -ne '<') { return [char]0 }
-  if ($InnermostCloser -eq [char]'>') { return [char]'>' }
+  if ([char]$c -ceq '(') { return [char]')' }
+  if ([char]$c -ceq '[') { return [char]']' }
+  if ([char]$c -ceq '{') { return [char]'}' }
+  if ([char]$c -cne '<') { return [char]0 }
+  if ([char]$InnermostCloser -ceq '>') { return [char]'>' }
   if ($InTypeContext) { return [char]'>' }
   if (-not $PrevEndsExpression) { return [char]'>' }
   return [char]0
@@ -3149,11 +3177,11 @@ function Get-OpenerCloser {
 function Test-IsGenericClose {
   # Does the `>` at $Index close an open generic, rather than act as an operator?
   param([string]$Text, [int]$Index, [char]$InnermostCloser)
-  if ($InnermostCloser -ne [char]'>') { return $false }
+  if ([char]$InnermostCloser -cne '>') { return $false }
   # `->` and `=>` carry a `>` that closes nothing, and both occur INSIDE generics
   # (`Box<dyn Fn(u8) -> u8>`, a closure's match arm); `>=` is a comparison.
-  if ($Index -gt 0 -and ($Text[$Index - 1] -eq '-' -or $Text[$Index - 1] -eq '=')) { return $false }
-  if (($Index + 1) -lt $Text.Length -and $Text[$Index + 1] -eq '=') { return $false }
+  if ($Index -gt 0 -and ([char]$Text[$Index - 1] -ceq '-' -or [char]$Text[$Index - 1] -ceq '=')) { return $false }
+  if (($Index + 1) -lt $Text.Length -and [char]$Text[$Index + 1] -ceq '=') { return $false }
   return $true
 }
 
@@ -3219,27 +3247,27 @@ function Get-BalancedCloseResult {
     $top = if ($expect.Count -gt 0) { $expect.Peek() } else { [char]0 }
     if (-not $DelimitersOnly -and $typeCtxDepth -ge 0) {
       $disp = Get-TypeContextDisposition -Text $Text -Index $i -AtEntryDepth ($expect.Count -le $typeCtxDepth)
-      if ($disp -eq 'unknown') { return @{ Close = -1; Reason = 'unsupported-type-token'; GaveUpAt = $i } }
-      if ($disp -eq 'end') { $typeCtxDepth = -1 }
+      if ([string]::Equals($disp, 'unknown', [System.StringComparison]::Ordinal)) { return @{ Close = -1; Reason = 'unsupported-type-token'; GaveUpAt = $i } }
+      if ([string]::Equals($disp, 'end', [System.StringComparison]::Ordinal)) { $typeCtxDepth = -1 }
     }
     $opens = if ($DelimitersOnly) {
-      switch ($c) { '(' { [char]')' } '[' { [char]']' } '{' { [char]'}' } default { [char]0 } }
+      switch ([int]$c) { 0x28 { [char]')' } 0x5B { [char]']' } 0x7B { [char]'}' } default { [char]0 } }
     } else {
       Get-OpenerCloser -Text $Text -Index $i -InnermostCloser $top -PrevEndsExpression $prevEndsExpr -InTypeContext ($typeCtxDepth -ge 0)
     }
-    if ($opens -ne [char]0) {
+    if ([char]$opens -cne [char]0) {
       $expect.Push($opens); $prevEndsExpr = $false; $i++; continue
     }
-    if (-not $DelimitersOnly -and $c -eq '>' -and (Test-IsGenericClose -Text $Text -Index $i -InnermostCloser $top)) {
+    if (-not $DelimitersOnly -and [char]$c -ceq '>' -and (Test-IsGenericClose -Text $Text -Index $i -InnermostCloser $top)) {
       [void]$expect.Pop()
       $prevEndsExpr = $true
       if ($typeCtxDepth -ge 0 -and $expect.Count -lt $typeCtxDepth) { $typeCtxDepth = -1 }
       if ($expect.Count -eq 0) { return @{ Close = $i; Reason = 'balanced'; GaveUpAt = -1 } }
       $i++; continue
     }
-    if ($c -eq ')' -or $c -eq ']' -or $c -eq '}') {
+    if ([char]$c -ceq ')' -or [char]$c -ceq ']' -or [char]$c -ceq '}') {
       if ($expect.Count -eq 0) { return @{ Close = -1; Reason = 'unbalanced'; GaveUpAt = $i } }
-      if ($expect.Pop() -ne $c) { return @{ Close = -1; Reason = 'unbalanced'; GaveUpAt = $i } }
+      if ([char]$expect.Pop() -cne [char]$c) { return @{ Close = -1; Reason = 'unbalanced'; GaveUpAt = $i } }
       $prevEndsExpr = $true
       if ($typeCtxDepth -ge 0 -and $expect.Count -lt $typeCtxDepth) { $typeCtxDepth = -1 }
       if ($expect.Count -eq 0) { return @{ Close = $i; Reason = 'balanced'; GaveUpAt = -1 } }
@@ -3256,7 +3284,7 @@ function Get-BalancedCloseResult {
         # The OUTERMOST cast owns the state: a nested `as` (a qualified path's own
         # `<T as Trait>`) must not re-base the entry depth, or the outer target ends at
         # the inner angle's close.
-        if ($typeCtxDepth -lt 0 -and (Get-IdentifierEndingAt -Text $Text -Index $i) -ceq 'as') { $typeCtxDepth = $expect.Count }
+        if ($typeCtxDepth -lt 0 -and [string]::Equals((Get-IdentifierEndingAt -Text $Text -Index $i), 'as', [System.StringComparison]::Ordinal)) { $typeCtxDepth = $expect.Count }
       }
     }
     $i++
@@ -3291,25 +3319,25 @@ function Split-TopLevelOn {
     $top = if ($expect.Count -gt 0) { $expect.Peek() } else { [char]0 }
     if ($typeCtxDepth -ge 0) {
       $disp = Get-TypeContextDisposition -Text $Text -Index $i -AtEntryDepth ($expect.Count -le $typeCtxDepth)
-      if ($disp -eq 'unknown') { return ,@([string]$Text) }
-      if ($disp -eq 'end') { $typeCtxDepth = -1 }
+      if ([string]::Equals($disp, 'unknown', [System.StringComparison]::Ordinal)) { return ,@([string]$Text) }
+      if ([string]::Equals($disp, 'end', [System.StringComparison]::Ordinal)) { $typeCtxDepth = -1 }
     }
     $opens = Get-OpenerCloser -Text $Text -Index $i -InnermostCloser $top -PrevEndsExpression $prevEndsExpr -InTypeContext ($typeCtxDepth -ge 0)
-    if ($opens -ne [char]0) {
+    if ([char]$opens -cne [char]0) {
       $expect.Push($opens); $prevEndsExpr = $false; $i++; continue
     }
-    if ($c -eq '>' -and (Test-IsGenericClose -Text $Text -Index $i -InnermostCloser $top)) {
+    if ([char]$c -ceq '>' -and (Test-IsGenericClose -Text $Text -Index $i -InnermostCloser $top)) {
       [void]$expect.Pop(); $prevEndsExpr = $true
       if ($typeCtxDepth -ge 0 -and $expect.Count -lt $typeCtxDepth) { $typeCtxDepth = -1 }
       $i++; continue
     }
-    if ($c -eq ')' -or $c -eq ']' -or $c -eq '}') {
-      if ($expect.Count -eq 0 -or $expect.Pop() -ne $c) { return ,@([string]$Text) }
+    if ([char]$c -ceq ')' -or [char]$c -ceq ']' -or [char]$c -ceq '}') {
+      if ($expect.Count -eq 0 -or [char]$expect.Pop() -cne [char]$c) { return ,@([string]$Text) }
       $prevEndsExpr = $true
       if ($typeCtxDepth -ge 0 -and $expect.Count -lt $typeCtxDepth) { $typeCtxDepth = -1 }
       $i++; continue
     }
-    if ($expect.Count -eq 0 -and ($i + $tl) -le $n -and $Text.Substring($i, $tl) -ceq $Token) {
+    if ($expect.Count -eq 0 -and ($i + $tl) -le $n -and [string]::CompareOrdinal($Text, $i, $Token, 0, $tl) -eq 0) {
       $flankOk = $true
       if ($RejectFlank) {
         $prev = if ($i -gt 0) { [string]$Text[$i - 1] } else { '' }
@@ -3330,7 +3358,7 @@ function Split-TopLevelOn {
     }
     if (-not [char]::IsWhiteSpace($c)) {
       $prevEndsExpr = Test-TokenEndsExpression -Text $Text -Index $i
-      if ($typeCtxDepth -lt 0 -and (Get-IdentifierEndingAt -Text $Text -Index $i) -ceq 'as') { $typeCtxDepth = $expect.Count }
+      if ($typeCtxDepth -lt 0 -and [string]::Equals((Get-IdentifierEndingAt -Text $Text -Index $i), 'as', [System.StringComparison]::Ordinal)) { $typeCtxDepth = $expect.Count }
     }
     $i++
   }
@@ -3345,7 +3373,7 @@ function Remove-RedundantGrouping {
   # trimmed text is left alone, so `(a) == (b)` survives.
   param([string]$Text)
   $t = ([string]$Text).Trim()
-  while ($t.Length -ge 2 -and $t[0] -eq '(' -and (Get-BalancedCloseIndex -Text $t -OpenIndex 0 -Limit $t.Length) -eq ($t.Length - 1)) {
+  while ($t.Length -ge 2 -and [char]$t[0] -ceq '(' -and (Get-BalancedCloseIndex -Text $t -OpenIndex 0 -Limit $t.Length) -eq ($t.Length - 1)) {
     $t = $t.Substring(1, $t.Length - 2).Trim()
   }
   return $t
@@ -3429,16 +3457,16 @@ function Test-IsBareTypeText {
   if ($t -match '\+' -and $t -cnotmatch '^(?:&\s*)*(?:dyn|impl)\b') { return $false }
   for ($i = 0; $i -lt $t.Length; $i++) {
     $c = $t[$i]
-    if ($c -ne '&' -and $c -ne '*') { continue }
+    if ([char]$c -cne '&' -and [char]$c -cne '*') { continue }
     $j = $i - 1
     while ($j -ge 0 -and [char]::IsWhiteSpace($t[$j])) { $j-- }
     if ($j -lt 0) { continue }                                  # start of the type
     $p = $t[$j]
-    if ($p -eq '&' -or $p -eq '*' -or $p -eq '(' -or $p -eq '[' -or
-        $p -eq '<' -or $p -eq ',' -or $p -eq ':') { continue }   # still prefix position
-    if ($p -eq '>' -and $j -ge 1 -and $t[$j - 1] -eq '-') { continue }   # fn-pointer `->`
+    if ([char]$p -ceq '&' -or [char]$p -ceq '*' -or [char]$p -ceq '(' -or [char]$p -ceq '[' -or
+        [char]$p -ceq '<' -or [char]$p -ceq ',' -or [char]$p -ceq ':') { continue }   # still prefix position
+    if ([char]$p -ceq '>' -and $j -ge 1 -and [char]$t[$j - 1] -ceq '-') { continue }   # fn-pointer `->`
     $kw = Get-IdentifierEndingAt -Text $t -Index $j
-    if ($kw -ceq 'mut' -or $kw -ceq 'const' -or $kw -ceq 'dyn' -or $kw -ceq 'impl') { continue }
+    if ([Array]::IndexOf([string[]]@('mut', 'const', 'dyn', 'impl'), [string]$kw) -ge 0) { continue }
     return $false                                               # a type name precedes it: an operator
   }
   return $true
@@ -3628,13 +3656,13 @@ function Get-MagicCountAssertFindings {
     # 'exhausted' with $scanEnd short of the text. An early mismatch in a long file
     # reaches neither, and calling it cap exhaustion sent the reader hunting a
     # truncation that never happened.
-    $capFired = (($scanRes.Reason -eq 'exhausted') -and ($scanEnd -lt $flat.Length))
+    $capFired = ([string]::Equals($scanRes.Reason, 'exhausted', [System.StringComparison]::Ordinal) -and ($scanEnd -lt $flat.Length))
     # An unreadable TYPE token leaves the ANGLES in doubt and nothing else, so the
     # macro's own delimiter can still be proven by a delimiter-only pass. Attributing
     # the report to that proven region is the difference between naming one assertion
     # and covering every line to EOF. Only when the delimiters ALSO fail to close is
     # the region genuinely unbounded.
-    $boundClose = if ($scanRes.Reason -eq 'unsupported-type-token') {
+    $boundClose = if ([string]::Equals($scanRes.Reason, 'unsupported-type-token', [System.StringComparison]::Ordinal)) {
       [int](Get-BalancedCloseResult -Text $flat -OpenIndex $openIdx -Limit $scanEnd -DelimitersOnly).Close
     } else { -1 }
     $startLine = [int]$Records[(Get-RecordIndexForOffset -Starts $starts -Offset $site.Index)].Line
@@ -3672,16 +3700,16 @@ function Get-MagicCountAssertFindings {
     }
     $span = ($flat.Substring($site.Index, ($spanEnd - $site.Index) + 1) -replace '\s+', ' ').Trim()
     if ($span.Length -gt 90) { $span = $span.Substring(0, 87) + '...' }
-    $isEq = $site.Groups['name'].Value.EndsWith('_eq')
+    $isEq = $site.Groups['name'].Value.EndsWith('_eq', [System.StringComparison]::Ordinal)
     $siteFindings = @()
     $unparsedReason = $null
     $comparisons = @()
     if ($close -lt 0) {
-      $unparsedReason = if ($scanRes.Reason -eq 'unsupported-type-token') {
+      $unparsedReason = if ([string]::Equals($scanRes.Reason, 'unsupported-type-token', [System.StringComparison]::Ordinal)) {
         'X25 a cast target holds a token this type grammar cannot read'
       } elseif ($capFired) {
         'X3 the region reached the scan cap before its brackets closed'
-      } elseif ($scanRes.Reason -eq 'exhausted') {
+      } elseif ([string]::Equals($scanRes.Reason, 'exhausted', [System.StringComparison]::Ordinal)) {
         'X4 the region brackets never balanced (the text ended first)'
       } else {
         'X4 the region brackets never balanced (a closer mismatched)'
@@ -3744,7 +3772,7 @@ function Get-MagicCountAssertFindings {
       if (-not $m.Success) { $unparsedReason = 'X24 the comparand carries an integer literal but is not one'; continue }
       $lit = ConvertFrom-RustIntLiteral -Literal $m.Groups['lit'].Value
       if ($null -eq $lit) { $unparsedReason = 'X24 the comparand carries an integer literal but is not one'; continue }
-      if ($lit -eq '0' -or $lit -eq '1') { continue }                                           # X22
+      if ([string]::Equals($lit, '0', [System.StringComparison]::Ordinal) -or [string]::Equals($lit, '1', [System.StringComparison]::Ordinal)) { continue }                                           # X22
       # The comparison, not the whole invocation, is the Match: two findings from one
       # site would otherwise be indistinguishable in the report.
       $cmp = (("$(if ($aCard) { $a } else { $b }) == $($m.Groups['lit'].Value)") -replace '\s+', ' ').Trim()
@@ -3776,6 +3804,216 @@ function Get-MagicCountAssertFindings {
   return $out
 }
 
+function Get-CultureComparisonFindings {
+  # ADVISORY. A likely culture-sensitive string comparison on an ADDED line of a staged
+  # PowerShell file, pointed out for the author; exact comparison is kept by authoring
+  # (docs/authoring-invariant-checklist.md item 11) and review, not by this rule. It
+  # was an ERROR rule during 2.6.0 development and two review rounds showed why it
+  # cannot be one: the syntax does not give an operand's run-time type, so a static
+  # reading both misses forms (lowercase method names, module-qualified cmdlets,
+  # receivers of unstated type) and refuses valid code (a List[string] IndexOf, a
+  # disabled -Unique:$false). Do not make it blocking again.
+  #
+  # Windows PowerShell 5.1 compares strings by CULTURE in the
+  # comparison operators, ValidateSet, the Unique switch and cmdlet, and the String
+  # methods named below when no StringComparison is passed. Culture collation gives
+  # zero-weight characters such as U+00AD no value, so a comparison over outside text
+  # can call two different strings equal. Only ADDED lines are read: untouched legacy
+  # sites stay out of scope until a commit edits them; a construct counts as added
+  # when any line of its extent is.
+  #
+  # The file is read with PowerShell's own parser, so strings, here-strings, comments
+  # and calls that wrap across lines are what PowerShell takes them to be. A regex over
+  # physical lines read literal text as code and judged a wrapped call by its first
+  # line; do not go back to one. A file the parser reports errors in gets one finding
+  # saying the rule did not read it.
+  #
+  # An operator's LEFT operand decides the comparison: PowerShell converts the right
+  # operand to the left one's type, so `$s -ceq [char]'x'` with a string $s is a culture
+  # string comparison, and `[char]$s[$i] -ceq 'x'` compares characters. For -contains
+  # the deciding values are the left collection's elements, for -in the right one's.
+  # The syntax fixes an operand's type only for literals and casts
+  # (Get-CultureOperandKind), so a comparison that may be a string one -- a -c/-i
+  # prefixed operator, or a quoted, [string] or [char] operand -- is reported unless its
+  # deciding operand is a [char], other numeric cast or a number; casting the left
+  # operand states the type. -clike/-cnotlike match character by character and are not reported. Two
+  # operands of unstated type under a plain operator, switch, @{} keys, Sort-Object and
+  # Group-Object are left to review by hand.
+  param([object[]]$Records, [hashtable]$AddedSet)
+  $out = @()
+  if (-not $Records -or -not $AddedSet -or $AddedSet.Count -eq 0) { return $out }
+  $text = (@($Records | ForEach-Object { [string]$_.Text })) -join "`n"
+  $tokens = $null; $parseErrors = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$parseErrors)
+  if (@($parseErrors).Count -gt 0) {
+    $first = @($parseErrors)[0]
+    return @(@{
+      Class = 'CULTURE-COMPARE'
+      Tier  = 'ADVISORY'
+      Line  = [int]$first.Extent.StartLineNumber
+      Match = [string]$first.Message
+      Hint  = 'the PowerShell parser reported an error in this file, so CULTURE-COMPARE did not read it -- check its added comparisons by hand'
+    })
+  }
+  $touchesAdded = {
+    param([int]$From, [int]$To)
+    for ($n = $From; $n -le $To; $n++) { if ($AddedSet.ContainsKey($n)) { return $true } }
+    return $false
+  }
+  $opRole = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+  foreach ($k in @('eq', 'ne')) { $opRole["I$k"] = 'equal'; $opRole["C$k"] = 'equal' }
+  foreach ($k in @('gt', 'ge', 'lt', 'le')) { $opRole["I$k"] = 'order'; $opRole["C$k"] = 'order' }
+  foreach ($k in @('contains', 'notcontains')) { $opRole["I$k"] = 'contains'; $opRole["C$k"] = 'contains' }
+  foreach ($k in @('in', 'notin')) { $opRole["I$k"] = 'in'; $opRole["C$k"] = 'in' }
+  foreach ($k in @('like', 'notlike')) { $opRole["I$k"] = 'like' }
+  $roleHint = @{
+    equal    = 'compares strings by culture, which ignores characters such as U+00AD: use [string]::Equals(a, b, [System.StringComparison]::Ordinal) or OrdinalIgnoreCase; to compare characters or numbers, cast the LEFT operand ([char]$s[$i] -ceq ''x''), whose type decides the comparison'
+    order    = 'orders strings by culture: compare [string]::CompareOrdinal(a, b) with 0, or [string]::Compare(a, b, [System.StringComparison]::OrdinalIgnoreCase); to order characters or numbers, cast the LEFT operand'
+    contains = 'membership compares strings by culture: use [System.Linq.Enumerable]::Contains([string[]]set, x, [System.StringComparer]::Ordinal) or OrdinalIgnoreCase, or a HashSet[string] with that comparer'
+    in       = 'membership compares strings by culture: use [System.Linq.Enumerable]::Contains([string[]]set, x, [System.StringComparer]::Ordinal) or OrdinalIgnoreCase, or a HashSet[string] with that comparer'
+    like     = 'case-insensitive wildcard matching folds letter case by culture (U+212A matches k): use -clike, which matches characters exactly, with each accepted letter case written in the pattern, or StartsWith/EndsWith with [System.StringComparison]::OrdinalIgnoreCase'
+  }
+  $stringMethods = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($k in @('StartsWith', 'EndsWith', 'IndexOf', 'LastIndexOf')) { [void]$stringMethods.Add($k) }
+  $uniqueCommands = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($k in @('Sort-Object', 'sort', 'Select-Object', 'select')) { [void]$uniqueCommands.Add($k) }
+  $nodes = $ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.BinaryExpressionAst] -or
+    $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+    $n -is [System.Management.Automation.Language.AttributeAst] -or
+    $n -is [System.Management.Automation.Language.CommandAst]
+  }, $true)
+  foreach ($node in $nodes) {
+    if ($node -is [System.Management.Automation.Language.BinaryExpressionAst]) {
+      $kindName = $node.Operator.ToString()
+      $role = $null
+      if (-not $opRole.TryGetValue($kindName, [ref]$role)) { continue }
+      if (-not (& $touchesAdded $node.Extent.StartLineNumber $node.Extent.EndLineNumber)) { continue }
+      $opText = [string]$node.ErrorPosition.Text
+      $prefixed = $kindName.StartsWith('C', [System.StringComparison]::Ordinal) -or $opText.Length -gt $kindName.Length
+      $decidingAst = if ([string]::Equals($role, 'in', [System.StringComparison]::Ordinal)) { $node.Right } else { $node.Left }
+      $otherAst = if ([string]::Equals($role, 'in', [System.StringComparison]::Ordinal)) { $node.Left } else { $node.Right }
+      $deciding = Get-CultureOperandKind -Ast $decidingAst
+      $other = Get-CultureOperandKind -Ast $otherAst
+      $mayBeString = $prefixed -or [string]::Equals($deciding, 'String', [System.StringComparison]::Ordinal) -or
+        [string]::Equals($other, 'String', [System.StringComparison]::Ordinal) -or [string]::Equals($other, 'Char', [System.StringComparison]::Ordinal)
+      if (-not $mayBeString) { continue }
+      $typed = [string]::Equals($deciding, 'Char', [System.StringComparison]::Ordinal) -or [string]::Equals($deciding, 'Scalar', [System.StringComparison]::Ordinal)
+      if ($typed -and -not [string]::Equals($role, 'like', [System.StringComparison]::Ordinal)) { continue }
+      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$node.ErrorPosition.StartLineNumber; Match = $opText; Hint = "$opText $($roleHint[$role])" }
+    } elseif ($node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+      if ($node.Static -or $node.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+      $method = [string]$node.Member.Value
+      if (-not $stringMethods.Contains($method)) { continue }
+      if (-not (& $touchesAdded $node.Extent.StartLineNumber $node.Extent.EndLineNumber)) { continue }
+      $argList = if ($null -eq $node.Arguments) { @() } else { @($node.Arguments) }
+      # StartsWith/EndsWith take a string first on .NET Framework; IndexOf takes the
+      # culture string overload only for a string first argument, the [char] one
+      # otherwise, and an operand of unstated type is left to review by hand. Method
+      # names bind in any letter case.
+      $stringOverload = $method.EndsWith('With', [System.StringComparison]::OrdinalIgnoreCase) -or
+        ($argList.Count -gt 0 -and [string]::Equals((Get-CultureOperandKind -Ast $argList[0]), 'String', [System.StringComparison]::Ordinal))
+      if (-not $stringOverload) { continue }
+      if ($argList.Count -ge 2 -and (Test-OrdinalComparisonArgument -Ast $argList[$argList.Count - 1])) { continue }
+      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$node.Member.Extent.StartLineNumber; Match = ".$method("
+        Hint = ".$method on a string compares by culture unless its last argument is [System.StringComparison]::Ordinal or OrdinalIgnoreCase, written out; an IndexOf of one character can use the [char] overload, and a collection's IndexOf (List[string]) is not a culture comparison" }
+    } elseif ($node -is [System.Management.Automation.Language.AttributeAst]) {
+      if (-not [object]::Equals($node.TypeName.GetReflectionAttributeType(), [System.Management.Automation.ValidateSetAttribute])) { continue }
+      if (-not (& $touchesAdded $node.Extent.StartLineNumber $node.Extent.EndLineNumber)) { continue }
+      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$node.Extent.StartLineNumber; Match = 'ValidateSet'
+        Hint = 'ValidateSet matches by culture: use [ValidatePattern(''\A(?:a|b)\z'', Options = ''None'')]' }
+    } else {
+      $command = [string]$node.GetCommandName()
+      $qualifier = $command.LastIndexOf([char]'\')
+      if ($qualifier -ge 0) { $command = $command.Substring($qualifier + 1) }
+      if ([string]::Equals($command, 'Get-Unique', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($command, 'gu', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $at = $node.CommandElements[0].Extent
+      } elseif ($uniqueCommands.Contains($command)) {
+        # Parameter names bind by any unambiguous prefix; on the covered cmdlets every
+        # prefix of Unique names only Unique. -Unique:$false de-duplicates nothing.
+        $param = @($node.CommandElements | Where-Object {
+          $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName.Length -gt 0 -and
+          'Unique'.StartsWith($_.ParameterName, [System.StringComparison]::OrdinalIgnoreCase) -and
+          -not ($_.Argument -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                [string]::Equals($_.Argument.VariablePath.UserPath, 'false', [System.StringComparison]::OrdinalIgnoreCase)) })
+        if ($param.Count -eq 0) { continue }
+        $at = $param[0].Extent
+      } else { continue }
+      if (-not (& $touchesAdded $node.Extent.StartLineNumber $node.Extent.EndLineNumber)) { continue }
+      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$at.StartLineNumber; Match = [string]$at.Text
+        Hint = 'the Unique switch and the Unique cmdlet compare by culture: de-duplicate through a HashSet[string] built with [System.StringComparer]::Ordinal' }
+    }
+  }
+  return $out
+}
+
+function Get-CultureOperandKind {
+  # The comparison type an operand fixes by its syntax alone: 'String' for a quoted or
+  # expandable string or a [string] cast, 'Char' for a [char] cast, 'Scalar' for another
+  # numeric cast or a number ([decimal] is numeric but not primitive), 'Unknown'
+  # otherwise. A collection -- an array literal,
+  # @() or parentheses around one -- takes its elements' kind: String if any element is,
+  # Char or Scalar only when every element is typed. Variables, members, calls and
+  # indexing are Unknown: their type exists only at run time.
+  param($Ast)
+  while ($true) {
+    if ($Ast -is [System.Management.Automation.Language.ParenExpressionAst]) { $Ast = $Ast.Pipeline; continue }
+    if ($Ast -is [System.Management.Automation.Language.ArrayExpressionAst]) {
+      $statements = @($Ast.SubExpression.Statements)
+      if ($statements.Count -ne 1) { return 'Unknown' }
+      $Ast = $statements[0]; continue
+    }
+    if ($Ast -is [System.Management.Automation.Language.PipelineAst]) {
+      $elements = @($Ast.PipelineElements)
+      if ($elements.Count -ne 1 -or $elements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) { return 'Unknown' }
+      $Ast = $elements[0].Expression; continue
+    }
+    break
+  }
+  if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+      $Ast -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) { return 'String' }
+  if ($Ast -is [System.Management.Automation.Language.ConstantExpressionAst]) {
+    if ($null -ne $Ast.Value -and ($Ast.Value.GetType().IsPrimitive -or $Ast.Value -is [decimal])) { return 'Scalar' }
+    return 'Unknown'
+  }
+  if ($Ast -is [System.Management.Automation.Language.ConvertExpressionAst]) {
+    $type = $Ast.Type.TypeName.GetReflectionType()
+    if ([object]::Equals($type, [string])) { return 'String' }
+    if ([object]::Equals($type, [char])) { return 'Char' }
+    if ($null -ne $type -and ($type.IsPrimitive -or [object]::Equals($type, [decimal]))) { return 'Scalar' }
+    return 'Unknown'
+  }
+  if ($Ast -is [System.Management.Automation.Language.ArrayLiteralAst]) {
+    $kinds = @($Ast.Elements | ForEach-Object { Get-CultureOperandKind -Ast $_ })
+    if ([Array]::IndexOf([string[]]$kinds, 'String') -ge 0) { return 'String' }
+    if ([Array]::IndexOf([string[]]$kinds, 'Unknown') -ge 0) { return 'Unknown' }
+    if ([Array]::IndexOf([string[]]$kinds, 'Char') -ge 0) { return 'Char' }
+    return 'Scalar'
+  }
+  return 'Unknown'
+}
+
+function Test-OrdinalComparisonArgument {
+  # True only for `[System.StringComparison]::Ordinal` or `::OrdinalIgnoreCase` written
+  # out. The type resolves the way PowerShell resolves it (any letter case, `System.`
+  # optional), and member names bind in any letter case; parentheses around it keep its
+  # value. A variable or a culture member is not provably ordinal.
+  param($Ast)
+  while ($Ast -is [System.Management.Automation.Language.ParenExpressionAst]) {
+    $elements = @($Ast.Pipeline.PipelineElements)
+    if ($elements.Count -ne 1 -or $elements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) { return $false }
+    $Ast = $elements[0].Expression
+  }
+  if ($Ast -isnot [System.Management.Automation.Language.MemberExpressionAst] -or -not $Ast.Static) { return $false }
+  if ($Ast.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst]) { return $false }
+  if (-not [object]::Equals($Ast.Expression.TypeName.GetReflectionType(), [System.StringComparison])) { return $false }
+  if ($Ast.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { return $false }
+  $name = [string]$Ast.Member.Value
+  return ([string]::Equals($name, 'Ordinal', [System.StringComparison]::OrdinalIgnoreCase) -or
+          [string]::Equals($name, 'OrdinalIgnoreCase', [System.StringComparison]::OrdinalIgnoreCase))
+}
+
 function Get-StagedSourceFindings {
   # Staged per-source-file DECISION logic over the INDEPENDENT comment and code
   # surfaces of the same file:
@@ -3802,6 +4040,14 @@ function Get-StagedSourceFindings {
   $allRecsList = New-Object 'System.Collections.Generic.List[object]'
   for ($i = 0; $i -lt $lines.Count; $i++) { $allRecsList.Add(@{ Line = ($i + 1); Text = ($lines[$i] -replace "`r$", '') }) }
   $allRecs = $allRecsList.ToArray()
+  # CULTURE-COMPARE reads every added PowerShell line, code included, so it runs ahead of
+  # the count classes' added-comment gate below; .psm1 is outside the count classes'
+  # $script:SourceExtPattern and gets this rule alone.
+  $cultureFindings = @()
+  if ([Array]::IndexOf([string[]]@('ps1', 'psm1'), [string]$Ext) -ge 0) {
+    foreach ($f in (Get-CultureComparisonFindings -Records $allRecs -AddedSet $AddedSet)) { $f['File'] = $Path; $cultureFindings += $f }
+  }
+  if ([string]::Equals($Ext, 'psm1', [System.StringComparison]::Ordinal)) { return $cultureFindings }
   # SUPPORT FIRST, before anything derived from the split. The trust question has to
   # be answered by a scan that does NOT consult the split -- and it has to be answered
   # BEFORE `$hasAddedComments`, which does: an untrusted split can put an added COMMENT
@@ -3812,11 +4058,11 @@ function Get-StagedSourceFindings {
   # `.len()`/`.count()` mean something else in the other scanned extensions. A .rs
   # file therefore has scannable content whenever the commit adds ANY line (code or
   # comment); every other extension still needs added COMMENT lines.
-  $scanAsserts = ($Ext -eq 'rs')
+  $scanAsserts = [string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)
   $commentRecs = if ($support) { @() } else { @(Get-SourceCommentRecords -Records $allRecs -Ext $Ext) }
   $hasAddedComments = (@($commentRecs | Where-Object { $AddedSet.ContainsKey([int]$_.Line) }).Count -gt 0)
-  if (-not $support -and -not $hasAddedComments -and -not $scanAsserts) { return @() }
-  $out = @()
+  if (-not $support -and -not $hasAddedComments -and -not $scanAsserts) { return $cultureFindings }
+  $out = @($cultureFindings)
   # DEGRADE LOUDLY, PER FILE. A construct outside the supported grammar poisons the
   # comment/code split for every LATER record, so the count classes are dropped for
   # this file and one diagnostic says so. Scoped to this file and to those classes:
@@ -3912,16 +4158,16 @@ function Get-StagedSourceFindings {
           # calls three, but only Rust's grammar says so. Applying it to a shell or
           # TOML token would reinterpret text that has no such meaning there, so
           # those extensions match the decimal token as a string and nothing else.
-          if ($Ext -eq 'rs') {
+          if ([string]::Equals($Ext, 'rs', [System.StringComparison]::Ordinal)) {
             foreach ($tok in @($codeByLine[$ln].Keys)) {
-              if ((ConvertFrom-RustIntLiteral -Literal $tok) -eq $num) { $echoed = $true; break }
+              if ([string]::Equals((ConvertFrom-RustIntLiteral -Literal $tok), $num, [System.StringComparison]::Ordinal)) { $echoed = $true; break }
             }
           }
           if ($echoed) { break }
         }
         if ($echoed) { continue }
       }
-      if ($f.Class -eq 'INVENTORY') { $f['Tier'] = 'ADVISORY' }   # one tier softer than the .md ERROR
+      if ([string]::Equals($f.Class, 'INVENTORY', [System.StringComparison]::Ordinal)) { $f['Tier'] = 'ADVISORY' }   # one tier softer than the .md ERROR
       $f['File'] = $Path
       $out += $f
     }
@@ -3968,7 +4214,7 @@ function Get-AddedRecordsFromDiff {
   # set comes back empty, and the fail-loud guard aborts the whole run. Attributing
   # directly makes the header form irrelevant rather than something to decode.
   param([string]$DiffText, [string]$AttributeTo = '')
-  $byFile = @{}
+  $byFile = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal)
   if ([string]::IsNullOrEmpty($DiffText)) { return $byFile }
   $curFile = $null
   $newLine = 0
@@ -4001,12 +4247,12 @@ function Get-AddedRecordsFromDiff {
     }
     if ($null -eq $curFile) { continue }
     # Inside a hunk: classify by the FIRST char only (so `+++ b/...` content counts).
-    if ($line.StartsWith('+')) {
+    if ($line.StartsWith('+', [System.StringComparison]::Ordinal)) {
       $byFile[$curFile] += @{ Line = $newLine; Text = $line.Substring(1) }
       $newLine++
-    } elseif ($line.StartsWith('-')) {
+    } elseif ($line.StartsWith('-', [System.StringComparison]::Ordinal)) {
       # deleted line: does not advance the new-file counter
-    } elseif ($line.StartsWith('\')) {
+    } elseif ($line.StartsWith('\', [System.StringComparison]::Ordinal)) {
       # "\ No newline at end of file": ignore
     } else {
       # context line (rare at unified=0): advances new counter
@@ -4155,7 +4401,7 @@ function ConvertFrom-RawDiffFields {
     $meta = $rxMeta.Match($tok)
     if (-not $meta.Success) { return @{ Valid = $false; Records = @() } }
     $letter = $meta.Groups['status'].Value
-    $isPair = ($letter -eq 'C' -or $letter -eq 'R')
+    $isPair = ([string]::Equals($letter, 'C', [System.StringComparison]::Ordinal) -or [string]::Equals($letter, 'R', [System.StringComparison]::Ordinal))
     $hasScore = $meta.Groups['score'].Success
     # PRESENCE PER STATUS, not merely a requirement on C/R. Leaving the others
     # unconstrained let `A050` validate and enter add-specific scanning, since an
@@ -4192,11 +4438,11 @@ function Get-GitObjectKind {
   # comparing only zero-vs-nonzero, as this validator did, calls neither one.
   param([string]$Mode)
   switch ($Mode) {
-    '000000' { return 'absent' }
-    '100644' { return 'regular' }
-    '100755' { return 'regular' }
-    '120000' { return 'symlink' }
-    '160000' { return 'gitlink' }
+    { [string]::Equals($_, '000000', [System.StringComparison]::Ordinal) } { return 'absent' }
+    { [string]::Equals($_, '100644', [System.StringComparison]::Ordinal) } { return 'regular' }
+    { [string]::Equals($_, '100755', [System.StringComparison]::Ordinal) } { return 'regular' }
+    { [string]::Equals($_, '120000', [System.StringComparison]::Ordinal) } { return 'symlink' }
+    { [string]::Equals($_, '160000', [System.StringComparison]::Ordinal) } { return 'gitlink' }
     default  { return 'unknown' }
   }
 }
@@ -4230,7 +4476,7 @@ function Test-IsRawObjectIdSentinelPair {
   # regex, so an empty field cannot arrive from it, but a predicate whose failure
   # mode is a silent PASS is one refactor away from being wrong.
   if ([string]::IsNullOrEmpty($Mode) -or [string]::IsNullOrEmpty($ObjectId)) { return $false }
-  $absentMode = ([string]$Mode -ceq '000000')
+  $absentMode = [string]::Equals([string]$Mode, '000000', [System.StringComparison]::Ordinal)
   $zeroId = ([string]$ObjectId -match '^0+$')
   return ($absentMode -eq $zeroId)
 }
@@ -4257,12 +4503,12 @@ function Test-IsGitStatusKindPair {
   # set is not a state git produced, and acting on its letter would select a
   # whole-blob or added-hunk policy the modes contradict.
   param([string]$Status, [string]$SourceKind, [string]$DestinationKind)
-  if ($DestinationKind -eq 'absent' -or $DestinationKind -eq 'unknown') { return $false }
-  if ($SourceKind -eq 'unknown') { return $false }
-  if ($Status -ceq 'A') { return ($SourceKind -eq 'absent') }
-  if ($SourceKind -eq 'absent') { return $false }
-  if ($Status -ceq 'T') { return ($SourceKind -ne $DestinationKind) }
-  if ($Status -ceq 'M' -or $Status -ceq 'R' -or $Status -ceq 'C') { return ($SourceKind -eq $DestinationKind) }
+  if ([string]::Equals($DestinationKind, 'absent', [System.StringComparison]::Ordinal) -or [string]::Equals($DestinationKind, 'unknown', [System.StringComparison]::Ordinal)) { return $false }
+  if ([string]::Equals($SourceKind, 'unknown', [System.StringComparison]::Ordinal)) { return $false }
+  if ([string]::Equals($Status, 'A', [System.StringComparison]::Ordinal)) { return [string]::Equals($SourceKind, 'absent', [System.StringComparison]::Ordinal) }
+  if ([string]::Equals($SourceKind, 'absent', [System.StringComparison]::Ordinal)) { return $false }
+  if ([string]::Equals($Status, 'T', [System.StringComparison]::Ordinal)) { return (-not [string]::Equals($SourceKind, $DestinationKind, [System.StringComparison]::Ordinal)) }
+  if ([Array]::IndexOf([string[]]@('M', 'R', 'C'), [string]$Status) -ge 0) { return [string]::Equals($SourceKind, $DestinationKind, [System.StringComparison]::Ordinal) }
   return $false
 }
 
@@ -4280,14 +4526,14 @@ function Test-IsRegularBlobMode {
   # Either outcome is a scan over something the repository does not hold as that file,
   # so the gate is on the mode and never on what a read of the object returns.
   param([string]$Mode)
-  return ((Get-GitObjectKind -Mode $Mode) -eq 'regular')
+  return [string]::Equals((Get-GitObjectKind -Mode $Mode), 'regular', [System.StringComparison]::Ordinal)
 }
 
 function Get-ObjectKindLabel {
   param([string]$Mode)
   switch ($Mode) {
-    '120000' { return 'a symlink entry (its staged blob is the link target, not file text)' }
-    '160000' { return 'a gitlink entry (a submodule commit, not file text)' }
+    { [string]::Equals($_, '120000', [System.StringComparison]::Ordinal) } { return 'a symlink entry (its staged blob is the link target, not file text)' }
+    { [string]::Equals($_, '160000', [System.StringComparison]::Ordinal) } { return 'a gitlink entry (a submodule commit, not file text)' }
     default  { return "an index entry of mode $Mode, which is not a regular file" }
   }
 }
@@ -4324,7 +4570,7 @@ function Get-PerFileDiffSelector {
   param([object]$Record)
   $path = [string]$Record.Path
   $source = [string]$Record.Source
-  if ([string]$Record.Status -ceq 'R') {
+  if ([string]::Equals([string]$Record.Status, 'R', [System.StringComparison]::Ordinal)) {
     if ([string]::IsNullOrEmpty($source)) {
       throw "author-lint: rename record for '$path' carries no source path; ConvertFrom-RawDiffFields rejects that shape, so a hand-built record reached the selector."
     }
@@ -4398,7 +4644,7 @@ function Test-IsWholeBlobAddedStatus {
   # The object-kind gate runs BEFORE this, so the only T that lands here is one whose
   # destination IS readable file text.
   param([string]$Status)
-  return ($Status -ceq 'C' -or $Status -ceq 'T')
+  return ([string]::Equals($Status, 'C', [System.StringComparison]::Ordinal) -or [string]::Equals($Status, 'T', [System.StringComparison]::Ordinal))
 }
 
 function New-WholeBlobAddedSet {
@@ -4422,7 +4668,7 @@ function ConvertFrom-StagedBlobBytes {
   param([byte[]]$Bytes, [string]$Status = '')
   try { $text = $script:Utf8Strict.GetString($Bytes) }
   catch [System.Text.DecoderFallbackException] { return @{ Ok = $false; Text = $null; Reason = 'decode' } }
-  if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+  if ($text.Length -gt 0 -and [char]$text[0] -ceq [char]0xFEFF) { $text = $text.Substring(1) }
   $text = $text -replace "`r`n", "`n"
   if (($text.IndexOf([char]13) -ge 0) -and -not (Test-IsWholeBlobAddedStatus -Status $Status)) {
     return @{ Ok = $false; Text = $null; Reason = 'lone-cr' }
@@ -4540,9 +4786,9 @@ function Get-StagedBlobReadLabel {
   # for the same refusal.
   param([string]$Reason)
   switch ($Reason) {
-    'decode'  { return 'a staged blob whose bytes are not valid UTF-8' }
-    'nul'     { return 'a staged blob carrying a NUL byte, so it is not text' }
-    'lone-cr' { return 'a staged blob terminating lines with a lone CR, which this commit' + [char]0x27 + 's added lines cannot be attributed against' }
+    { [string]::Equals($_, 'decode', [System.StringComparison]::Ordinal) }  { return 'a staged blob whose bytes are not valid UTF-8' }
+    { [string]::Equals($_, 'nul', [System.StringComparison]::Ordinal) }     { return 'a staged blob carrying a NUL byte, so it is not text' }
+    { [string]::Equals($_, 'lone-cr', [System.StringComparison]::Ordinal) } { return 'a staged blob terminating lines with a lone CR, which this commit' + [char]0x27 + 's added lines cannot be attributed against' }
     default   { return 'a staged blob this run could not read' }
   }
 }
@@ -4587,7 +4833,7 @@ function Measure-InHunkAddedLines {
     $line = $raw -replace "`r$", ''
     if ($line -match '^diff --git ') { $inHunk = $false; continue }
     if ($line -match '^@@') { $inHunk = $true; continue }
-    if ($inHunk -and $line.StartsWith('+')) { $n++ }
+    if ($inHunk -and $line.StartsWith('+', [System.StringComparison]::Ordinal)) { $n++ }
   }
   return $n
 }
@@ -4694,7 +4940,7 @@ function Invoke-FileChecks {
   # while the entry rides the branch), so it stays ERROR here. LEAF-based (nested
   # History.md included) since SELF-NARR is a STRICTER treatment -- over-applying it
   # only adds flagging, the safe direction.
-  $isHistory = ([System.IO.Path]::GetFileName($Path) -eq 'History.md')
+  $isHistory = [string]::Equals([System.IO.Path]::GetFileName($Path), 'History.md', [System.StringComparison]::OrdinalIgnoreCase)
   # Count-drift EXEMPTION (INVENTORY + MAGNITUDE): a dated History entry is a static,
   # append-only snapshot -- once written its counts cannot drift the way live-doc
   # prose does -- so the operator ruled an exact count inside a dated entry is NOT a
@@ -4758,12 +5004,12 @@ function Get-StagedFileFindings {
   $lines = $StagedText -split "`n"
   $allRecs = @()
   for ($i = 0; $i -lt $lines.Count; $i++) { $allRecs += @{ Line = ($i + 1); Text = ($lines[$i] -replace "`r$", '') } }
-  $isPlan = ([System.IO.Path]::GetFileName($Path) -eq 'PLAN.md')
+  $isPlan = [string]::Equals([System.IO.Path]::GetFileName($Path), 'PLAN.md', [System.StringComparison]::OrdinalIgnoreCase)
   $planContent = if ($isPlan) { $StagedText } else { $null }
   $fileFindings = Invoke-FileChecks -Path $Path -Records $allRecs -PlanContentForClosure $planContent -Resolver $Resolver -IsTopLevel $IsTopLevel
   $out = @()
   foreach ($f in $fileFindings) {
-    if ($f.Class -eq 'TAG' -or $AddedSet.ContainsKey([int]$f.Line)) { $out += $f }
+    if ([string]::Equals($f.Class, 'TAG', [System.StringComparison]::Ordinal) -or $AddedSet.ContainsKey([int]$f.Line)) { $out += $f }
   }
   return $out
 }
@@ -4852,8 +5098,8 @@ function Format-Report {
   # for the OR-branch and provenance. (Codex BLOCKER: content-only
   # skip was spoofable.)
   [void]$sb.AppendLine("Generated: $((Get-Date).ToString('yyyy-MM-ddTHH:mm:sszzz')) by author-lint.ps1")
-  $errors = @($Findings | Where-Object { $_.Tier -eq 'ERROR' })
-  $advis  = @($Findings | Where-Object { $_.Tier -eq 'ADVISORY' })
+  $errors = @($Findings | Where-Object { [string]::Equals($_.Tier, 'ERROR', [System.StringComparison]::Ordinal) })
+  $advis  = @($Findings | Where-Object { [string]::Equals($_.Tier, 'ADVISORY', [System.StringComparison]::Ordinal) })
   if ($Findings.Count -eq 0) {
     [void]$sb.AppendLine('[author-lint] no findings.')
   } else {
@@ -4919,7 +5165,7 @@ function Get-PairedLintChangeRecords {
     }
     if (-not $destinations.Add($path)) { throw 'paired author-lint change destinations are duplicated' }
     $entry = $null
-    if ($Entries.Contains($path) -and $Entries[$path].Domain -ceq $Domain) { $entry = $Entries[$path] }
+    if ($Entries.Contains($path) -and [string]::Equals($Entries[$path].Domain, $Domain, [System.StringComparison]::Ordinal)) { $entry = $Entries[$path] }
     if (($status -ceq 'D' -and $null -ne $entry) -or ($status -cne 'D' -and $null -eq $entry)) { throw 'paired author-lint change destination differs from the validated domain tree' }
     $header = 'diff --git a/' + $source + ' b/' + $path
     if ($headers.ContainsKey($header)) { throw 'paired author-lint change headers are ambiguous' }
@@ -4963,16 +5209,16 @@ function Test-PairedLintExactDeletedBlob {
   # deleted text instead, preserving BOM, CRLF and final-newline state, and require
   # the regular-file mode to survive the transfer unchanged.
   param([object]$Record, [byte[]]$CandidateBytes, [string]$CandidateMode)
-  if ($null -eq $Record -or $Record.Domain -cne 'public' -or $Record.Status -cne 'D' -or
-      $Record.Path -isnot [string] -or $Record.Source -cne $Record.Path -or
+  if ($null -eq $Record -or -not [string]::Equals($Record.Domain, 'public', [System.StringComparison]::Ordinal) -or -not [string]::Equals($Record.Status, 'D', [System.StringComparison]::Ordinal) -or
+      $Record.Path -isnot [string] -or -not [System.StringComparer]::Ordinal.Equals($Record.Source, $Record.Path) -or
       $Record.Patch -isnot [string] -or $CandidateBytes -isnot [byte[]] -or
-      $CandidateMode -cnotin @('100644', '100755') -or -not $Record.Patch.EndsWith("`n", [StringComparison]::Ordinal)) { return $false }
+      [Array]::IndexOf([string[]]@('100644', '100755'), [string]$CandidateMode) -lt 0 -or -not $Record.Patch.EndsWith("`n", [StringComparison]::Ordinal)) { return $false }
   $lines = $Record.Patch.Split([char[]]@([char]10), [StringSplitOptions]::None)
   if ($lines.Count -lt 7 -or $lines[$lines.Count - 1].Length -ne 0 -or
-      $lines[0] -cne ('diff --git a/' + $Record.Path + ' b/' + $Record.Path) -or
-      $lines[1] -cne ('deleted file mode ' + $CandidateMode) -or
+      -not [string]::Equals($lines[0], ('diff --git a/' + $Record.Path + ' b/' + $Record.Path), [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($lines[1], ('deleted file mode ' + $CandidateMode), [System.StringComparison]::Ordinal) -or
       $lines[2] -cnotmatch '\Aindex [0-9a-f]+\.\.0+\z' -or
-      $lines[3] -cne ('--- a/' + $Record.Path) -or $lines[4] -cne '+++ /dev/null' -or
+      -not [string]::Equals($lines[3], ('--- a/' + $Record.Path), [System.StringComparison]::Ordinal) -or -not [string]::Equals($lines[4], '+++ /dev/null', [System.StringComparison]::Ordinal) -or
       $lines[5] -cnotmatch '\A@@ -1(?:,([0-9]+))? \+0,0 @@(?: .*)?\z') { return $false }
   [int]$expectedLines = 1
   if ($Matches[1] -and -not [int]::TryParse($Matches[1], [ref]$expectedLines)) { return $false }
@@ -4987,7 +5233,7 @@ function Test-PairedLintExactDeletedBlob {
       $bytes = $script:Utf8Strict.GetBytes($content)
       $output.Write($bytes, 0, $bytes.Length)
       $seen++
-      if ($i + 1 -lt $lines.Count - 1 -and $lines[$i + 1] -ceq '\ No newline at end of file') {
+      if ($i + 1 -lt $lines.Count - 1 -and [string]::Equals($lines[$i + 1], '\ No newline at end of file', [System.StringComparison]::Ordinal)) {
         if ($i + 2 -ne $lines.Count - 1) { return $false }
         $i++
       } else { $output.WriteByte(10) }
@@ -5005,12 +5251,12 @@ function Get-PairedLintUnchangedFirstAttachmentTransfers {
   param([object[]]$Changes, [System.Collections.IDictionary]$ContextBlobBuffers)
   $publicDeletions = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
   foreach ($record in $Changes) {
-    if ($record.Domain -ceq 'public' -and $record.Status -ceq 'D') { $publicDeletions.Add([string]$record.Path, $record) }
+    if ([string]::Equals($record.Domain, 'public', [System.StringComparison]::Ordinal) -and [string]::Equals($record.Status, 'D', [System.StringComparison]::Ordinal)) { $publicDeletions.Add([string]$record.Path, $record) }
   }
   $unchanged = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
   foreach ($record in $Changes) {
     $path = [string]$record.Path
-    if ($record.Domain -cne 'private' -or $record.Status -cne 'A' -or -not $publicDeletions.ContainsKey($path) -or
+    if (-not [string]::Equals($record.Domain, 'private', [System.StringComparison]::Ordinal) -or -not [string]::Equals($record.Status, 'A', [System.StringComparison]::Ordinal) -or -not $publicDeletions.ContainsKey($path) -or
         -not (Test-IsRegularBlobMode -Mode $record.Entry.Mode) -or $ContextBlobBuffers[$path] -isnot [byte[]]) { continue }
     if (Test-PairedLintExactDeletedBlob -Record $publicDeletions[$path] -CandidateBytes $ContextBlobBuffers[$path] -CandidateMode $record.Entry.Mode) {
       $null = $unchanged.Add($path)
@@ -5035,14 +5281,14 @@ function Get-PairedLintAddedSet {
       $newRemaining = if ($Matches[4]) { [int]$Matches[4] } else { 1 }
       continue
     }
-    if ($line.StartsWith('@@')) { throw 'paired author-lint patch has an unsupported hunk header' }
+    if ($line.StartsWith('@@', [System.StringComparison]::Ordinal)) { throw 'paired author-lint patch has an unsupported hunk header' }
     if ($oldRemaining -eq 0 -and $newRemaining -eq 0) { continue }
-    if ($line -ceq '\ No newline at end of file') { continue }
+    if ([string]::Equals($line, '\ No newline at end of file', [System.StringComparison]::Ordinal)) { continue }
     if ($line.Length -eq 0 -or $line[0] -cnotin @([char]'+', [char]'-', [char]' ')) { throw 'paired author-lint patch has an invalid hunk record' }
-    if ($line[0] -ne '+') { $oldRemaining-- }
-    if ($line[0] -ne '-') {
+    if ([char]$line[0] -cne '+') { $oldRemaining-- }
+    if ([char]$line[0] -cne '-') {
       $content = $line.Substring(1)
-      if ($newLine -eq 1 -and $content.Length -gt 0 -and $content[0] -eq [char]0xFEFF) { $content = $content.Substring(1) }
+      if ($newLine -eq 1 -and $content.Length -gt 0 -and [char]$content[0] -ceq [char]0xFEFF) { $content = $content.Substring(1) }
       if ($newLine -lt 1 -or $newLine -gt $candidateLines.Count -or
           -not [string]::Equals($content, $candidateLines[$newLine - 1], [StringComparison]::Ordinal)) { throw 'paired author-lint hunk differs from the validated candidate blob' }
       $newRemaining--; $newLine++
@@ -5059,14 +5305,7 @@ function Get-PairedLintAddedSet {
 function New-PairedLintReferenceContext {
   # Both domains are one validated candidate namespace, not one Git index.
   param([System.Collections.IDictionary]$Entries, [System.Collections.IDictionary]$ContextBlobBuffers)
-  $pathSet = [System.Collections.Hashtable]::new([StringComparer]::Ordinal)
-  foreach ($path in $Entries.Keys) {
-    # Already canonical tree names stay exact, including leading spaces. The
-    # legacy file-list normalizer trims input and is not a candidate-tree reader.
-    $pathSet[$path] = $true
-    $parent = [string]$path
-    while ($parent.Contains('/')) { $parent = $parent.Substring(0, $parent.LastIndexOf('/')); $pathSet[$parent] = $true }
-  }
+  $pathSet = Build-PathSetFromFileList -Files @($Entries.Keys)
   $gitignoreText = ''
   if ($Entries.Contains('.gitignore')) {
     if (-not (Test-IsRegularBlobMode -Mode $Entries['.gitignore'].Mode)) { throw 'paired author-lint cannot read candidate .gitignore intent from a non-file object' }
@@ -5086,9 +5325,9 @@ function Invoke-PairedAuthorLint {
   # custody remain operation-owner obligations, never authority supplied by this
   # object. No Git, worktree reads, environment repair, reports on disk, or exit.
   param([System.Collections.IDictionary]$InputData, [string]$ExecutingPath, [switch]$FirstAttachment)
-  $expectedCount = if ($FirstAttachment -and $null -ne $InputData -and 'PrivateAttribution' -cin @($InputData.Keys)) { 3 } else { 2 }
-  if ($null -eq $InputData -or $InputData.Count -ne $expectedCount -or 'Runtime' -cnotin @($InputData.Keys) -or 'CapturedInput' -cnotin @($InputData.Keys) -or
-      (-not $FirstAttachment -and 'PrivateAttribution' -cin @($InputData.Keys))) { throw 'paired author-lint requires exact origin-bound input fields' }
+  $expectedCount = if ($FirstAttachment -and $null -ne $InputData -and [Array]::IndexOf([string[]]@($InputData.Keys), 'PrivateAttribution') -ge 0) { 3 } else { 2 }
+  if ($null -eq $InputData -or $InputData.Count -ne $expectedCount -or [Array]::IndexOf([string[]]@($InputData.Keys), 'Runtime') -lt 0 -or [Array]::IndexOf([string[]]@($InputData.Keys), 'CapturedInput') -lt 0 -or
+      (-not $FirstAttachment -and [Array]::IndexOf([string[]]@($InputData.Keys), 'PrivateAttribution') -ge 0)) { throw 'paired author-lint requires exact origin-bound input fields' }
   $runtime = $InputData['Runtime']; $captured = $InputData['CapturedInput']
   if ($null -eq $runtime -or $runtime.Id -isnot [string] -or $runtime.Id -cnotmatch '\A[0-9a-f]{64}\z' -or
       $runtime.Root -isnot [string] -or -not [IO.Path]::IsPathRooted($runtime.Root) -or $runtime.Payloads -isnot [System.Collections.IDictionary] -or
@@ -5097,8 +5336,8 @@ function Invoke-PairedAuthorLint {
   $modules = @('private-governance', 'paired-governance', 'paired-tree', 'review-preparation', 'project-preparation', 'paired-review-input')
   $payloadNames = @('scripts/shared/author-lint.ps1', 'scripts/codex/review-prompt-template.md') + @($modules | ForEach-Object { 'scripts/' + $_ + '.psm1' })
   foreach ($relative in $payloadNames) {
-    if ($relative -cnotin @($runtime.Payloads.Keys) -or $runtime.Payloads[$relative].Bytes -isnot [byte[]] -or
-        $runtime.Payloads[$relative].Path -cne (Join-Path $runtime.Root $relative.Replace('/', '\'))) { throw 'paired author-lint requires exact retained payload paths and byte buffers' }
+    if ([Array]::IndexOf([string[]]@($runtime.Payloads.Keys), [string]$relative) -lt 0 -or $runtime.Payloads[$relative].Bytes -isnot [byte[]] -or
+        -not [string]::Equals($runtime.Payloads[$relative].Path, (Join-Path $runtime.Root $relative.Replace('/', '\')), [System.StringComparison]::Ordinal)) { throw 'paired author-lint requires exact retained payload paths and byte buffers' }
   }
   if (-not [string]::Equals($ExecutingPath, $runtime.Payloads['scripts/shared/author-lint.ps1'].Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'paired author-lint must execute the selected runtime payload' }
   foreach ($module in $modules) {
@@ -5113,22 +5352,22 @@ function Invoke-PairedAuthorLint {
   if ($readers.Count -ne 1) { throw 'paired author-lint requires one retained paired input reader' }
   $metadata = & $readers[0] -DescriptorBytes $captured.Bundle.DescriptorBytes -ExpectedDescriptorSha256 $captured.Bundle.DescriptorSha256 -Buffers $captured.Bundle.Buffers -GoverningConfigBytes $captured.PreparationSources.governing.ConfigBytes -CandidateConfigBytes $captured.PreparationSources.candidate.ConfigBytes -PublicTreeBytes $captured.Indexes.public.TreeBytes -PrivateTreeBytes $captured.Indexes.private.TreeBytes -RuntimeTemplateBytes $runtime.Payloads['scripts/codex/review-prompt-template.md'].Bytes -ContextBlobBuffers $captured.ContextBlobBuffers
   if ($FirstAttachment -and ($metadata.ReviewUnit.RequiresReview -isnot [bool] -or -not $metadata.ReviewUnit.RequiresReview)) { throw 'first-attachment author-lint requires mandatory initial review input' }
-  if ($metadata.ReviewUnit.Fields['runtime-manifest-sha256'] -cne $runtime.Id) { throw 'paired author-lint input differs from the selected runtime' }
+  if (-not [string]::Equals($metadata.ReviewUnit.Fields['runtime-manifest-sha256'], $runtime.Id, [System.StringComparison]::Ordinal)) { throw 'paired author-lint input differs from the selected runtime' }
   foreach ($domain in @('public', 'private')) {
-    if ($captured.Indexes[$domain].TreeOid -isnot [string] -or $captured.Indexes[$domain].TreeOid -cne $metadata.ReviewUnit.Fields[$domain + '-tree']) { throw 'paired author-lint captured index tree differs from the review unit' }
+    if ($captured.Indexes[$domain].TreeOid -isnot [string] -or -not [System.StringComparer]::Ordinal.Equals($captured.Indexes[$domain].TreeOid, $metadata.ReviewUnit.Fields[$domain + '-tree'])) { throw 'paired author-lint captured index tree differs from the review unit' }
   }
   $privateAttribution = $null
-  $hasAdoptedPrivateParent = $FirstAttachment -and $metadata.ReviewUnit.Fields['private-parent'] -cne 'absent'
+  $hasAdoptedPrivateParent = $FirstAttachment -and -not [string]::Equals($metadata.ReviewUnit.Fields['private-parent'], 'absent', [System.StringComparison]::Ordinal)
   if ($hasAdoptedPrivateParent) {
     $privateAttribution = $InputData['PrivateAttribution']
     $candidateTree = $captured.Indexes.private.TreeOid
     $oidWidth = $candidateTree.Length
     $keys = @('Domain', 'Parent', 'ParentTree', 'CandidateTree', 'PatchBytes', 'NameStatusBytes')
     if ($privateAttribution -isnot [System.Collections.IDictionary] -or $privateAttribution.Count -ne $keys.Count -or
-        @($keys | Where-Object { $_ -cnotin @($privateAttribution.Keys) }).Count -ne 0 -or
-        $privateAttribution.Domain -cne 'private' -or $privateAttribution.Parent -cne $metadata.ReviewUnit.Fields['private-parent'] -or
+        @($keys | Where-Object { [Array]::IndexOf([string[]]@($privateAttribution.Keys), [string]$_) -lt 0 }).Count -ne 0 -or
+        -not [string]::Equals($privateAttribution.Domain, 'private', [System.StringComparison]::Ordinal) -or -not [System.StringComparer]::Ordinal.Equals($privateAttribution.Parent, $metadata.ReviewUnit.Fields['private-parent']) -or
         $privateAttribution.ParentTree -isnot [string] -or $privateAttribution.ParentTree -cnotmatch ("\A[0-9a-f]{$oidWidth}\z") -or
-        $privateAttribution.CandidateTree -cne $candidateTree -or $privateAttribution.PatchBytes -isnot [byte[]] -or
+        -not [System.StringComparer]::Ordinal.Equals($privateAttribution.CandidateTree, $candidateTree) -or $privateAttribution.PatchBytes -isnot [byte[]] -or
         $privateAttribution.NameStatusBytes -isnot [byte[]]) { throw 'first-attachment private lint attribution is not bound to the adopted parent and captured candidate' }
     try {
       $privateAttribution = @{
@@ -5141,7 +5380,7 @@ function Invoke-PairedAuthorLint {
       catch [System.Text.DecoderFallbackException] { throw 'first-attachment private lint change endpoints are not strict UTF-8' }
       $privateAttribution = @{ Patch = ''; NameStatus = $nameStatus; ConservativeCandidate = $true }
     }
-  } elseif ($FirstAttachment -and 'PrivateAttribution' -cin @($InputData.Keys)) { throw 'absent private ancestry cannot supply adopted-parent lint attribution' }
+  } elseif ($FirstAttachment -and [Array]::IndexOf([string[]]@($InputData.Keys), 'PrivateAttribution') -ge 0) { throw 'absent private ancestry cannot supply adopted-parent lint attribution' }
   $entries = [System.Collections.Hashtable]::new([StringComparer]::Ordinal)
   foreach ($entry in $metadata.ContextEntries) { $entries.Add($entry.Path, $entry) }
   $references = New-PairedLintReferenceContext -Entries $entries -ContextBlobBuffers $captured.ContextBlobBuffers
@@ -5161,13 +5400,13 @@ function Invoke-PairedAuthorLint {
   foreach ($record in $changes) {
     $path = [string]$record.Path
     $narrative = $path -match $script:NarrativeDocPattern
-    if ($record.Status -ceq 'D' -or (-not $narrative -and $path -notmatch $script:SourceExtPattern)) { continue }
+    if ([string]::Equals($record.Status, 'D', [System.StringComparison]::Ordinal) -or (-not $narrative -and $path -notmatch $script:SourceExtPattern -and $path -notmatch $script:PowerShellExtPattern)) { continue }
     $fileFindings = @(); $counted = $false; $skip = $false
     if (-not (Test-IsRegularBlobMode -Mode $record.Entry.Mode)) {
       $fileFindings += @{ Class = 'UNSUPPORTED-SYNTAX'; Tier = 'ADVISORY'; File = $path; Line = 1; Match = (Get-ObjectKindLabel -Mode $record.Entry.Mode); Hint = 'the staged object is not a regular file, so its bytes are not this file''s text and no line-oriented class can run over them -- check the entry by hand' }
       $counted = $true; $skip = $true
     }
-    if (-not $skip -and $record.Status -ceq 'R' -and -not $record.ConservativeCandidate) {
+    if (-not $skip -and [string]::Equals($record.Status, 'R', [System.StringComparison]::Ordinal) -and -not $record.ConservativeCandidate) {
       $fileFindings += @{ Class = 'UNSUPPORTED-SYNTAX'; Tier = 'ADVISORY'; File = $path; Line = 1; Match = "a rename of $($record.Source)"; Hint = 'the lines this rename did not change are attributed to no line of this commit, so this path' + [char]0x27 + 's line-oriented classes never read them (any line the rename DID edit is scanned normally) -- review the moved file by hand, or touch a line to bring it into scope' }
       $counted = $true
     }
@@ -5185,16 +5424,16 @@ function Invoke-PairedAuthorLint {
     }
     if (-not $skip) {
       $addedSet = if ($record.ConservativeCandidate -or (Test-IsWholeBlobAddedStatus -Status $record.Status)) { New-WholeBlobAddedSet -Text $blobRead.Text } else { Get-PairedLintAddedSet -Path $path -Patch $record.Patch -Text $blobRead.Text }
-      if ($FirstAttachment -and $record.Domain -ceq 'private' -and $record.Status -ceq 'A' -and $unchangedTransfers.Contains($path)) { $addedSet = @{} }
+      if ($FirstAttachment -and [string]::Equals($record.Domain, 'private', [System.StringComparison]::Ordinal) -and [string]::Equals($record.Status, 'A', [System.StringComparison]::Ordinal) -and $unchangedTransfers.Contains($path)) { $addedSet = @{} }
       if ($narrative) {
-        if ($addedSet.Count -gt 0 -or [IO.Path]::GetFileName($path) -eq 'PLAN.md') {
+        if ($addedSet.Count -gt 0 -or [string]::Equals([IO.Path]::GetFileName($path), 'PLAN.md', [System.StringComparison]::OrdinalIgnoreCase)) {
           $counted = $true
           $fileFindings += @(Get-StagedFileFindings -Path $path -StagedText $blobRead.Text -AddedSet $addedSet -Resolver $resolver -IsTopLevel $isTopLevel)
         }
       } elseif ($addedSet.Count -gt 0) {
         $ext = [IO.Path]::GetExtension($path).TrimStart('.').ToLowerInvariant()
         $sourceInScope = $true
-        if ($ext -cne 'rs') {
+        if (-not [string]::Equals($ext, 'rs', [System.StringComparison]::Ordinal) -and $path -notmatch $script:PowerShellExtPattern) {
           $sourceLines = @($blobRead.Text -split "`n")
           $sourceRecords = New-Object 'System.Collections.Generic.List[object]'
           for ($j = 0; $j -lt $sourceLines.Count; $j++) { $sourceRecords.Add(@{ Line = $j + 1; Text = $sourceLines[$j] }) }
@@ -5216,7 +5455,7 @@ function Invoke-PairedAuthorLint {
     }
   }
   $allFindings = $findings.ToArray()
-  $errors = @($allFindings | Where-Object { $_.Tier -eq 'ERROR' })
+  $errors = @($allFindings | Where-Object { [string]::Equals($_.Tier, 'ERROR', [System.StringComparison]::Ordinal) })
   return [pscustomobject]@{
     Schema = 1; ValidationState = $(if ($FirstAttachment) { 'first-attachment-mechanical-findings-only' } else { 'paired-mechanical-findings-only' }); ReadyForPublication = $false
     ReviewUnitSha256 = $metadata.ReviewUnit.ReviewUnitSha256; FileCount = $fileCount
@@ -5261,7 +5500,6 @@ try {
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repoRoot)) {
     throw 'not inside a git work tree'
   }
-  $repoRoot = $repoRoot.Trim()
 } catch {
   Write-Host (ConvertTo-SafeDisplayText -Text "[author-lint] ERROR: cannot resolve repo root: $_")
   exit 2
@@ -5483,7 +5721,7 @@ $indexFiles = Get-CheckedNulPaths -GitArgs @('-C', $repoRoot, 'ls-files', '-z') 
 # silently dropping ignored roots like `logs`. Untracked/staged-deleted ->
 # genuinely empty. (Codex BLOCKER.)
 $giText = ''
-if ($indexFiles -contains '.gitignore') {
+if ([Array]::IndexOf([string[]]@($indexFiles), '.gitignore') -ge 0) {
   $giText = (@(Invoke-GitChecked -GitArgs @('-C', $repoRoot, 'show', ':.gitignore') -What '.gitignore index blob') -join "`n")
 }
 
@@ -5518,7 +5756,7 @@ elseif ($Staged) { $mode = 'staged' }
 $allFindings = @()
 $fileCount = 0
 
-if ($mode -eq 'staged') {
+if ([string]::Equals($mode, 'staged', [System.StringComparison]::Ordinal)) {
   # Validate the PENDING COMMIT (the index), not the worktree: read each staged
   # file's index blob, resolve referenced paths against the index, and compute
   # fence context from the FULL staged file -- then keep only findings on the
@@ -5574,7 +5812,7 @@ if ($mode -eq 'staged') {
     # gate, one of which reads the blob BODY and not just the path; and acting on it
     # means text-scanning a blob whose readability nothing has established.
     $renameNoted = $false
-    if ([string]$selection.Status -ceq 'R') {
+    if ([string]::Equals([string]$selection.Status, 'R', [System.StringComparison]::Ordinal)) {
       $fileCount++
       $renameNoted = $true
       $allFindings += @{
@@ -5592,7 +5830,7 @@ if ($mode -eq 'staged') {
     # instead, because an unreadable blob is a file this scan cannot stand behind,
     # not a broken run.
     $blobRead = Read-StagedBlobText -RepoRoot $repoRoot -Path $path -Status ([string]$selection.Status)
-    if (-not $blobRead.Ok -and $blobRead.Reason -eq 'read') {
+    if (-not $blobRead.Ok -and [string]::Equals($blobRead.Reason, 'read', [System.StringComparison]::Ordinal)) {
       Write-Host (ConvertTo-SafeDisplayText -Text "[author-lint] ERROR: cannot read staged blob for '$path' (git show failed)")
       exit 2
     }
@@ -5673,7 +5911,7 @@ if ($mode -eq 'staged') {
     # lines: a DELETION-only change that removes a defining `M<n>` header leaves
     # dangling references the closure must catch. Other docs with no added lines
     # have nothing to check. (Codex BLOCKER.)
-    $isPlan = ([System.IO.Path]::GetFileName($path) -eq 'PLAN.md')
+    $isPlan = [string]::Equals([System.IO.Path]::GetFileName($path), 'PLAN.md', [System.StringComparison]::OrdinalIgnoreCase)
     if ($addedSet.Count -eq 0 -and -not $isPlan) { continue }
     if (-not $renameNoted) { $fileCount++ }
     $allFindings += Get-StagedFileFindings -Path $path -StagedText $stagedText -AddedSet $addedSet -Resolver $indexResolver -IsTopLevel $isTopLevel
@@ -5686,7 +5924,7 @@ if ($mode -eq 'staged') {
   # end-to-end by the E2E staged-source cases, which use an ALTERNATE index
   # (GIT_INDEX_FILE) so the shared worktree index is never mutated.
   $stagedSourceFiles = @($script:stagedStatusRecords | ForEach-Object { [string]$_.Path } |
-                         Where-Object { $_ -match $script:SourceExtPattern })
+                         Where-Object { $_ -match $script:SourceExtPattern -or $_ -match $script:PowerShellExtPattern })
   foreach ($path in (Select-UniqueOrdinalPaths -Paths $stagedSourceFiles)) {
     $selection = Get-StagedSelectionRecord -Path $path
     # Same object-kind gate as the doc loop, and BEFORE the blob read for the same
@@ -5725,7 +5963,7 @@ if ($mode -eq 'staged') {
     # gate, one of which reads the blob BODY and not just the path; and acting on it
     # means text-scanning a blob whose readability nothing has established.
     $renameNoted = $false
-    if ([string]$selection.Status -ceq 'R') {
+    if ([string]::Equals([string]$selection.Status, 'R', [System.StringComparison]::Ordinal)) {
       $fileCount++
       $renameNoted = $true
       $allFindings += @{
@@ -5743,7 +5981,7 @@ if ($mode -eq 'staged') {
     # instead, because an unreadable blob is a file this scan cannot stand behind,
     # not a broken run.
     $blobRead = Read-StagedBlobText -RepoRoot $repoRoot -Path $path -Status ([string]$selection.Status)
-    if (-not $blobRead.Ok -and $blobRead.Reason -eq 'read') {
+    if (-not $blobRead.Ok -and [string]::Equals($blobRead.Reason, 'read', [System.StringComparison]::Ordinal)) {
       Write-Host (ConvertTo-SafeDisplayText -Text "[author-lint] ERROR: cannot read staged blob for '$path' (git show failed)")
       exit 2
     }
@@ -5810,8 +6048,9 @@ if ($mode -eq 'staged') {
     # Count this source file as SCANNED only when the commit adds content the source
     # classes actually examine. For a RUST file that is any added line -- comment
     # text feeds the count classes, code feeds MAGIC-COUNT-ASSERT -- so no extra
-    # gate is needed beyond the added-line check above. For every other extension
-    # only COMMENT lines are examined, so a code-only change there must fall through
+    # gate is needed beyond the added-line check above, and the same holds for a
+    # PowerShell file, whose added code lines CULTURE-COMPARE reads. For every other
+    # extension only COMMENT lines are examined, so a code-only change there must fall through
     # to the "no content" report rather than inflate the scanned-file count (which
     # would mask the no-content path). (Codex QUALITY.)
     #
@@ -5819,7 +6058,7 @@ if ($mode -eq 'staged') {
     # comments?" is only meaningful once the split is known trustworthy; asking it
     # first let an untrusted split answer "no" and skip the file it had mis-read.
     # An unsupported file is always in scope -- it has a diagnostic to report.
-    if ($ext -ne 'rs') {
+    if (-not [string]::Equals($ext, 'rs', [System.StringComparison]::Ordinal) -and $path -notmatch $script:PowerShellExtPattern) {
       $srcSplit = $stagedText -split "`n"
       $srcRecs = New-Object 'System.Collections.Generic.List[object]'
       for ($j = 0; $j -lt $srcSplit.Count; $j++) { $srcRecs.Add(@{ Line = ($j + 1); Text = ($srcSplit[$j] -replace "`r$", '') }) }
@@ -5833,8 +6072,8 @@ if ($mode -eq 'staged') {
     $allFindings += @(Get-StagedSourceFindings -Path $path -StagedText $stagedText -AddedSet $addedSet -Ext $ext)
   }
 }
-elseif ($mode -eq 'paths' -or $mode -eq 'tree') {
-  if ($mode -eq 'tree') {
+elseif ([string]::Equals($mode, 'paths', [System.StringComparison]::Ordinal) -or [string]::Equals($mode, 'tree', [System.StringComparison]::Ordinal)) {
+  if ([string]::Equals($mode, 'tree', [System.StringComparison]::Ordinal)) {
     $tracked = Get-CheckedNulPaths -GitArgs @('-C', $repoRoot, 'ls-files', '-z', '*.md') -What 'tracked markdown list'
     $targetList = @($tracked | Where-Object { $_ -match $script:NarrativeDocPattern })
   } else {
@@ -5884,7 +6123,7 @@ elseif ($mode -eq 'paths' -or $mode -eq 'tree') {
     $lines = $content -split "`n"
     $records = @()
     for ($i = 0; $i -lt $lines.Count; $i++) { $records += @{ Line = ($i + 1); Text = ($lines[$i] -replace "`r$", '') } }
-    $planContent = if ([System.IO.Path]::GetFileName($rel) -eq 'PLAN.md') { $content } else { $null }
+    $planContent = if ([string]::Equals([System.IO.Path]::GetFileName($rel), 'PLAN.md', [System.StringComparison]::OrdinalIgnoreCase)) { $content } else { $null }
     $allFindings += Invoke-FileChecks -Path $rel -Records $records -PlanContentForClosure $planContent -Resolver $indexResolver -IsTopLevel $isTopLevel
   }
 }
@@ -5893,11 +6132,11 @@ elseif ($mode -eq 'paths' -or $mode -eq 'tree') {
 # a git-listing failure or a mispointed / non-Markdown selection would otherwise
 # produce a false-clean exit 0. Staged mode with no narrative docs is a
 # legitimate "nothing to check". (Codex BLOCKER.)
-if (($mode -eq 'tree' -or $mode -eq 'paths') -and $fileCount -eq 0) {
+if (([string]::Equals($mode, 'tree', [System.StringComparison]::Ordinal) -or [string]::Equals($mode, 'paths', [System.StringComparison]::Ordinal)) -and $fileCount -eq 0) {
   Write-Host (ConvertTo-SafeDisplayText -Text "[author-lint] ERROR: $mode mode examined 0 files (git-listing failure, empty, or non-Markdown selection) -- cannot report clean.")
   exit 2
 }
-if ($mode -eq 'staged' -and $fileCount -eq 0) {
+if ([string]::Equals($mode, 'staged', [System.StringComparison]::Ordinal) -and $fileCount -eq 0) {
   Write-Host '[author-lint] no staged narrative-doc or source content to check.'
   exit 0
 }
@@ -5920,5 +6159,5 @@ if ($OutPath) {
 # code lets the pre-commit pre-pass distinguish "real findings -> abort
 # the commit" (3) from "the linter itself broke -> warn and fail open to
 # the still-running AI gate" (1, or any other unexpected exit).
-$errorCount = @($allFindings | Where-Object { $_.Tier -eq 'ERROR' }).Count
+$errorCount = @($allFindings | Where-Object { [string]::Equals($_.Tier, 'ERROR', [System.StringComparison]::Ordinal) }).Count
 if ($errorCount -gt 0) { exit 3 } else { exit 0 }

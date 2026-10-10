@@ -30,8 +30,7 @@ function Get-CrgCentralFirstAttachmentProjectContext {
   $assertGitState = & $captureModule { Get-Command Assert-CrgCentralGitState -CommandType Function }
   $readRef = & $retentionReader.Module { Get-Command Get-CrgRetentionRef -CommandType Function }
   & $assertPath -Path $TargetRepo
-  $gitExe = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
-  & $assertPath -Path $gitExe
+  $gitExe = & $captureModule { Get-CrgCentralGitExecutable }
   $gitFile = & $Context.ReadFile -Path $gitExe -Maximum 16777216
   if ($null -eq $gitFile -or $gitFile.Present -isnot [bool] -or -not $gitFile.Present) { throw 'first attachment requires the retained Git executable' }
   $publicGit = @('-C', $TargetRepo)
@@ -58,7 +57,8 @@ function Get-CrgCentralFirstAttachmentProjectContext {
         -not [Linq.Enumerable]::SequenceEqual([byte[]]$record.Bytes, [byte[]]$AttachmentBytes)) { throw 'pending context attachment differs from the captured proposal' }
   }
   $publicRef = & $readLine -Arguments ($publicGit + @('symbolic-ref', '--no-recurse', '-q', 'HEAD')) -GitExe $gitExe
-  if ($publicRef -cne $attachment.PublicRef) { throw 'first attachment public branch differs from the proposed association' }
+  # Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
+  if (-not [string]::Equals($publicRef, $attachment.PublicRef, [StringComparison]::Ordinal)) { throw 'first attachment public branch differs from the proposed association' }
   & $assertGitState -Context $Context -PublicGitDir $gitDir -PrivateGitDir $attachment.PrivateGitDir -PublicRef $publicRef
   $domains = [ordered]@{}
   foreach ($domain in @('public', 'private')) {
@@ -73,7 +73,7 @@ function Get-CrgCentralFirstAttachmentProjectContext {
     $format = & $readLine -Arguments ($prefix + @('rev-parse', '--show-object-format')) -GitExe $gitExe
     if (-not [string]::Equals($actualCommon, $common, [StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals($objects, (Join-Path $common 'objects'), [StringComparison]::OrdinalIgnoreCase) -or
-        $format -cnotin @('sha1', 'sha256')) { throw 'first attachment Git namespace differs from the proposed domain' }
+        -not ([string]::Equals($format, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($format, 'sha256', [StringComparison]::Ordinal))) { throw 'first attachment Git namespace differs from the proposed domain' }
     foreach ($leaf in @('alternates', 'http-alternates')) {
       $record = & $Context.ReadFile -Path (Join-Path $objects ('info/' + $leaf)) -Maximum 65536 -AllowAbsent
       if ($null -eq $record -or $record.Present -isnot [bool] -or $record.Present) { throw 'first attachment requires positively absent object alternates' }
@@ -94,12 +94,12 @@ function Get-CrgCentralFirstAttachmentProjectContext {
     if ($null -eq $parent) {
       if ($domain -cne 'private') { throw 'first attachment requires an actual existing public commit' }
       $selected.Parent = 'absent'
-      $hash = if ($selected.ObjectFormat -ceq 'sha1') { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
+      $hash = if ([string]::Equals($selected.ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
       try { $selected.ParentTree = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::ASCII.GetBytes('tree 0' + [char]0)))).Replace('-', '').ToLowerInvariant() }
       finally { $hash.Dispose() }
     } else {
       $prefix = @("--git-dir=$($selected.GitDir)", "--work-tree=$root")
-      if ((& $readLine -Arguments ($prefix + @('cat-file', '-t', $parent)) -GitExe $gitExe) -cne 'commit') { throw 'first attachment adopted parent is not an actual commit' }
+      if (-not [string]::Equals((& $readLine -Arguments ($prefix + @('cat-file', '-t', $parent)) -GitExe $gitExe), 'commit', [StringComparison]::Ordinal)) { throw 'first attachment adopted parent is not an actual commit' }
       $selected.Parent = $parent
       $selected.ParentTree = & $readLine -Arguments ($prefix + @('rev-parse', '--verify', "$parent^{tree}")) -GitExe $gitExe
     }
@@ -107,11 +107,12 @@ function Get-CrgCentralFirstAttachmentProjectContext {
     # no placeholder OID establishes either object existence or adopted ancestry.
     $null = & $treeReader -ProjectContext $result -Domain $domain -TreeOid $selected.ParentTree
   }
-  if ((& $readLine -Arguments ($publicGit + @('symbolic-ref', '--no-recurse', '-q', 'HEAD')) -GitExe $gitExe) -cne $publicRef) { throw 'first attachment public branch changed during capture' }
+  if (-not [string]::Equals((& $readLine -Arguments ($publicGit + @('symbolic-ref', '--no-recurse', '-q', 'HEAD')) -GitExe $gitExe), $publicRef, [StringComparison]::Ordinal)) { throw 'first attachment public branch changed during capture' }
   foreach ($domain in @('public', 'private')) {
     $actual = & $readRef -ProjectContext $result -Domain $domain -Ref $domains[$domain].Ref
     $expected = $domains[$domain].Parent
-    if (($expected -ceq 'absent' -and $null -ne $actual) -or ($expected -cne 'absent' -and $actual -cne $expected)) { throw 'first attachment branch parent changed during capture' }
+    $expectedAbsent = [string]::Equals($expected, 'absent', [StringComparison]::Ordinal)
+    if (($expectedAbsent -and $null -ne $actual) -or (-not $expectedAbsent -and -not [string]::Equals($actual, $expected, [StringComparison]::Ordinal))) { throw 'first attachment branch parent changed during capture' }
   }
   return $result
 }

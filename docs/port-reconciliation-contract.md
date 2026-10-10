@@ -46,8 +46,12 @@ its own slice.
 copies and must be restored around the incoming capability):
 - the configurable consistency-doc (`CROSS_REVIEW_CONSISTENCY_DOC` with
   blob-kind fail-closed validation) — never a hardcoded plan-file name
-- the `CROSS_REVIEW_PRUNE_TOOL` seam with validated fallback — never a
-  machine-local delete-tool path
+- the `CROSS_REVIEW_PRUNE_TOOL` seam, resolved by PowerShell when possible
+  and translated into bash's namespace, otherwise read in bash's own
+  namespace, validated as a regular file by bash (the namespace that runs
+  the tool), credited only on tool exit 0, with no
+  direct-deletion fallback (unset means no prune) — never a machine-local
+  delete-tool path
 - submodule-aware log and index dir selection
 - origin/HEAD base-branch resolution in the merge gate — never a hardcoded
   base name
@@ -91,10 +95,10 @@ conditional. Code unit tests and unit-test-only material must not be ported.
 
 **Verification bar.** Every slice lands through the normal commit and merge
 review gates. Inspect changed production paths, parse edited scripts, and
-record applicable ordinary-operation and functional-test outcomes. The operator
-decision of 2026-09-07, clarified 2026-09-08, bans code unit tests and
-unit-test-only support, not integration, end-to-end, smoke, performance, manual,
-live, or other functional testing merely by category. Earlier broader removals
+record applicable ordinary-operation and functional-validation outcomes. The
+operator decision bans code unit tests and unit-test-only support; live testing,
+manual checks, ordinary program runs, and functional validation remain
+permitted. Earlier broader removals
 remain historical facts pending separate impact assessment; this contract does
 not restore files or create replacement obligations.
 

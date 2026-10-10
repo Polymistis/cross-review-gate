@@ -5,9 +5,10 @@ function Get-CrgOperationGitCommand {
   param([object]$Runtime, [string]$Module, [string]$Name)
   $relative = 'scripts/' + $Module + '.psm1'
   $commands = @(Get-Command -Name $Name -Module $Module -CommandType Function -ListImported -ErrorAction SilentlyContinue)
+  # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
   if ($null -eq $Runtime -or $Runtime.Payloads -isnot [System.Collections.IDictionary] -or
       $relative -cnotin @($Runtime.Payloads.Keys) -or $Runtime.Payloads[$relative].Bytes -isnot [byte[]] -or
-      $Runtime.Payloads[$relative].Path -cne (Join-Path $Runtime.Root $relative.Replace('/', '\')) -or
+      -not [string]::Equals($Runtime.Payloads[$relative].Path, (Join-Path $Runtime.Root $relative.Replace('/', '\')), [StringComparison]::Ordinal) -or
       $commands.Count -ne 1 -or -not [string]::Equals($commands[0].Module.Path, $Runtime.Payloads[$relative].Path, [StringComparison]::OrdinalIgnoreCase)) {
     throw "effective Git requires the retained '$Module/$Name' command"
   }
@@ -15,11 +16,11 @@ function Get-CrgOperationGitCommand {
 }
 
 function Get-CrgOperationGitDigest {
-  param([byte[]]$Bytes, [string]$ObjectFormat, [ValidateSet('commit', 'blob', 'tree')][string]$ObjectKind = 'commit')
-  $hash = if ($ObjectFormat -ceq 'sha1') { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
+  param([byte[]]$Bytes, [string]$ObjectFormat, [ValidatePattern('\A(?:commit|blob|tree)\z', Options = 'None')][string]$ObjectKind = 'commit')
+  $hash = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
   try {
     if (-not [string]::IsNullOrEmpty($ObjectFormat)) {
-      if ($ObjectFormat -cnotin @('sha1', 'sha256')) { throw 'effective Git object format is invalid' }
+      if (-not ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal))) { throw 'effective Git object format is invalid' }
       $header = [Text.Encoding]::ASCII.GetBytes($ObjectKind + ' ' + $Bytes.Length.ToString([Globalization.CultureInfo]::InvariantCulture) + [char]0)
       $null = $hash.TransformBlock($header, 0, $header.Length, $null, 0)
     }
@@ -30,7 +31,7 @@ function Get-CrgOperationGitDigest {
 
 function Assert-CrgOperationGitOid {
   param([string]$Oid, [string]$ObjectFormat)
-  $width = if ($ObjectFormat -ceq 'sha1') { 40 } elseif ($ObjectFormat -ceq 'sha256') { 64 } else { throw 'effective Git object format is invalid' }
+  $width = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } elseif ([string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal)) { 64 } else { throw 'effective Git object format is invalid' }
   if ($Oid -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $Oid -cmatch '\A0+\z') { throw 'effective Git requires a canonical nonzero object identity' }
 }
 
@@ -48,13 +49,13 @@ function Get-CrgOperationGitEnvironment {
   $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
   foreach ($entry in $raw) {
     if ([string]::IsNullOrEmpty($entry) -or $entry.Contains([char]0)) { throw 'effective Git raw environment is malformed' }
-    $separator = if ($entry[0] -ceq '=') { $entry.IndexOf('=', 1) } else { $entry.IndexOf('=') }
+    $separator = if ($entry.StartsWith('=', [StringComparison]::Ordinal)) { $entry.IndexOf([char]'=', 1) } else { $entry.IndexOf([char]'=') }
     if ($separator -le 0) { throw 'effective Git raw environment lacks a name boundary' }
     $name = $entry.Substring(0, $separator)
     if ($name -imatch '\AGIT_(?:CONFIG(?:_.*)?|ATTR_.*|GRAFT_FILE|SHALLOW_FILE|DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|NAMESPACE|REFERENCE_BACKEND|REPLACE_REF_BASE|CEILING_DIRECTORIES|DISCOVERY_ACROSS_FILESYSTEM|EXEC_PATH|TEMPLATE_DIR|LITERAL_PATHSPECS|GLOB_PATHSPECS|NOGLOB_PATHSPECS|ICASE_PATHSPECS)\z') {
       throw "effective Git refuses ambient authority carrier '$name'"
     }
-    if ($name -ieq 'Path' -or $name -imatch '\AGIT_(?:NO_REPLACE_OBJECTS|NO_LAZY_FETCH|OPTIONAL_LOCKS)\z' -or $name -imatch '\ACROSS_REVIEW_') { continue }
+    if ([string]::Equals($name, 'Path', [StringComparison]::OrdinalIgnoreCase) -or $name -imatch '\AGIT_(?:NO_REPLACE_OBJECTS|NO_LAZY_FETCH|OPTIONAL_LOCKS)\z' -or $name -imatch '\ACROSS_REVIEW_') { continue }
     # HOME/XDG, ordinary config lookup and legitimate author/committer metadata
     # remain exact. Ambiguous raw duplicate spellings are not resolved by guess.
     if (-not $seen.Add($name)) { throw "effective Git refuses duplicate raw environment name '$name'" }
@@ -70,7 +71,7 @@ function Open-CrgOperationGitState {
   param([object]$ProjectContext, [object]$OperationLock, [string]$Domain, [string]$IndexPath)
   if ($null -eq $ProjectContext -or $ProjectContext.Schema -ne 1 -or
       $ProjectContext.Domains -isnot [System.Collections.IDictionary] -or $ProjectContext.Domains.Count -ne 2 -or
-      $Domain -cnotin @('public', 'private') -or $null -eq $ProjectContext.Runtime -or
+      -not ([string]::Equals($Domain, 'public', [StringComparison]::Ordinal) -or [string]::Equals($Domain, 'private', [StringComparison]::Ordinal)) -or $null -eq $ProjectContext.Runtime -or
       $ProjectContext.Runtime.Id -cnotmatch '\A[0-9a-f]{64}\z' -or $ProjectContext.Runtime.ReadFile -isnot [scriptblock]) { throw 'effective Git requires a retained two-domain project context' }
   $runtime = $ProjectContext.Runtime
   $commands = @{}
@@ -86,28 +87,29 @@ function Open-CrgOperationGitState {
     if (-not $ProjectContext.Domains.Contains($name)) { throw 'effective Git domain is absent' }
     $selected = $ProjectContext.Domains[$name]
     foreach ($path in @($selected.GitDir, $selected.CommonDir, $selected.ObjectDir, $selected.IndexPath)) { $paths.Add($path) }
-    if ($selected.ObjectFormat -cnotin @('sha1', 'sha256') -or $selected.ObjectDir -cne (Join-Path $selected.CommonDir 'objects')) { throw 'effective Git object namespace is invalid' }
+    if (-not ([string]::Equals($selected.ObjectFormat, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($selected.ObjectFormat, 'sha256', [StringComparison]::Ordinal)) -or
+        -not [string]::Equals($selected.ObjectDir, (Join-Path $selected.CommonDir 'objects'), [StringComparison]::Ordinal)) { throw 'effective Git object namespace is invalid' }
     $expectedIndex = if ($name -ceq 'public') { Join-Path $selected.GitDir 'index' } else { Join-Path $ProjectContext.Domains.public.GitDir 'crg-private-index' }
-    if ($selected.IndexPath -cne $expectedIndex) { throw 'effective Git index is not the fixed context-associated index' }
+    if (-not [string]::Equals($selected.IndexPath, $expectedIndex, [StringComparison]::Ordinal)) { throw 'effective Git index is not the fixed context-associated index' }
     & $commands['Read-CrgAttachmentBytes'].Module { param($Ref) Assert-CrgGovernanceBranchRef -Ref $Ref } $selected.Ref
-    if ($name -ceq 'private' -and $selected.Parent -ceq 'absent') { continue }
+    if ([string]::Equals($name, 'private', [StringComparison]::Ordinal) -and [string]::Equals($selected.Parent, 'absent', [StringComparison]::Ordinal)) { continue }
     Assert-CrgOperationGitOid -Oid $selected.Parent -ObjectFormat $selected.ObjectFormat
   }
   & $commands['Read-CrgAttachmentBytes'].Module {
     param($Paths)
     foreach ($path in $Paths) {
       Assert-CrgGovernancePath -Path $path -Absolute -AllowGitMetadata
-      if ([IO.Path]::GetFullPath($path) -cne $path) { throw 'effective Git path is not canonical' }
+      if (-not [string]::Equals([IO.Path]::GetFullPath($path), $path, [StringComparison]::Ordinal)) { throw 'effective Git path is not canonical' }
     }
   } $paths.ToArray()
-  if ($OperationLock.PublicGitDirectory -cne $ProjectContext.Domains.public.GitDir -or
-      $ProjectContext.Domains.private.GitDir -cne $ProjectContext.Domains.private.CommonDir -or
+  if (-not [string]::Equals($OperationLock.PublicGitDirectory, $ProjectContext.Domains.public.GitDir, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($ProjectContext.Domains.private.GitDir, $ProjectContext.Domains.private.CommonDir, [StringComparison]::Ordinal) -or
       [string]::Equals($ProjectContext.Domains.public.CommonDir, $ProjectContext.Domains.private.CommonDir, [StringComparison]::OrdinalIgnoreCase)) { throw 'effective Git lock or domain separation differs from the captured project' }
-  if (-not [string]::IsNullOrEmpty($IndexPath) -and $IndexPath -cne $ProjectContext.Domains[$Domain].IndexPath) { throw 'effective Git refuses a caller-selected index path' }
+  if (-not [string]::IsNullOrEmpty($IndexPath) -and -not [string]::Equals($IndexPath, $ProjectContext.Domains[$Domain].IndexPath, [StringComparison]::Ordinal)) { throw 'effective Git refuses a caller-selected index path' }
   $environment = Get-CrgOperationGitEnvironment -Runtime $runtime -IndexPath $IndexPath
   $gitFile = & $runtime.ReadFile -Path $ProjectContext.GitExe -Maximum 16777216
   if ($null -eq $gitFile -or $gitFile.Present -ne $true -or $gitFile.Bytes -isnot [byte[]] -or
-      $gitFile.Path -cne $ProjectContext.GitExe -or $gitFile.Stream -isnot [IO.FileStream] -or
+      -not [string]::Equals($gitFile.Path, $ProjectContext.GitExe, [StringComparison]::Ordinal) -or $gitFile.Stream -isnot [IO.FileStream] -or
       -not $gitFile.Stream.CanRead -or $gitFile.Stream.CanWrite -or $gitFile.Stream.SafeFileHandle.IsClosed) { throw 'effective Git requires the borrowed retained executable stream' }
   $native = $commands['New-CrgPairedIndexCopy'].Module
   $custody = @{ DirectoryPins = (New-Object 'System.Collections.Generic.List[object]'); OwnedDirectories = (New-Object 'System.Collections.Generic.List[object]'); ControlFiles = (New-Object 'System.Collections.Generic.List[object]') }
@@ -224,14 +226,16 @@ function Invoke-CrgOperationGitChild {
   $State.Transcript = [IO.FileStream]::new($State.BorrowedTranscriptHandle, [IO.FileAccess]::ReadWrite, 8192, $false)
   $selected = $State.ProjectContext.Domains[$State.Domain]
   $verb = $Arguments[0]
-  # Literal path selection is a Git global option, not the command. Both
-  # public and private deletion routes use this existing prefixed form.
-  if ($verb -ceq '--literal-pathspecs') { $verb = $Arguments[1] }
+  # Literal path selection is a Git global option, not the command.
+  if ([string]::Equals($verb, '--literal-pathspecs', [StringComparison]::Ordinal)) { $verb = $Arguments[1] }
   $prefix = @('--no-pager', "--git-dir=$($selected.GitDir)", "--work-tree=$($State.ProjectContext.Root)")
-  $prefix += @('-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false')
+  # The outgoing-commit enumeration binds GIT_GRAFT_FILE to an owned empty
+  # file; Git 2.55 then prints a graft-deprecation hint on stderr even for an
+  # empty file, which the merged transcript would carry into every result.
+  $prefix += @('-c', 'core.fsmonitor=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'advice.graftFileDeprecated=false')
   $hooksPath = $null
   $lfsHook = $LfsPrePush -or $LfsPostCommit
-  if ($verb -cin @('add', 'update-index', 'read-tree', 'update-ref') -or $lfsHook) {
+  if ([System.Linq.Enumerable]::Contains([string[]]@('add', 'update-index', 'read-tree', 'update-ref'), [string]$verb, [StringComparer]::Ordinal) -or $lfsHook) {
     $binding = Get-CrgOperationGitCommand -Runtime $State.ProjectContext.Runtime -Module central-guards -Name Get-CrgCentralGuardBinding
     $hooksPath = & $binding -ProjectContext $State.ProjectContext -OperationLock $State.OperationLock -Domain $State.Domain
     $hookPattern = '\A' + [regex]::Escape((Join-Path $State.ProjectContext.Domains.private.GitDir '.crg-hooks-')) + '[0-9a-f]{32}\\' + $State.Domain + '\z'
@@ -248,8 +252,8 @@ function Invoke-CrgOperationGitChild {
   $lifetime = $TimeoutMilliseconds
   if ($lfsHook) {
     if ($State.Domain -cne 'public' -or $null -eq $State.LfsExecutable -or
-        ($LfsPrePush -and ($null -eq $State.InputStream -or $Arguments.Count -ne 4 -or $Arguments[0] -cne 'pre-push' -or $Arguments[1] -cne '--')) -or
-        ($LfsPostCommit -and ($Arguments.Count -ne 1 -or $Arguments[0] -cne 'post-commit'))) { throw 'Git LFS launch requires one exact owned stock hook route' }
+        ($LfsPrePush -and ($null -eq $State.InputStream -or $Arguments.Count -ne 4 -or -not [string]::Equals($Arguments[0], 'pre-push', [StringComparison]::Ordinal) -or -not [string]::Equals($Arguments[1], '--', [StringComparison]::Ordinal))) -or
+        ($LfsPostCommit -and ($Arguments.Count -ne 1 -or -not [string]::Equals($Arguments[0], 'post-commit', [StringComparison]::Ordinal)))) { throw 'Git LFS launch requires one exact owned stock hook route' }
     $launch.ApplicationName = $State.LfsExecutable.Record.Path
     $launch.Arguments = $Arguments
     # Git LFS launches Git internally. Supply only the already admitted public
@@ -322,7 +326,7 @@ function Assert-CrgOperationGitNamespace {
   )) {
     $line = Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $State -Arguments $probe.Args)
     if ($probe.Path) { $line = $line.Replace('/', '\') }
-    if ($line -cne $probe.Expected) { throw 'effective Git namespace differs from the captured domain' }
+    if (-not [string]::Equals($line, $probe.Expected, [StringComparison]::Ordinal)) { throw 'effective Git namespace differs from the captured domain' }
   }
   foreach ($leaf in @('alternates', 'http-alternates')) {
     $file = & $State.ProjectContext.Runtime.ReadFile -Path (Join-Path $selected.ObjectDir ('info/' + $leaf)) -Maximum 65536 -AllowAbsent
@@ -349,7 +353,7 @@ function Read-CrgOperationGitCommit {
   param([object]$State, [string]$Oid)
   $format = $State.ProjectContext.Domains[$State.Domain].ObjectFormat
   Assert-CrgOperationGitOid -Oid $Oid -ObjectFormat $format
-  if ((Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $State -Arguments @('cat-file', '-t', $Oid))) -cne 'commit') { throw 'effective Git result is not an actual commit object' }
+  if (-not [string]::Equals((Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $State -Arguments @('cat-file', '-t', $Oid))), 'commit', [StringComparison]::Ordinal)) { throw 'effective Git result is not an actual commit object' }
   $result = Invoke-CrgOperationGitChild -State $State -Arguments @('cat-file', 'commit', $Oid) -Maximum 2097152
   if ($result.ExitCode -ne 0 -or (Get-CrgOperationGitDigest -Bytes $result.Bytes -ObjectFormat $format) -cne $Oid) { throw 'effective Git raw commit differs from its object identity' }
   $separator = -1
@@ -387,7 +391,7 @@ function Read-CrgOperationGitIdentity {
       throw
     } finally { Close-CrgOperationGitState -State $publicState }
   }
-  $variable = if ($Kind -ceq 'Author') { 'GIT_AUTHOR_IDENT' } elseif ($Kind -ceq 'Committer') { 'GIT_COMMITTER_IDENT' } else { throw 'effective Git identity kind is invalid' }
+  $variable = if ([string]::Equals($Kind, 'Author', [StringComparison]::Ordinal)) { 'GIT_AUTHOR_IDENT' } elseif ([string]::Equals($Kind, 'Committer', [StringComparison]::Ordinal)) { 'GIT_COMMITTER_IDENT' } else { throw 'effective Git identity kind is invalid' }
   $result = Invoke-CrgOperationGitChild -State $State -Arguments @('var', $variable)
   $line = Get-CrgOperationGitLine -Result $result
   if ($line -cnotmatch '\A([^<>\r\n]+) <([^<>\r\n]+)> ([0-9]+) ([+-][0-9]{4})\z') { throw 'effective Git identity output is not canonical' }
@@ -398,7 +402,7 @@ function Invoke-CrgOperationGitCapability {
   param([object]$ProjectContext, [object]$OperationLock, [string]$Domain, [string]$IndexPath,
     [string]$Capability, [string]$Kind, [string]$TreeOid, [string]$ParentOid, [byte[]]$MessageBytes,
     [string]$ExpectedOldOid, [string]$NewOid)
-  if ($Capability -cnotin @('HooksPath', 'Identity', 'ResultCommit', 'ExpectedRef')) { throw 'effective Git capability is unsupported' }
+  if (-not [System.Linq.Enumerable]::Contains([string[]]@('HooksPath', 'Identity', 'ResultCommit', 'ExpectedRef'), [string]$Capability, [StringComparer]::Ordinal)) { throw 'effective Git capability is unsupported' }
   $state = Open-CrgOperationGitState -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain $Domain -IndexPath $IndexPath
   try {
     Assert-CrgOperationGitNamespace -State $state
@@ -414,12 +418,13 @@ function Invoke-CrgOperationGitCapability {
       'Identity' { $identity = Read-CrgOperationGitIdentity -State $state -Kind $Kind; $result = $identity.Raw; $value = $identity.Text }
       'ResultCommit' {
         Assert-CrgOperationGitOid -Oid $TreeOid -ObjectFormat $selected.ObjectFormat
-        if ($ParentOid -cne $selected.Parent -or ($ParentOid -ceq 'absent' -and $Domain -cne 'private')) { throw 'effective Git result parent differs from the captured domain' }
+        if (-not [string]::Equals($ParentOid, $selected.Parent, [StringComparison]::Ordinal) -or
+            ([string]::Equals($ParentOid, 'absent', [StringComparison]::Ordinal) -and -not [string]::Equals($Domain, 'private', [StringComparison]::Ordinal))) { throw 'effective Git result parent differs from the captured domain' }
         $validateMessage = Get-CrgOperationGitCommand -Runtime $ProjectContext.Runtime -Module paired-preparation -Name Assert-CrgPairedMessageBytes
         & $validateMessage -Bytes $MessageBytes
         if ((Read-CrgOperationGitRef -State $state) -cne $ParentOid) { throw 'effective Git result branch changed from the captured parent' }
         if ($ParentOid -cne 'absent') { $null = Read-CrgOperationGitCommit -State $state -Oid $ParentOid }
-        if ((Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $state -Arguments @('cat-file', '-t', $TreeOid))) -cne 'tree') { throw 'effective Git candidate is not an actual tree object' }
+        if (-not [string]::Equals((Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $state -Arguments @('cat-file', '-t', $TreeOid))), 'tree', [StringComparison]::Ordinal)) { throw 'effective Git candidate is not an actual tree object' }
         $messageCopy = [byte[]]$MessageBytes.Clone(); $digest = Get-CrgOperationGitDigest -Bytes $messageCopy
         $message = & $state.NativeModule {
           param($State, $Bytes, $Digest)
@@ -458,7 +463,8 @@ function Invoke-CrgOperationGitCapability {
       }
       'ExpectedRef' {
         Assert-CrgOperationGitOid -Oid $NewOid -ObjectFormat $selected.ObjectFormat
-        if ($ExpectedOldOid -cne $selected.Parent -or ($ExpectedOldOid -ceq 'absent' -and $Domain -cne 'private')) { throw 'effective Git expected-old differs from the captured domain parent' }
+        if (-not [string]::Equals($ExpectedOldOid, $selected.Parent, [StringComparison]::Ordinal) -or
+            ([string]::Equals($ExpectedOldOid, 'absent', [StringComparison]::Ordinal) -and -not [string]::Equals($Domain, 'private', [StringComparison]::Ordinal))) { throw 'effective Git expected-old differs from the captured domain parent' }
         $commit = Read-CrgOperationGitCommit -State $state -Oid $NewOid
         $parents = if ($ExpectedOldOid -ceq 'absent') { 0 } else { 1 }
         if ($commit.Parents.Count -ne $parents -or ($parents -eq 1 -and $commit.Parents[0] -cne $ExpectedOldOid)) { throw 'effective Git replacement is not the captured parent successor' }
@@ -484,22 +490,22 @@ function Invoke-CrgOperationGitCapability {
 function Get-CrgPairedGitHooksPath {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain, [string]$IndexPath)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain, [string]$IndexPath)
   Invoke-CrgOperationGitCapability @PSBoundParameters -Capability HooksPath
 }
 
 function Get-CrgPairedGitIdentity {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
-    [Parameter(Mandatory = $true)][ValidateSet('Author', 'Committer')][string]$Kind, [string]$IndexPath)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:Author|Committer)\z', Options = 'None')][string]$Kind, [string]$IndexPath)
   Invoke-CrgOperationGitCapability @PSBoundParameters -Capability Identity
 }
 
 function New-CrgPairedGitResultCommit {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][string]$TreeOid, [Parameter(Mandatory = $true)][string]$ParentOid,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$MessageBytes, [string]$IndexPath)
   Invoke-CrgOperationGitCapability @PSBoundParameters -Capability ResultCommit
@@ -508,7 +514,7 @@ function New-CrgPairedGitResultCommit {
 function Set-CrgPairedGitExpectedRef {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][string]$ExpectedOldOid, [Parameter(Mandatory = $true)][string]$NewOid, [string]$IndexPath)
   Invoke-CrgOperationGitCapability @PSBoundParameters -Capability ExpectedRef
 }
@@ -535,9 +541,9 @@ function Read-CrgOperationGitInventory {
   $text = [Text.UTF8Encoding]::new($false, $true).GetString($Result.Bytes)
   $entries = [Collections.Generic.List[object]]::new()
   $records = if ($text.Length -eq 0) { @() } else { @($text.Substring(0, $text.Length - 1).Split([char]0)) }
-  $width = if ($State.ProjectContext.Domains[$State.Domain].ObjectFormat -ceq 'sha1') { 40 } else { 64 }
+  $width = if ([string]::Equals($State.ProjectContext.Domains[$State.Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
   foreach ($record in $records) {
-    if ($Kind -ceq 'Tracked') {
+    if ([string]::Equals($Kind, 'Tracked', [StringComparison]::Ordinal)) {
       if ($record -cnotmatch ('\A(100644|100755|120000|160000) ([0-9a-f]{' + $width + '}) 0\t(.+)\z')) { throw 'staging refuses unmerged or malformed index entries' }
       $entries.Add([pscustomobject]@{ Path = [string]$Matches[3]; Mode = [string]$Matches[1]; Oid = [string]$Matches[2]; SkipWorktree = $false; AssumeUnchanged = $false })
     } else { $entries.Add([pscustomobject]@{ Path = $record }) }
@@ -549,34 +555,16 @@ function Read-CrgOperationGitInventory {
 function Get-CrgPairedGitStageInventory {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
-    [Parameter(Mandatory = $true)][ValidateSet('Tracked', 'Untracked', 'Ignored')][string]$Kind,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:Tracked|Untracked|Ignored)\z', Options = 'None')][string]$Kind,
     [AllowEmptyCollection()][string[]]$Paths = @())
   Assert-CrgOperationGitLiteralPaths -Runtime $ProjectContext.Runtime -Paths $Paths
-  if ($Kind -ceq 'Ignored' -and $Paths.Count -eq 0) { throw 'ignored private inventory requires explicit private selectors' }
+  if ([string]::Equals($Kind, 'Ignored', [StringComparison]::Ordinal) -and $Paths.Count -eq 0) { throw 'ignored private inventory requires explicit private selectors' }
   $state = Open-CrgOperationGitState -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain $Domain -IndexPath $ProjectContext.Domains[$Domain].IndexPath
   try {
     Assert-CrgOperationGitNamespace -State $state
-    $arguments = @('--literal-pathspecs', 'ls-files', '-z')
-    if ($Kind -ceq 'Tracked') { $arguments += '--stage' } else { $arguments += '--others'; if ($Kind -ceq 'Untracked') { $arguments += '--exclude-standard' } }
-    $batches = [Collections.Generic.List[object]]::new(); $batch = [Collections.Generic.List[string]]::new(); $length = 0
-    foreach ($path in $Paths) {
-      if ($path.Length -gt 8000) { throw 'staging literal path exceeds the native argument bound' }
-      if ($length + $path.Length + 4 -gt 8000) { $batches.Add($batch.ToArray()); $batch.Clear(); $length = 0 }
-      $batch.Add($path); $length += $path.Length + 4
-    }
-    if ($batch.Count -gt 0 -or $batches.Count -eq 0) { $batches.Add($batch.ToArray()) }
-    $entries = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
-    $totalBytes = 0
-    foreach ($pathsBatch in $batches) {
-      $result = Invoke-CrgOperationGitChild -State $state -Arguments ($arguments + @('--') + $pathsBatch) -Maximum 16777216 -TimeoutMilliseconds 120000
-      $totalBytes += $result.Bytes.Length
-      if ($totalBytes -gt 16777216) { throw 'combined staging inventory exceeds the acquisition bound' }
-      foreach ($entry in (Read-CrgOperationGitInventory -State $state -Result $result -Kind $Kind)) {
-        if (-not $entries.ContainsKey($entry.Path)) { $entries.Add($entry.Path, $entry) }
-      }
-    }
-    if ($Kind -ceq 'Tracked') {
+    $entries = Read-CrgOperationGitLiteralInventory -State $state -Kind $Kind -Paths $Paths
+    if ([string]::Equals($Kind, 'Tracked', [StringComparison]::Ordinal)) {
       $flags = Invoke-CrgOperationGitChild -State $state -Arguments @('--literal-pathspecs', 'ls-files', '-v', '-z') -Maximum 16777216 -TimeoutMilliseconds 120000
       if ($flags.ExitCode -ne 0 -or ($flags.Bytes.Length -gt 0 -and $flags.Bytes[$flags.Bytes.Length - 1] -ne 0)) { throw 'staging cannot acquire index visibility flags' }
       $flagsText = [Text.UTF8Encoding]::new($false, $true).GetString($flags.Bytes)
@@ -601,7 +589,7 @@ function Get-CrgPairedGitStageInventory {
 function Remove-CrgPairedGitIndexPaths {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Paths)
   Assert-CrgOperationGitLiteralPaths -Runtime $ProjectContext.Runtime -Paths $Paths
   if ($Paths.Count -eq 0) { return }
@@ -625,7 +613,7 @@ function Set-CrgPairedGitPrivateIndex {
   Assert-CrgOperationGitLiteralPaths -Runtime $ProjectContext.Runtime -Paths @($Entries | ForEach-Object { $_.Path })
   $captured = [Collections.Generic.List[object]]::new(); [long]$total = 0
   foreach ($entry in $Entries) {
-    if ($entry.Mode -cnotin @('0', '100644', '100755') -or
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@('0', '100644', '100755'), [string]$entry.Mode, [StringComparer]::Ordinal) -or
         ($entry.Mode -ceq '0' -and $null -ne $entry.Bytes) -or
         ($entry.Mode -cne '0' -and ($entry.Bytes -isnot [byte[]] -or $entry.Bytes.Length -gt 16777216))) { throw 'private staging requires explicit removal or bounded ordinary raw file bytes' }
     $bytes = if ($entry.Mode -ceq '0') { $null } else { ,([byte[]]$entry.Bytes.Clone()) }
@@ -649,7 +637,7 @@ function Set-CrgPairedGitPrivateIndex {
         } $state $entry.Bytes $digest ('blob-' + $position + '.bin')
         $oid = Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $state -Arguments @('hash-object', '-w', '--no-filters', '--', $owned.Path))
         $expected = Get-CrgOperationGitDigest -Bytes $entry.Bytes -ObjectFormat $ProjectContext.Domains.private.ObjectFormat -ObjectKind blob
-        if ($oid -cne $expected) { throw 'private raw blob differs from captured working bytes' }
+        if (-not [string]::Equals($oid, $expected, [StringComparison]::Ordinal)) { throw 'private raw blob differs from captured working bytes' }
         $result = Invoke-CrgOperationGitChild -State $state -Arguments @('update-index', '--add', '--cacheinfo', $entry.Mode, $oid, $entry.Path)
       }
       if ($result.ExitCode -ne 0 -or $result.Bytes.Length -ne 0) { throw 'private index update failed; inspect both actual indexes before continuing' }
@@ -658,6 +646,43 @@ function Set-CrgPairedGitPrivateIndex {
     return [pscustomobject]@{ Domain = 'private'; UpdatedPaths = @($captured | ForEach-Object { $_.Path }); Checks = $state.Observations.ToArray(); ReadyForPublication = $false }
   } catch { $_.Exception.Data['CrgPairedGitObservations'] = $state.Observations.ToArray(); throw }
   finally { Close-CrgOperationGitState -State $state }
+}
+
+# The one literal ls-files reader: every inventory (whole index when Paths is
+# empty, literal selection otherwise) shares the argument batching, the
+# combined acquisition bound and the first-wins dedup, so none of those can
+# drift between callers. The batch list stays a List and is iterated here
+# rather than returned: PowerShell unrolls a returned array one level, which
+# would turn one empty batch into zero children and a single batch into one
+# child per path.
+function Read-CrgOperationGitLiteralInventory {
+  param([object]$State, [ValidatePattern('\A(?:Tracked|Untracked|Ignored)\z', Options = 'None')][string]$Kind, [AllowEmptyCollection()][string[]]$Paths)
+  $arguments = @('--literal-pathspecs', 'ls-files', '-z')
+  if ([string]::Equals($Kind, 'Tracked', [StringComparison]::Ordinal)) { $arguments += '--stage' } else { $arguments += '--others'; if ([string]::Equals($Kind, 'Untracked', [StringComparison]::Ordinal)) { $arguments += '--exclude-standard' } }
+  $batches = [Collections.Generic.List[object]]::new(); $batch = [Collections.Generic.List[string]]::new(); $length = 0
+  foreach ($path in $Paths) {
+    if ($path.Length -gt 8000) { throw 'staging literal path exceeds the native argument bound' }
+    if ($length + $path.Length + 4 -gt 8000) { $batches.Add($batch.ToArray()); $batch.Clear(); $length = 0 }
+    $batch.Add($path); $length += $path.Length + 4
+  }
+  if ($batch.Count -gt 0 -or $batches.Count -eq 0) { $batches.Add($batch.ToArray()) }
+  $entries = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $totalBytes = 0
+  foreach ($pathsBatch in $batches) {
+    $result = Invoke-CrgOperationGitChild -State $State -Arguments ($arguments + @('--') + $pathsBatch) -Maximum 16777216 -TimeoutMilliseconds 120000
+    $totalBytes += $result.Bytes.Length
+    if ($totalBytes -gt 16777216) { throw 'combined staging inventory exceeds the acquisition bound' }
+    foreach ($entry in (Read-CrgOperationGitInventory -State $State -Result $result -Kind $Kind)) {
+      if (-not $entries.ContainsKey($entry.Path)) { $entries.Add($entry.Path, $entry) }
+    }
+  }
+  return $entries
+}
+
+function Read-CrgOperationGitStagedLiteralMap {
+  param([object]$State, [string[]]$Paths)
+  if ($null -eq $Paths -or $Paths.Count -eq 0) { throw 'staged path inventory requires an explicit path array' }
+  return (Read-CrgOperationGitLiteralInventory -State $State -Kind Tracked -Paths $Paths)
 }
 
 function Add-CrgPairedGitPublicPaths {
@@ -669,10 +694,30 @@ function Add-CrgPairedGitPublicPaths {
   Assert-CrgOperationGitLiteralPaths -Runtime $ProjectContext.Runtime -Paths $PrivateExclusions
   if ($Paths.Count -eq 0) { return }
   if ($PrivateExclusions.Count -eq 0) { throw 'public staging requires explicit private exclusions' }
+  # Git 2.55 pathspec matching of untracked files under negative pathspecs is
+  # order-dependent; negatives are not passed to git. Exclusion is enforced by
+  # refusing a private prefix of any positive, then by comparing the private
+  # entries of the public index before and after the add: selection-mode
+  # staging leaves unselected private-owned paths in the public index on
+  # purpose (the public commit check refuses them later), so only an entry the
+  # add created or rewrote is this function's failure.
+  $exclusionSet = [Collections.Generic.HashSet[string]]::new([string[]]$PrivateExclusions, [StringComparer]::Ordinal)
+  foreach ($path in $Paths) {
+    # Walk the positive's ancestor prefixes instead of scanning every exclusion:
+    # both arrays are bounded at 100000 entries, so the nested scan is the
+    # operation's largest cost on a wide stage.
+    $candidate = $path
+    while ($true) {
+      if ($exclusionSet.Contains($candidate)) { throw "public staging refuses positive path '$path' under private exclusion '$candidate'" }
+      $slash = $candidate.LastIndexOf([char]'/')
+      if ($slash -lt 0) { break }
+      $candidate = $candidate.Substring(0, $slash)
+    }
+  }
   $state = Open-CrgOperationGitState -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain public -IndexPath $ProjectContext.Domains.public.IndexPath
   try {
     Assert-CrgOperationGitNamespace -State $state
-    $specs = @($Paths | ForEach-Object { ':(top,literal)' + $_ }) + @($PrivateExclusions | ForEach-Object { ':(top,literal,exclude)' + $_ })
+    $specs = @($Paths | ForEach-Object { ':(top,literal)' + $_ })
     $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(($specs -join [char]0) + [char]0)
     if ($bytes.Length -gt 16777216) { throw 'public staging pathspec inventory exceeds its bound' }
     $digest = Get-CrgOperationGitDigest -Bytes $bytes
@@ -680,11 +725,21 @@ function Add-CrgPairedGitPublicPaths {
       param($State, $Bytes, $Digest)
       New-CrgOwnedBinaryFile -Custody $State.Custody -Parent $State.Directory -Leaf 'public-pathspecs.bin' -Bytes $Bytes -ExpectedSha256 $Digest
     } $state $bytes $digest
-    # Git 2.55 otherwise rejects ignored negative pathspecs as explicit ignored
-    # requests. Positive paths are already public-eligible, and the complete
-    # private exclusions remain authoritative before content/filter acquisition.
-    $result = Invoke-CrgOperationGitChild -State $state -Arguments @('add', '--force', '--all', ('--pathspec-from-file=' + $owned.Path), '--pathspec-file-nul') -Maximum 1048576 -TimeoutMilliseconds 600000
+    $privateBefore = Read-CrgOperationGitStagedLiteralMap -State $state -Paths $PrivateExclusions
+    # --force stays: the caller's eligibility classification decides what is
+    # staged, so a selected path under an ignore rule is added, not refused.
+    $result = Invoke-CrgOperationGitChild -State $state -Arguments @('add', '--force', ('--pathspec-from-file=' + $owned.Path), '--pathspec-file-nul') -Maximum 1048576 -TimeoutMilliseconds 600000
     if ($result.ExitCode -ne 0) { throw 'public staging failed; inspect both actual indexes before continuing' }
+    $positives = Read-CrgOperationGitStagedLiteralMap -State $state -Paths $Paths
+    foreach ($path in $Paths) {
+      if (-not $positives.ContainsKey($path)) { throw "public staging left positive path '$path' out of the public index" }
+    }
+    $privateAfter = Read-CrgOperationGitStagedLiteralMap -State $state -Paths $PrivateExclusions
+    foreach ($entry in $privateAfter.Values) {
+      if (-not $privateBefore.ContainsKey($entry.Path)) { throw "public staging added private path '$($entry.Path)' to the public index" }
+      $before = $privateBefore[$entry.Path]
+      if ($before.Mode -cne $entry.Mode -or $before.Oid -cne $entry.Oid) { throw "public staging rewrote private path '$($entry.Path)' in the public index" }
+    }
     return [pscustomobject]@{ Domain = 'public'; UpdatedPaths = [string[]]$Paths.Clone(); DiagnosticBytes = $result.Bytes; Checks = $state.Observations.ToArray(); ReadyForPublication = $false }
   } catch { $_.Exception.Data['CrgPairedGitObservations'] = $state.Observations.ToArray(); throw }
   finally { Close-CrgOperationGitState -State $state }
@@ -756,18 +811,20 @@ function Initialize-CrgPairedPrivateDatabase {
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
     [Parameter(Mandatory = $true)][object]$OwnedDirectory, [Parameter(Mandatory = $true)][byte[]]$AttachmentBytes)
   $domain = $ProjectContext.Domains.private
-  if ($domain.Parent -cne 'absent' -or $OwnedDirectory.Path -cne $domain.GitDir -or $domain.GitDir -cne $domain.CommonDir -or
-      $domain.ObjectFormat -cne $ProjectContext.Domains.public.ObjectFormat) { throw 'private database initialization requires the proposed absent same-format domain' }
+  if (-not [string]::Equals($domain.Parent, 'absent', [StringComparison]::Ordinal) -or -not [string]::Equals($OwnedDirectory.Path, $domain.GitDir, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($domain.GitDir, $domain.CommonDir, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($domain.ObjectFormat, $ProjectContext.Domains.public.ObjectFormat, [StringComparison]::Ordinal)) { throw 'private database initialization requires the proposed absent same-format domain' }
   $runtime = $ProjectContext.Runtime
   $assertLock = Get-CrgOperationGitCommand -Runtime $runtime -Module paired-diff -Name Assert-CrgPairedOperationLock
   $readAttachment = Get-CrgOperationGitCommand -Runtime $runtime -Module private-governance -Name Read-CrgAttachmentBytes
   $capture = Get-CrgOperationGitCommand -Runtime $runtime -Module central-context -Name Read-CrgCentralTreeBytes
   & $assertLock -Lock $OperationLock
-  if ($OperationLock.PublicGitDirectory -cne $ProjectContext.Domains.public.GitDir) { throw 'private initialization requires the actual public operation lock' }
+  if (-not [string]::Equals($OperationLock.PublicGitDirectory, $ProjectContext.Domains.public.GitDir, [StringComparison]::Ordinal)) { throw 'private initialization requires the actual public operation lock' }
   $attachment = & $readAttachment -Bytes $AttachmentBytes
-  if ($attachment.PrivateGitDir -cne $domain.GitDir -or $attachment.PrivateRef -cne $domain.Ref -or
-      $attachment.PublicRef -cne $ProjectContext.Domains.public.Ref -or $attachment.RuntimeStore -cne $runtime.Store -or
-      $domain.Ref -cne ('refs/heads/crg-' + $attachment.ProjectId) -or $domain.ObjectFormat -cnotin @('sha1', 'sha256')) { throw 'private initialization differs from the new-database proposal' }
+  if (-not [string]::Equals($attachment.PrivateGitDir, $domain.GitDir, [StringComparison]::Ordinal) -or -not [string]::Equals($attachment.PrivateRef, $domain.Ref, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($attachment.PublicRef, $ProjectContext.Domains.public.Ref, [StringComparison]::Ordinal) -or -not [string]::Equals($attachment.RuntimeStore, $runtime.Store, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($domain.Ref, ('refs/heads/crg-' + $attachment.ProjectId), [StringComparison]::Ordinal) -or
+      -not ([string]::Equals($domain.ObjectFormat, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($domain.ObjectFormat, 'sha256', [StringComparison]::Ordinal))) { throw 'private initialization differs from the new-database proposal' }
   $expectedText = @('crg-private-initialization v1', ('attachment-sha256 ' + (Get-CrgOperationGitDigest -Bytes $AttachmentBytes)),
     ('public-git-dir ' + $ProjectContext.Domains.public.GitDir), ('object-format ' + $domain.ObjectFormat)) -join "`n"
   $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes($expectedText + "`n")
@@ -777,9 +834,10 @@ function Initialize-CrgPairedPrivateDatabase {
   }
   $completed = & $runtime.ReadFile -Path (Join-Path $OperationLock.PublicGitDirectory 'crg-attachment-initialized') -Maximum 65536 -AllowAbsent
   if ($completed.Present) { throw 'completed private initialization must use ordinary database admission, never initialization' }
-  $config = "[core]`n`trepositoryformatversion = " + $(if ($domain.ObjectFormat -ceq 'sha1') { '0' } else { '1' }) + "`n`tfilemode = false`n`tbare = true`n"
-  if ($domain.ObjectFormat -ceq 'sha256') { $config += "[extensions]`n`tobjectformat = sha256`n" }
-  $texts = @{ HEAD = ('ref: ' + $domain.Ref + "`n"); config = $config }
+  $config = "[core]`n`trepositoryformatversion = " + $(if ([string]::Equals($domain.ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { '0' } else { '1' }) + "`n`tfilemode = false`n`tbare = true`n"
+  if ([string]::Equals($domain.ObjectFormat, 'sha256', [StringComparison]::Ordinal)) { $config += "[extensions]`n`tobjectformat = sha256`n" }
+  $texts = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+  $texts.Add('HEAD', ('ref: ' + $domain.Ref + "`n")); $texts.Add('config', $config)
   # git init rewrites metadata through intermediate states. A recorded new
   # database instead grows monotonically from absent/exact layout components;
   # adoption never gains permission to rewrite a config, ref or object store.
@@ -787,7 +845,8 @@ function Initialize-CrgPairedPrivateDatabase {
     param($Project, $Lock, $Owner, $Texts, $Capture)
     Initialize-CrgAttributeNeutralNative
     $pins = New-Object 'System.Collections.Generic.List[object]'
-    $directories = [ordered]@{ '' = $null; 'objects' = $null; 'objects\info' = $null; 'objects\pack' = $null; 'refs' = $null; 'refs\heads' = $null; 'refs\tags' = $null }
+    $directories = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+    foreach ($layout in @('', 'objects', 'objects\info', 'objects\pack', 'refs', 'refs\heads', 'refs\tags')) { $directories.Add($layout, $null) }
     $present = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     try {
       $root = Enter-CrgAttributeNeutralDirectoryChain -Path $Owner.Path -Pins $pins -DenyLeafRename
@@ -800,18 +859,18 @@ function Initialize-CrgPairedPrivateDatabase {
         foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory.Path)) {
           $leaf = [IO.Path]::GetFileName($path)
           $child = if ($relative.Length -eq 0) { $leaf } else { $relative + '\' + $leaf }
-          if ($child -cin @($directories.Keys)) {
+          if ($directories.Contains($child)) {
             $directories[$child] = Enter-CrgAttributeNeutralDirectoryChain -Path $path -Pins $pins -DenyLeafRename
             continue
           }
           $scratch = $relative.Length -eq 0 -and $leaf -cmatch '\A\.crg-initialize-(HEAD|config)-[0-9a-f]{32}\z'
           $target = if ($scratch) { $Matches[1] } else { $leaf }
-          if ($relative.Length -ne 0 -or $target -cnotin @($Texts.Keys)) { throw 'private initialization contains foreign layout data; no existing file or directory is removed' }
+          if ($relative.Length -ne 0 -or -not $Texts.ContainsKey($target)) { throw 'private initialization contains foreign layout data; no existing file or directory is removed' }
           $expected = [Text.UTF8Encoding]::new($false).GetBytes($Texts[$target])
           $file = & $Project.Runtime.ReadFile -Path $path -Maximum $expected.Length
           $actual = [Text.UTF8Encoding]::new($false, $true).GetString($file.Bytes)
           if (($scratch -and -not $Texts[$target].StartsWith($actual, [StringComparison]::Ordinal)) -or
-              (-not $scratch -and $actual -cne $Texts[$target])) { throw 'private initialization metadata differs from the exact proposed layout; existing bytes remain preserved' }
+              (-not $scratch -and -not [string]::Equals($actual, $Texts[$target], [StringComparison]::Ordinal))) { throw 'private initialization metadata differs from the exact proposed layout; existing bytes remain preserved' }
           if (-not $scratch) { $null = $present.Add($target) }
         }
       }
@@ -845,7 +904,7 @@ function Initialize-CrgPairedPrivateDatabase {
           }
         }
         $file = & $Project.Runtime.ReadFile -Path (Join-Path $root.Path $leaf) -Maximum 16384
-        if ([Text.UTF8Encoding]::new($false, $true).GetString($file.Bytes) -cne $Texts[$leaf]) { throw 'initialized metadata failed exact retained readback' }
+        if (-not [string]::Equals([Text.UTF8Encoding]::new($false, $true).GetString($file.Bytes), $Texts[$leaf], [StringComparison]::Ordinal)) { throw 'initialized metadata failed exact retained readback' }
       }
       Assert-CrgPairedOperationLock -Lock $Lock
       # The existing read-only capture route creates no private operation
@@ -862,7 +921,7 @@ function Initialize-CrgPairedPrivateDatabase {
         )) {
           $line = Get-CrgStatusGitLine -Arguments ($prefix + $probe.Args) -GitExe $Project.GitExe
           if ($probe.Path) { $line = $line.Replace('/', '\') }
-          if ($line -cne $probe.Expected) { throw 'initialized private namespace differs from the recorded proposal' }
+          if (-not [string]::Equals($line, $probe.Expected, [StringComparison]::Ordinal)) { throw 'initialized private namespace differs from the recorded proposal' }
         }
         $refs = Invoke-CrgStatusGit -Arguments ($prefix + @('for-each-ref', '--count=1', '--format=%(refname)')) -GitExe $Project.GitExe -Maximum 16384
         if ($refs.Length -ne 0) { throw 'new private initialization contains an existing ref' }
@@ -885,7 +944,7 @@ function Write-CrgPairedPrivateEmptyTree {
       New-CrgOwnedBinaryFile -Custody $State.Custody -Parent $State.Directory -Leaf 'empty-tree.bin' -Bytes $Bytes -ExpectedSha256 $Digest
     } $state $bytes $digest
     $oid = Get-CrgOperationGitLine -Result (Invoke-CrgOperationGitChild -State $state -Arguments @('hash-object', '-w', '-t', 'tree', '--no-filters', '--', $owned.Path))
-    if ($oid -cne (Get-CrgOperationGitDigest -Bytes $bytes -ObjectFormat $ProjectContext.Domains.private.ObjectFormat -ObjectKind tree)) { throw 'private empty tree has an unexpected object identity' }
+    if (-not [string]::Equals($oid, (Get-CrgOperationGitDigest -Bytes $bytes -ObjectFormat $ProjectContext.Domains.private.ObjectFormat -ObjectKind tree), [StringComparison]::Ordinal)) { throw 'private empty tree has an unexpected object identity' }
     return [pscustomobject]@{ Oid = $oid; Checks = $state.Observations.ToArray(); ReadyForPublication = $false }
   } catch { $_.Exception.Data['CrgPairedGitObservations'] = $state.Observations.ToArray(); throw }
   finally { Close-CrgOperationGitState -State $state }

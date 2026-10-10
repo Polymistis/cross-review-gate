@@ -8,9 +8,10 @@ function Get-CrgResumeStateCore {
     [AllowNull()][AllowEmptyCollection()][byte[]]$PointerBytes,
     [string]$ActualPublicOid, [string]$ActualPrivateOid,
     [string]$PublicObjectFormat, [string]$PrivateObjectFormat,
-    [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $receiptName = 'Read-CrgPairReceiptBytes'; $handoffName = 'Read-CrgPairHandoffBytes'
-  if ($Origin -ceq 'first-attachment-v1') {
+  # Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     $receiptName = 'Read-CrgFirstAttachmentReceiptBytes'
     $handoffName = 'Read-CrgFirstAttachmentHandoffBytes'
   }
@@ -29,16 +30,16 @@ function Get-CrgResumeStateCore {
     $actual = if ($domain -ceq 'public') { $ActualPublicOid } else { $ActualPrivateOid }
     # Equality to a strictly parsed endpoint also enforces the domain's OID
     # format, including literal absent only for a new first private history.
-    if ($actual -cne $old -and $actual -cne $new) { throw "resume $domain ref differs from both recorded endpoints" }
-    $changed = $old -cne $new
-    $position = if (-not $changed) { 'unchanged' } elseif ($actual -ceq $new) { 'new' } else { 'old' }
+    if (-not [string]::Equals($actual, $old, [StringComparison]::Ordinal) -and -not [string]::Equals($actual, $new, [StringComparison]::Ordinal)) { throw "resume $domain ref differs from both recorded endpoints" }
+    $changed = -not [string]::Equals($old, $new, [StringComparison]::Ordinal)
+    $position = if (-not $changed) { 'unchanged' } elseif ([string]::Equals($actual, $new, [StringComparison]::Ordinal)) { 'new' } else { 'old' }
     $domains.Add($domain, [pscustomobject]@{
       Ref = $handoff.Fields[$domain + '-ref']; OldOid = $old; NewOid = $new
       ActualOid = $actual; Changed = $changed; State = $position
     })
   }
-  $publicNew = $ActualPublicOid -ceq $domains.public.NewOid
-  $privateNew = $ActualPrivateOid -ceq $domains.private.NewOid
+  $publicNew = [string]::Equals($ActualPublicOid, $domains.public.NewOid, [StringComparison]::Ordinal)
+  $privateNew = [string]::Equals($ActualPrivateOid, $domains.private.NewOid, [StringComparison]::Ordinal)
   if ($domains.public.Changed -and $domains.private.Changed -and $publicNew -and -not $privateNew) {
     throw 'resume refuses public-new while the changed private ref remains old'
   }
@@ -47,7 +48,7 @@ function Get-CrgResumeStateCore {
   $state = if ($publicNew -and $privateNew) { 'both-new' }
     elseif ($privateNew) { 'private-new-public-old' } else { 'both-old' }
   $pointer = $null; $pointerState = ''
-  if ($null -eq $PointerBytes -and ($Origin -ceq 'first-attachment-v1' -or $state -ceq 'both-new')) {
+  if ($null -eq $PointerBytes -and ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -or [string]::Equals($state, 'both-new', [StringComparison]::Ordinal))) {
     # Exact no-replace pointer publication can leave the preceding pointer
     # aside after both refs advance. The retained receipt/handoff and verified
     # predecessor still bind recovery; absence never supplies review credit.
@@ -55,9 +56,9 @@ function Get-CrgResumeStateCore {
   } else {
     $pointer = & $commands['Read-CrgCompletedPairPointerBytes'] -Bytes $PointerBytes
     if ($pointer.ReceiptSha256 -ceq $receipt.ReceiptSha256) {
-      if ($pointer.Origin -cne $Origin -or $state -cne 'both-new') { throw 'resume current pointer requires matching origin and both recorded results' }
+      if (-not [string]::Equals($pointer.Origin, $Origin, [StringComparison]::Ordinal) -or -not [string]::Equals($state, 'both-new', [StringComparison]::Ordinal)) { throw 'resume current pointer requires matching origin and both recorded results' }
       $pointerState = 'current'
-    } elseif ($Origin -ceq 'paired-v1' -and $pointer.ReceiptSha256 -ceq $receipt.Fields['previous-pair']) {
+    } elseif ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal) -and [string]::Equals($pointer.ReceiptSha256, $receipt.Fields['previous-pair'], [StringComparison]::Ordinal)) {
       # The predecessor may itself be an initial receipt. Its closed pointer
       # grammar and digest match do not replace live predecessor admission.
       $pointerState = 'preceding'
@@ -73,7 +74,7 @@ function Get-CrgResumeStateCore {
     Public = $domains.public; Private = $domains.private
     RequiresFreshReview = $true; ReadyForPublication = $false
     PendingBindings = @('live-record-ref-and-pointer-custody',
-      $(if ($Origin -ceq 'first-attachment-v1') { 'bootstrap-attachment-and-ancestry' } else { 'preceding-receipt-and-association' }),
+      $(if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) { 'bootstrap-attachment-and-ancestry' } else { 'preceding-receipt-and-association' }),
       'retained-original-runtime-and-input', 'fresh-current-review-and-publication-guards')
   }
 }
@@ -85,8 +86,8 @@ function Get-CrgPairedResumeState {
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PointerBytes,
     [Parameter(Mandatory = $true)][string]$ActualPublicOid,
     [Parameter(Mandatory = $true)][string]$ActualPrivateOid,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Get-CrgResumeStateCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -97,8 +98,8 @@ function Get-CrgFirstAttachmentResumeState {
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PointerBytes,
     [Parameter(Mandatory = $true)][string]$ActualPublicOid,
     [Parameter(Mandatory = $true)][string]$ActualPrivateOid,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Get-CrgResumeStateCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 

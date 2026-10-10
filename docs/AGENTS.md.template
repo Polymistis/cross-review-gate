@@ -31,28 +31,32 @@ implementer sessions also see it).
 
 ## Code unit-test policy — all modes
 
-Code unit tests are banned by the operator decision of 2026-09-07, clarified
-2026-09-08. Sessions and delegated agents must not write, add, expand, rewrite,
-maintain, restore, or run code unit tests. Remove existing code unit tests and
-unit-test-only assets through the applicable authorized repository workflow.
-Do not infer permission to mutate another repository merely from loading this
-policy.
+- Never write, add, expand, rewrite, maintain, restore, or run code unit tests.
+  This applies to sessions, reviewers, and delegated agents. Renaming a unit
+  test as a probe, check, experiment, diagnostic, or verification script does
+  not create an exception.
+- Remove existing code unit tests and unit-test-only assets through the
+  applicable authorized repository workflow. Loading this policy alone
+  authorizes no changes to any other repository.
+- The ban applies only to code unit tests. Live testing, manual checks,
+  ordinary program runs, and functional validation remain permitted and
+  important. Source inspection, mandatory code review, and builds remain
+  available. Preserve production input validation, error handling, runtime
+  assertions, and safety checks.
+- Reviewers must not request missing code unit tests or treat unit-test
+  deletion as a defect. Flag newly authored or restored code unit tests as
+  policy violations; do not misclassify permitted testing.
+- This ban takes precedence over instructions requiring code unit tests. Only
+  an explicit operator decision can change the ban.
 
-The ban is limited to code unit tests. Earlier wording banning all tests was
-incorrect and is superseded. Do not extend the ban to integration, end-to-end,
-smoke, performance, manual, live, or other functional testing merely by category.
-Renaming a code unit test as a probe, check, experiment, or verification script
-is not an exception. No project mode or invariant surface waives the code
-unit-test ban. Older instructions requiring code unit tests are superseded.
+No project mode or invariant surface waives the ban. Carry this section into
+both AGENTS.md and CLAUDE.md and into delegated task instructions.
 
-Live testing, manual checks, ordinary program runs, and functional validation
-remain permitted and important. Source inspection, mandatory cross-review, and
-builds remain available for verification. Preserve production input validation,
-runtime assertions, error handling, and safety checks. Reviewers must flag new
-or restored code unit tests as policy violations, never request missing code
-unit tests or treat authorized code-unit-test deletion as a defect. Only an
-explicit later operator decision can change this code unit-test ban. Carry this
-section into both AGENTS.md and CLAUDE.md and into delegated task instructions.
+A centrally attached project can loosen the ban only through reviewed
+`unit-tests` records in `.crg-project/project.conf` (`docs/private-governance-v1.md`);
+its reviews then apply the configured scope. Once that configuration has landed,
+restate the same scope here, and only as far as the operator's global
+instructions allow; never wider than the configuration.
 
 ## Resource efficiency — all modes
 
@@ -269,8 +273,8 @@ save/restore pattern.
      same round is a judgment call — fix it when that makes sense,
      otherwise let the follow-up index carry it forward; it is never
      simply ignored.
-   - BLOCKED (review-wrapper exit 2) → commit ABORTED. Fix BLOCKERS, re-stage,
-     retry.
+   - BLOCKED (review-wrapper exit 2) → commit ABORTED. Fix each BLOCKER as a
+     class, record it in the remediation record (below), re-stage, retry.
    - A review-wrapper exit 0 permits gate continuation; it does not prove a
      commit landed. Only an overall commit-wrapper or direct `git commit`
      process exit 0 proves landing. A completion report pairs that process
@@ -446,8 +450,7 @@ and needs the same fix.
 
 **4. Paired-file mirror audit.** When the cited file has a paired
 mirror (e.g., `scripts/codex/auto-review.ps1` paired with `scripts/
-claude/auto-review.ps1`, or `scripts/codex/commit.ps1` paired with
-`scripts/claude/commit.ps1`), open the mirror at the corresponding
+claude/auto-review.ps1`), open the mirror at the corresponding
 line region and check whether the defect exists there too. If it does,
 fix both in the same commit. Symmetric-wrapper asymmetric drift is a
 defect class that has historically required dedicated rounds to
@@ -470,21 +473,45 @@ does not prove that the new invocation works.
   (CLI flag with `--help`, env var with documented activation path,
   file claim with `Test-Path`)?
 
+**Remediation record (enforced).** The commit gate keeps each blocked
+staged review's BLOCKER findings and refuses the retry, without a review,
+until `crg-remediation.txt` in the working tree's own Git directory (for
+example `.git/crg-remediation.txt`) gives each one it is asked to cover a
+block (those of the blocked rounds of the last 14 days, the newest 20
+rounds, up to 256 newest first; more also require the approach line
+below):
+
+```
+finding <digest> [<digest> ...]
+invariant <the rule every instance broke>
+sweep <where and how every instance was searched for>
+sites <every place changed, or why none needed to change>
+```
+
+with one block per defect class (a class of more than 63 findings
+continues on further `finding` lines), and after two blocked rounds a final
+`approach <why the approach is right, or how it was re-derived>` line. The
+refusal lists up to 100 digests still missing and counts the rest; the
+round files it names hold every one. Write the record from the sweep
+actually made: the next review is shown the prior findings and the record
+and checks the class across the whole diff.
+
 If any answer is "no" or "did not apply", state which one where the next
 round will actually read it — see "Reviewer independence between rounds"
 below for which channel carries that by scope. A `Staged` re-run receives
 no commit-log evidence, so in this pre-commit loop the gap belongs in the
-diff (a comment at the site, or the doc line beside it); a commit message
-alone reaches the next committer but not the next `Staged` review.
+remediation record or the diff (a comment at the site, or the doc line
+beside it); a commit message alone reaches the next committer but not the
+next `Staged` review.
 
 The reviewer prompt at `scripts/codex/review-prompt-template.md`
 mirrors this discipline in its `## Review goal` completeness mandate
 (enumerate EVERY finding in one pass, then re-scan for what the first
 sweep missed). The reviewer is expected to pre-sweep within a single
 review; the committer is expected to sweep across rounds. Both
-disciplines are necessary because the reviewer cannot see the prior
-round's verdict file and the committer cannot see the rest of the
-codebase from the reviewer's vantage.
+disciplines are necessary because the reviewer sees only the prior rounds'
+BLOCKER findings and the remediation record, not their verdicts, and the
+committer cannot see the rest of the codebase from the reviewer's vantage.
 
 ## Project mode (PROJECT-MODE.md)
 
@@ -492,8 +519,9 @@ A repo MAY declare its lifecycle phase in a root `PROJECT-MODE.md`
 (grammar and semantics: the `## Project mode` section of
 `scripts/codex/review-prompt-template.md`; full doctrine:
 `docs/project-mode-doctrine-v1.md` in the package). The declared mode
-governs behavior-preservation duties only — code unit tests are banned and code
-quality is mode-invariant, and the reviewer gate stays authoritative in
+governs behavior-preservation duties, plus the code unit-test scope when a
+reviewed project configuration names a prototype allowance (see the code
+unit-test policy above). Code quality is mode-invariant, and the reviewer gate stays authoritative in
 every mode. A campaign supplies lifecycle context and current priority;
 it is never an allowlist for project work, and failure to advance it is
 never a finding by itself.
@@ -536,7 +564,7 @@ Review-context rules:
 
 Completion is **pasted, reproducible evidence**, not an assertion of belief.
 Your project's convention doc defines the completion CRITERION (adversarial-review-gate
-PASS — a CLEAN or NOTE-only verdict — plus a green workspace/build gate); this
+PASS — a verdict with no BLOCKER finding — plus a green workspace/build gate); this
 section defines the ARTIFACTS a completion report must contain so the criterion is
 verifiable rather than claimed. A report that says "checks pass / gate clean"
 without the artifacts below is **not** a completion — the most expensive failure
@@ -552,7 +580,13 @@ during the review:
    `auto-merge.ps1` prints a stable per-file path on success, so do not quote a
    drifting filename). For a COMMIT: process exit 0 together with the
    provider-neutral `[pre-commit] adversarial review PASS` line. The line names
-   the pinned candidate's review verdict; a later terminal identity refusal
+   the pinned candidate's review verdict and ends with what that review
+   covers (the source diff only, not target execution or deployment
+   readiness); the `review result: review-feedback: open review tasks in
+   TASKS.md` line above it gives the open review-task counts, and any
+   `review result: review-feedback WARN:` line names feedback work left
+   undone (tasks not added, a recovery copy left) to act on. A PASS is
+   never evidence that the target runs or is ready to deploy; a later terminal identity refusal
    still aborts commit authorization, so a PASS line from a nonzero run is not
    completion evidence. For a MERGE: the `[auto-merge] panel:` line, the
    `[auto-merge] panel verdict` line, the `PASS` line, and — as the
@@ -582,7 +616,7 @@ during the review:
    and the `author-lint.ps1` Review Infrastructure row.)
 3. **The code gate**, for any source change: the verification evidence per the
    reviewer's evidence contract. EVERY cited run — build, ordinary exercise of
-   the launched interface, or applicable functional-test execution — carries, at minimum: the DATE, the
+   the launched interface, or functional validation — carries, at minimum: the DATE, the
    COMMAND or script exercised, the OBSERVED OUTPUT (pasted, or pointing at
    content the reviewer can actually read during the review), and the REVISION
    the run was performed on, named as precisely as the channel allows (HEAD's
@@ -637,7 +671,7 @@ elsewhere.
 | purpose, current baseline, future roadmap, ONE active package, current decisions and directives | the plan |
 | durable protocol / safety / architecture / configuration / product contracts | domain documents |
 | evidence, alternatives, measurements, selected designs | research dossiers |
-| ordinary-operation output | captured runtime artifacts and applicable functional-test records; never fabricated evidence |
+| ordinary-operation output | captured runtime artifacts and functional-validation records; never fabricated evidence |
 | completed packages, commit identities, exact history | git |
 | review pass lines and verdict evidence | the gate's own receipts under `logs/` |
 | concise pointers only — NEVER startup context | a history index |
@@ -733,13 +767,17 @@ code written this round. The landing's round count stops tracking the quality of
 the change and starts tracking the defect count of everything it absorbed, which
 no amount of careful fixing bounds.
 
-- **Bundle forward, in writing, somewhere TRACKED.** Record the item where your
-  project keeps work it has decided not to do yet — its backlog, its debt
-  register, whatever it already has. The entry carries what was found, where,
-  why it was deferred, and the verdict artifact that names it. `logs/review-
-  followups.md` is NOT that place: it is gitignored execution state and cannot
-  hold a decision past a clone. A deferral is a written hand-off, not a silent
-  drop.
+- **Bundle forward, in writing.** Record the item in `TASKS.md` at the main
+  checkout's root — per-user work tracking, never committed, where the gate
+  itself adds tasks for the QUALITY and NOTE findings of a passing ordinary
+  (not paired) Codex or Claude review (one
+  per severity and citation), QUALITY first because QUALITY is the immediate
+  follow-up — or wherever the
+  project already keeps work it has decided not to do yet. The entry carries
+  what was found, where, why it was deferred, and the verdict artifact that
+  names it. `logs/review-followups.md` is NOT that place: it is an append-only
+  machine index, not a record of decisions. A deferral is a written hand-off,
+  not a silent drop.
 - **Deferring is a judgement about VALUE, and it is legitimate.** A finding can
   be technically real and still not worth a round: one whose enabling condition
   does not occur in this repository, one whose blast radius is a sentence in a
@@ -790,7 +828,10 @@ violates, not merely the API every finding cites.
 
 The reviewer cannot see the previous round's verdict, and that is deliberate —
 each round is an independent adversarial read, which is what stops a reviewer
-from ratifying its own earlier judgement.
+from ratifying its own earlier judgement. The one exception is a retry of a
+blocked `Staged` change: the commit gate shows that review the earlier
+rounds' BLOCKER findings and the author's remediation record, never the
+verdicts, so it can check each class across the whole diff.
 
 Consequences for the author:
 - **A finding's absence in round N+1 is not agreement.** A different pass may
@@ -803,8 +844,12 @@ Consequences for the author:
   `Commit` and `Branch` scope reviews receive the commit-log evidence channel,
   so a commit message reaches the next round there; `Staged` and `Uncommitted`
   scope reviews receive an EMPTY commit-log channel, so anything the next round
-  must know has to live in the diff itself — a code comment or a doc line. Writing it only in a commit message that a `Staged` review never
-  sees is the same as not writing it.
+  must know has to live in the diff itself — a code comment or a doc line —
+  except that a retry of a blocked `Staged` change also receives the
+  remediation record's blocks for its prior findings, which can say how each
+  class was swept and why a site was left unchanged. Writing it only in a
+  commit message that a `Staged` review never sees is the same as not writing
+  it.
 
 ## Fresh dispatch over deep resume
 
@@ -916,10 +961,12 @@ well-formed zero-record result remains the ordinary empty-stage refusal.
 | `scripts/codex/auto-review.ps1` | Codex backend wrapper. `-Scope Commit\|Branch\|Uncommitted\|Staged\|SealLegacy` (`SealLegacy` is the operator's legacy-index seal mode, capture doctrine v6 — no review runs). Builds the isolated evidence snapshot and invokes Codex. Runs N review passes CONCURRENTLY (`-ReviewPasses` / `CROSS_REVIEW_PASSES`, clamped 1-10); `-ReasoningEffort` pins the codex effort tier; verdict artifacts carry a identity header block (`DIFF-SHA256` + `REVIEW-TREE-OID` + `REVIEW-BACKEND` + `REVIEW-EFFORT` + `REVIEW-SEVERITY-CONTRACT` + `REVIEW-DURATION-SECS`); the heartbeat samples each pass's events NDJSON as stall evidence and appends its samples and escalation transitions to a run-owned liveness log preserved as `review-*.liveness.jsonl`. Exit 4 = positively-identified token exhaustion (every errored pass's events NDJSON carries a CLI-owned limit-signature error record, no errored body is malformed, no BLOCKER exists anywhere; a durable `.exhaustion.json` sidecar is mandatory — a failed sidecar write downgrades to exit 3); non-empty errored-pass bodies are preserved verbatim as `-passN.errored.txt`. Resolves project mode on every prompt-producing scope from the trusted state preceding the reviewed change and injects that machine-authored block plus the labeled COMMIT-LOG evidence channel (injectively escaped, quote-prefixed, byte-capped with refuse-on-overflow). Candidate declaration edits remain ordinary diff content and never govern the same run; a positively malformed governing declaration warns and falls back to `shipped`, while an indeterminate repository read still fails closed as tooling. Commit and Branch scopes require complete, unshallowed repository history and exit 3 when Git reports shallow or indeterminate state; fetch with `git fetch --unshallow` or use a full clone. Staged and Uncommitted scopes remain usable in a shallow clone. |
 | `scripts/claude/auto-review.ps1` | Claude backend wrapper. `-Scope Commit\|Branch\|Staged\|SealLegacy` (Uncommitted scope is NOT supported; use the Codex wrapper for that scope. `SealLegacy` is the operator's legacy-index seal mode, capture doctrine v6). Same exit-code contract as the Codex wrapper, exit 4 included: the CLI is invoked with `--output-format stream-json` (`--verbose`; the redirected stream file is the live activity transcript and the heartbeat's stall evidence, preserved as `review-*.stream.jsonl`; the heartbeat's samples and escalation transitions land in a run-owned liveness log preserved as `review-*.liveness.jsonl`, and the verdict identity header carries the `REVIEW-DURATION-SECS` wall-time stamp) and the stream's final `type: result` RESULT ENVELOPE alone classifies a failed run (`ConvertFrom-ClaudeResultEnvelope` -> `Resolve-ClaudeFailureClassification`; the process exit code is not an input) — only a well-formed error envelope whose payload matches the line-anchored limit signature reaches 4, with the mandatory `.exhaustion.json` sidecar. `-ArtifactTag` (`p<N>`/`fb<N>`, merge-gate-owned) discriminates concurrent panel children's artifact stems. Defaults to maximum capability (Opus, max reasoning effort, no budget cap). Same project-mode resolution and injected blocks as the Codex wrapper. Commit and Branch scopes require complete, unshallowed repository history and exit 3 when Git reports shallow or indeterminate state; fetch with `git fetch --unshallow` or use a full clone. Staged scope remains usable in a shallow clone. |
 | `scripts/shared/auto-merge.ps1` | Pre-merge review + ff-merge gate. SINGLE-PROVIDER PANELS: the REQUIRED `-Backend codex\|claude` names the preferred provider that starts the merge review, and the initial whole planned panel starts there at full coverage (`Resolve-MergePanelPlan`: the codex wrapper carries the whole pass count itself; a claude panel is concurrent tagged single-pass children on the reserved `p<N>` `-ArtifactTag` slots, refused up front when the base's claude wrapper lacks `-ArtifactTag` or the branch touches the configured consistency doc — the refusal names `-Backend codex`, an ineligible preferred route refuses before launch, while positively identified exhaustion may substitute as described below). Only BLOCKER (exit 2) aborts a merge (2026-07 severity contract): the per-child exits are validated and classified by `Resolve-PanelOutcome` (a stray code — incl. the RETIRED exit 1 — fails closed); a child exit 4 (positively-identified token exhaustion) with no decisive sibling (every sibling passed or is itself exhausted) triggers automatic full-panel substitution on the OTHER provider (`Resolve-MergeFallbackPlan`; codex exhausted -> a tagged claude panel, claude exhausted -> a codex substitute carrying the whole pass count). Successful substitution is caller-transparent and invocation-local: the console PASS shape is provider-neutral, while verdict headers and exhaustion sidecars preserve exact provenance. No substitute runs when a surviving sibling already decided the merge (a BLOCKER keeps exit 2 instead of burning a panel), and if no provider produces a verdict, the merge fails closed. Each child wrapper stages QUALITY follow-ups to a run-dir `followups.pending.md` via `CROSS_REVIEW_FOLLOWUPS_PENDING` and the gate promotes them (best-effort, `Publish-ReviewFollowups`) to `logs/review-followups.md` only after the ff-merge succeeds, so an aborted merge never pollutes the index; centralized forensics copies publish atomically (staged beside the destination, swapped by rename-with-replace — a reader never observes a partial verdict at its final name) and only from quiescent sources (a dir whose child could not be confirmed exited is skipped and rides the preserved run dir instead). Complete, unshallowed repository history is required before merge-base, range-review, or landing proofs; shallow or indeterminate state exits 3 before ancestry work. Fetch with `git fetch --unshallow` or use a full clone. `-ReasoningEffort` passthrough (codex children). After a successful ff-merge it runs a TRUSTED `worker-audit.ps1` (the merge base's copy, else the manifest-verified local snapshot -- the same base-or-manifest trust decision as the review infra; never the just-merged candidate copy) as a NON-GATING, time-bounded child over the central logs plus this run's own verdict dirs, surfaces the audit's SUSPECT, ERROR, and WARNING lines and its report path/summary in the merge output — the error class is read from the PRODUCER'S token (`[class:suspect]` / `[class:operational]`, worker-audit's console diagnostic contract), never re-derived from the message text, and an error carrying no recognized token is surfaced with the suspects as a named producer-contract breach, and preserves the run and trusted dirs whenever the audit child's exit is unconfirmed; the audit is skipped, with a note, only when no trusted copy resolves (neither the base's nor a manifest-verified local snapshot), the trusted copy cannot be extracted, or the central review-log dirs cannot be resolved. |
-| `scripts/codex/commit.ps1` | Cross-review commit wrapper for Codex-as-implementer. Sets `REVIEW_BACKEND='claude'` (saved/restored). Before the first Git command, rejects hook-bypass flags and the raw case-insensitive presence of history/attribute, repository/object/ref/index, exact `GIT_CONFIG*`, and digit-suffixed config-selector environment names, including empty values. `HOME` / `XDG_CONFIG_HOME` remain supported. Before `git commit`, requires effective `core.hooksPath` unset and verifies that the default pre-commit dispatcher is an ordinary armed file carrying the gate-untracking capability marker whose exact bytes match the adjacent bootstrap-written digest attestation; missing, foreign, or tampered state refuses. Forces `GIT_NO_REPLACE_OBJECTS=1` for the commit and restores the prior process value afterward. |
-| `scripts/claude/commit.ps1` | Symmetric to the Codex wrapper. Sets `REVIEW_BACKEND='codex'` (saved/restored), applies the same bypass and raw Git-selector refusals, keeps ordinary `HOME` / `XDG_CONFIG_HOME` configuration support, requires effective `core.hooksPath` unset, applies the same default-dispatcher identity and digest-attestation check before `git commit`, and scopes replacement suppression to the commit. |
+| `scripts/codex/commit.ps1` | Codex-as-implementer entry: runs `scripts/claude/commit.ps1` with `-CrgImplementer codex`, which sets `REVIEW_BACKEND='claude'` and applies every check below. |
+| `scripts/claude/commit.ps1` | The one cross-review commit wrapper implementation; run directly for Claude-as-implementer. Sets `REVIEW_BACKEND` to the other provider, only inside a dedicated commit worker process, so the invoking shell never sees it. Before the first Git command, rejects hook-bypass flags and the raw case-insensitive presence of history/attribute, repository/object/ref/index, exact `GIT_CONFIG*`, and digit-suffixed config-selector environment names, including empty values. `HOME` / `XDG_CONFIG_HOME` remain supported. Before `git commit`, requires effective `core.hooksPath` unset and verifies that the default pre-commit dispatcher is an ordinary armed file carrying the gate-untracking capability marker whose exact bytes match the adjacent bootstrap-written digest attestation; missing, foreign, or tampered state refuses. Starts that worker with an environment holding exactly one `GIT_NO_REPLACE_OBJECTS=1` entry and verifies it before the first Git command; the invoking shell's value is never changed. |
 | `scripts/codex/review-prompt-template.md` | Shared adversarial review prompt. Project context, hazards, and SCOPED-authority slot bodies are rendered before installation from root `CROSS-REVIEW-VALUES.md`; installed slot bodies are never edited directly and no review process performs runtime values lookup. |
 | `scripts/render-project-values.ps1` | Backend-neutral project-values parser and renderer. Apply writes both TRACKED rendered outputs as one recoverable transaction; `-Check` writes nothing; LOCAL updates use full package bootstrap because standalone Apply cannot publish LOCAL manifest/marker authority. |
+| `scripts/review-liveness.psm1` | The one reviewer-liveness implementation (evidence-growth heartbeat, warn-only stall threshold `CROSS_REVIEW_STALL_WARN_SECS`, `REVIEW-DURATION-SECS` floor) imported by both review wrappers and the central Grok adapter. Review infrastructure: the pre-commit hook and merge gate take it from the same trusted copy as the wrappers, so a candidate edit to it never watches its own review. |
+| `scripts/review-common.ps1` | The shared follow-up index, capture-locator, review-log prune, legacy-seal, verdict-classifier, consistency-document, project-mode, prompt-assembly, diff-identity, git, exhaustion-sidecar, commit-baseline, tree-path, commit-log evidence, codex-effort, argument-quoting, PATH, replacement-suppression, attribute-neutral Git and fix-on-fix advisory implementation (criterion 4 of `docs/audit-protocol.md` lists the deliberate local copies outside it), dot-sourced (not imported as a module) by both review wrappers and the merge gate so its functions run in the caller's own script scope; `scripts/paired-governance.psm1`, `scripts/review-preparation.psm1` and `scripts/paired-diff.psm1` dot-source it for the functions they use. Review infrastructure on the same trusted-copy path as the liveness module. |
 | `scripts/shared/analyze-blocker-trends.ps1` | Cross-backend trend analyzer; scans both `logs/codex/reviews/*.md` and `logs/claude/reviews/*.md` by DEFAULT, with per-backend provenance (a `Backends:` line, per-backend verdict/severity splits, `[backend]`-tagged exemplars) plus union totals, under a stable report title. Backend identity is each artifact's own `REVIEW-BACKEND:` header (headerless historical artifacts count as `legacy`), never the directory spelling. Multi-dir input has both representations, unambiguous by grammar: `-ReviewsDir` (a real array, every element verbatim — a directory name may contain a comma) and `-ReviewsDirCsv` (the native-shell `-File` form, one comma-separated string always split on every comma); pass exactly one. Dir handling is strict for EXPLICIT lists (a missing, blank, or verdict-less named dir aborts — coverage never narrows silently) and loud for the implicit default (a defaulted backend dir that is absent or empty is skipped with a note, so single-backend installs work; the run aborts only when no defaulted dir yields verdicts). Fail-closed: a verdict RECOGNIZED as the wrapper's own producer-shaped fail-closed run (header in any era — 4-, 5-, or 6-line with the `REVIEW-DURATION-SECS` stamp — plus banner, diagnostic, and framing, validated over a strict no-BOM decode) is EXCLUDED loudly (console line + an "Excluded fail-closed runs" report section), never counted; an UNRECOGNIZED-malformed verdict (structure-contract failure, malformed duration stamp, wrong-case severity, BOM/invalid UTF-8) aborts the run naming the offender. PURPOSE: drive worker-discipline improvements upstream, NOT a review-throughput metric. |
 | `scripts/shared/author-lint.ps1` | Author-side MECHANICAL linter, run manually before the first gate commit AND mechanically as the pre-commit hook's fail-fast pre-pass (a verified copy — HEAD's in the tracked shape, the manifest-verified local snapshot in the local shape — before the AI review); it is NOT the authoritative review gate. Scans authored Markdown/doc content — plus, in staged mode, the count-drift classes over the COMMENT lines of staged `.rs`/`.ps1`/`.toml`/`.sh` source files and the Rust-only MAGIC-COUNT-ASSERT class over staged `.rs` CODE lines (its own lexer — raw strings, char literals, depth-counted block comments; code is otherwise never scanned) — for the script-detectable defect classes the gate repeatedly raises, at ~0 token cost, so the gate stays a FAILSAFE rather than a debugger. ERROR-tier (findings exit 3; exit 1 is reserved as the crash signal, so a crashed linter fails OPEN to the AI gate rather than blocking every commit): LINE-ANCHOR (bare `file.ext:NNN` source citations — the symbol-anchor rule; a machine-generated report at a KNOWN generated-report path with a generator signature is skipped, and a doc carrying the explicit `<!-- frozen-snapshot -->` marker near the top downgrades to advisory per the snapshot exemption, but a doc without the marker stays error-tier regardless of its filename or date); SELF-NARR (narration of the PENDING change's OWN landing — the deictic `this merge` / `this landing` / `as of this entry` / `landed ... here` form — ERROR in `History.md` the retrospective landing log where a not-yet-landed self-reference is a factual defect, ADVISORY in any other narrative doc; retrospective prose about an already-landed merge has no this/here pointer and stays clean); LOCAL-PROOF (tight form: a word-bounded proof/verification word, or a `proof`/`evidence` noun within a short window, on the same line as the gitignored `logs/(codex|claude)/reviews` review-artifact path — citing local-only evidence a fresh clone cannot resolve as if it were shareable proof); INVENTORY (an exact inventory/count of repo state in `.md` prose — the verb-gated shapes `there is\|are <N> <word>`, `<N> <word> is\|are defined/tracked/…`, `covers/contains/… <N> <word>`, with `<N>` a digit run or a spelled cardinal (spelled cardinals, the `names` verb, and the determiner-gated `the/these/those <spelled-N> <modifiers> <plural count-noun>` shape are ADVISORY — the pre-pass may not be stricter than the gate it front-runs) — EXCEPT a count inside a dated entry body of the root `History.md` log, which is DROPPED (caller-applied by `Invoke-FileChecks`, shared with MAGNITUDE; the preamble and undated sections stay in class); NO frozen-snapshot downgrade otherwise since the marker exemption is line-anchor-scoped; the digit lookbehind exempts identifier/version/date/SHA digits, and a FULL illustrative claim inside one inline-code span is exempt; the fix direction is magnitude phrasing or deletion, NEVER a corrected number). ADVISORY (reported, does not set the findings exit): DEAD-REF (a repo-relative path whose first segment is a real top-level directory but does not resolve), TAG (a planning-doc milestone tag whose top-level `M<n>` has no defining header), MAGNITUDE (transient counts — round/iteration/attempt/pass/retry/try in digit-first and unit-first forms, the `took N` verb form, the digit-first aggregate/duration nouns (task/commit/file/row/site/entry/follow-up/finding/fixture/assertion/instance/wave/stream + minute/hour/second/day), a decimal consumed IN FULL within those digit-first and `took` forms ("0.25 seconds" / "took 0.25" match whole, never fragmented to "25 seconds"; a bare decimal with no unit and no `took` is not itself flagged), PLUS the spelled-out enumerated-case totals (`all three cases`, a `(1) … (2) … all three` inline enumeration) — where magnitude phrasing suffices), LOCAL-PROOF (the looser bare-marker forms — a proof word beside a bare `gitignored`/`local-only`/`untracked` marker, or `operator-side`/`local` + `evidence` — calibrated down since ordinary git/meta prose co-locates them), LOCAL-STATE (a machine-local install/wiring claim — `wired via` a `~/.claude`/`.claude/settings.local.json` path — asserted as repo fact, exempt when the line already caveats it machine-local); MAGIC-COUNT-ASSERT (a Rust EQUALITY assertion — `assert_eq!`/`debug_assert_eq!`, or `assert!`/`debug_assert!` with `==` — pinning a collection cardinality to a bare integer literal of two or more; `0`/`1` are out of class by VALUE and inequalities/`assert_ne!` are not sites — magic-count coupling; Rust CODE lines only); UNSUPPORTED-SYNTAX (per-file refusal diagnostics: a construct outside the comment/code splitter's positively-supported grammar skips that file's count classes LOUDLY instead of mis-splitting silently, and the pure-rename / type-change / binary degradations report what was not line-scanned). The INVENTORY + MAGNITUDE classes ALSO run over staged source-file COMMENT lines, one tier SOFTER (advisory) there, with a code-echo exemption: a comment count equal to a code literal on a NEARBY line describes that adjacent constant and is exempt. Default scope is the staged diff's added lines validated against the INDEX (a staged planning doc is the exception — its whole-file TAG closure scans even a deletion-only edit); `-Paths` / `-Tree` scan explicit files / the whole doc tree against the worktree (narrative docs only — source-comment scanning is staged-mode-specific). The mechanical complement to the Author Pre-Commit Self-Sweep; the gate stays authoritative for everything it does not encode. |
 | `scripts/shared/worker-audit.ps1` | Per-landing PROCESS audit over the verdict logs (artifact-based; no harness dependency). Given a branch tip and base (`-Branch`, `-Base`, default `main`; `-BaseRef` carries the base's ref name beside a fork-SHA `-Base` so legacy `-vs-<ref>` verdicts still correlate -- auto-merge passes both), correlates the branch's commits with the commit-gate and merge-gate verdicts by `REVIEW-TREE-OID` tree identity and `<tip>-vs-<base>` filename provenance, and reports gate rounds per landed commit, repeated reviewer categories across consecutive blocking rounds, first-attempt-CLEAN rate, and merge-gate rounds; a correlated fail-closed/malformed/unreadable artifact leads a FAIL-LOUD report with every count marked UNRELIABLE, and a zero-correlation window prints a loud banner instead of silent zeros. Shares the analyzer's mirrored primitives byte-identically (verdict filename shape, the header-derived backend identity reader, the strict no-BOM decode boundary, the suspect check): backend identity is each artifact's own `REVIEW-BACKEND` header, never a directory name. `-ReviewsDir` is a real array (each element verbatim; the merge gate passes its run-owned dirs this way), `-ReviewsDirCsv` the comma-split native-shell form. `auto-merge.ps1` runs a TRUSTED copy after a successful ff-merge -- the merge base's, else the manifest-verified local snapshot (neither resolving, unextractable, or an unresolvable central review-log dir = skipped with a note) -- as a NON-GATING, time-bounded child (report under gitignored `logs/worker-audits/`; suspect, error, and warning lines surfaced in the merge output under their own classes — every `ERROR:` line this script emits carries its own `[class:suspect]`/`[class:operational]` token, and an untokened line reaching the consumer is surfaced there as a producer-contract breach; an unconfirmed child exit preserves the run and trusted dirs). |
@@ -930,7 +977,7 @@ well-formed zero-record result remains the ordinary empty-stage refusal.
 | `logs/codex/reviews/` | Codex backend output (`review-<ts>-<scope>.md` + `.jsonl` + `.stderr.log`, plus `.exhaustion.json` token-exhaustion sidecars and `-passN.errored.txt` preserved errored-pass bodies — both aged as verdicts), plus `seal-*` legacy-seal provenance records. Auto-pruned — EXCEPT while the follow-up index carries an unsealed pre-v6 legacy region, which quarantines every prune until the operator runs the seal mode (`auto-review.ps1 -Scope SealLegacy`; see INSTALL.md's "Legacy-index seal" section). |
 | `logs/claude/reviews/` | Claude backend output (verdicts + `.stderr.log`, plus `.exhaustion.json` token-exhaustion sidecars and `.errored.txt` preserved zero-exit fail-closed bodies — non-whitespace bodies only, both aged as verdicts), plus `seal-*` legacy-seal provenance records when the Claude wrapper runs the seal mode. Auto-pruned, under the same legacy-seal quarantine. |
 | `refs/crg-review-skips` | Local immutable commit chain of `CROSS_REVIEW_SKIP=1` bypasses. Every canonical single-parent audit commit carries the exact staged tree as its Git tree and in its bounded message; compare-and-swap publication preserves concurrent entries or fails closed. The ref is local execution state and does not survive an ordinary clone. |
-| Project-owned tracked registers | Durable counterparts to the gitignored follow-up index (see "The narrow path"). No register is installed into a consuming project: a consumer uses an existing tracked register or creates one at a project-chosen path and records that path with other project conventions. The tracked destination matters; no package-defined spelling is required. |
+| Project-owned tracked registers | Durable counterparts to the gitignored follow-up index (see "The narrow path"). No register is installed into a consuming project: a consumer uses an existing tracked register or creates one at a project-chosen path and records that path with other project conventions. A decision that must survive a clone needs a tracked destination, however it is spelled; per-user deferrals go to the uncommitted `TASKS.md` (see "Bundle forward, in writing"). |
 | `logs/review-followups.md` | Append-only index of non-blocking `QUALITY:` findings from PASSING review runs, written by the gate (commit path after every selected review leg has a passing effective verdict; merge path only after the ff-merge succeeds). A terminal staged-tree identity refusal can leave an already-appended candidate-review record in place while still refusing commit authorization; that record describes reviewed content and is not evidence that a commit landed. Gitignored execution state. Entries are grouped per run under a `## <timestamp>  backend=<b>  verdict=<file>` heading, each finding a `- QUALITY: <path>:<line>` line, and each run's transaction is closed by a `rows=<n> sha256=<hex>` record digesting that header and every row — so the file is APPEND-ONLY in the strict sense: a hand edit to one entry invalidates its transaction, which disables review-log pruning and drops later appends. Triage copies findings OUT; see "QUALITY capture lifecycle". |
 
 ## Hook Installation
@@ -1035,7 +1082,8 @@ and becomes a second, unread copy of the verdict logs.
   outside the index, with the reason for a dismissal. A finding that is neither
   is one nobody has read.
 - **Clearing the index is a maintenance operation with a deadline, and it needs
-  supported tooling.** Verdict directories auto-prune, but that pruning is
+  supported tooling.** Verdict directories auto-prune when an operator
+  configures `CROSS_REVIEW_PRUNE_TOOL` (unset means nothing is deleted), but that pruning is
   quarantined while the index carries an unsealed legacy region — so an index
   left unattended eventually holds verdict retention hostage. There is no
   per-entry maintenance command today: the seal mode
@@ -1063,7 +1111,8 @@ What that means when reading logs:
 - **A missing verdict is not a lost one.** An unconfirmed child's artifacts stay
   in the preserved run directory, which the merge output names. Look there
   before concluding a review produced nothing.
-- **The central directories auto-prune** — except while the follow-up index
+- **The central directories auto-prune** when `CROSS_REVIEW_PRUNE_TOOL` names
+  a safe-delete tool (unset means nothing is deleted) — except while the follow-up index
   carries an unsealed legacy region, which quarantines every prune until the
   operator runs the seal mode. An index nobody clears therefore stops verdict
   retention for the whole repository, which is why the capture lifecycle above

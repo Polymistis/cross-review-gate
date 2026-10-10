@@ -41,6 +41,11 @@ work:
   codex CLI streams an event record per action into them already; a
   working pass grows its file, a stalled one does not.
 - claude: the streamed output file introduced by mechanism 2 below.
+- grok (central paired reviews): the CLI transport's per-pass
+  `streaming-messages-json` response file in the private attempt directory,
+  mapped to the Grok root process. The API transport is one non-streaming
+  request whose body arrives only at the end, so it runs the timer beat:
+  visible waiting with no stall inference.
 
 Sampling is PER FILE, never aggregate: codex passes run concurrently, and
 an aggregate delta stays nonzero while any one pass works -- hiding a
@@ -86,8 +91,17 @@ escalation ever fired (raw event streams carry neither arrival times nor
 the escalation itself).
 
 The C# heartbeat helper is extended under a NEW versioned type name (a
-loaded type can never be redefined in-process); each wrapper carries the
-mirrored copy, updated in lockstep.
+loaded type can never be redefined in-process). Since 2.4.4 it lives once,
+with the threshold resolver and the duration stamp, in
+`scripts/review-liveness.psm1`, which the Codex and Claude wrappers and the
+Grok adapter import; the earlier per-wrapper mirrored copies are gone. The
+module is review infrastructure: the pre-commit hook's trusted copy, the
+merge gate's base extraction and LOCAL manifest snapshots carry it beside
+the wrappers, so a candidate edit to it never watches its own review. Grok
+passes follow the same rule as the others: the adapter's former 128-turn
+cap and one-hour CLI and API deadlines were removed in 2.4.4, and Grok
+liveness logs are retained per pass as
+`<stem>.pass-<n>.liveness.jsonl` in the private attempt directory.
 
 ### 2. Claude stream-visible output (the reviewer's activity transcript)
 
@@ -128,11 +142,13 @@ the flag to satisfy the combined print/stream/verbose contract. Stdout is redire
   `Resolve-ClaudeFailureClassification` chain with its input SHAPE
   unchanged. Review the accepted shape, each rejection arm, and the
   classification chain together; code unit-test authoring and execution are
-  banned, without categorically prohibiting other functional testing.
+  banned, and live testing, manual checks, ordinary program runs, and
+  functional validation remain permitted.
 
 ### 3. Effectiveness measurement and reviewer audits
 
-- Each wrapper stamps `REVIEW-DURATION-SECS:` in the verdict identity
+- Each reviewer host (both wrappers and the Grok adapter) stamps
+  `REVIEW-DURATION-SECS:` in the verdict identity
   header block: one line, a base-10 NON-NEGATIVE INTEGER, the FLOOR of
   the invocation's wall-clock seconds (launch of the review children to
   header assembly), no unit suffix, no padding. The stamp is

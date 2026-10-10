@@ -8,14 +8,15 @@ function Assert-CrgTreeNamespace {
   $prefixes = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
   foreach ($entry in $Entries) {
     $path = $entry.Path
-    if ([string]::IsNullOrEmpty($path) -or $path.StartsWith('/') -or $path.EndsWith('/') -or
+    # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
+    if ([string]::IsNullOrEmpty($path) -or $path.StartsWith('/', [StringComparison]::Ordinal) -or $path.EndsWith('/', [StringComparison]::Ordinal) -or
         $path.Contains('//') -or $path.Contains('\')) { throw 'tree contains a non-canonical Windows path' }
     if (-not $seen.Add($path)) { throw "tree path '$path' is duplicated" }
     $components = @($path -split '/', 0)
     foreach ($component in $components) {
-      if ([string]::IsNullOrEmpty($component) -or $component -ceq '.' -or $component -ceq '..' -or
+      if ([string]::IsNullOrEmpty($component) -or [string]::Equals($component, '.', [StringComparison]::Ordinal) -or [string]::Equals($component, '..', [StringComparison]::Ordinal) -or
           $component.Length -gt 255 -or $component -match '[\x00-\x1f<>:"\\|?*]' -or
-          $component.EndsWith('.') -or $component.EndsWith(' ') -or
+          $component.EndsWith('.', [StringComparison]::Ordinal) -or $component.EndsWith(' ', [StringComparison]::Ordinal) -or
           $component -match '\A(CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(\.|\z)') {
         throw "tree path '$path' has a component that Windows cannot represent injectively"
       }
@@ -25,7 +26,7 @@ function Assert-CrgTreeNamespace {
       $kind = if ($i -lt $components.Count - 1 -or $entry.Mode -ceq '040000') { 'D' } else { 'F' }
       $existing = $null
       if ($prefixes.TryGetValue($prefix, [ref]$existing)) {
-        if ($existing.Path -cne $prefix) { throw "tree path '$path' has a Windows case-folding prefix collision" }
+        if (-not [string]::Equals($existing.Path, $prefix, [StringComparison]::Ordinal)) { throw "tree path '$path' has a Windows case-folding prefix collision" }
         if ($existing.Kind -cne $kind) { throw "tree path '$path' has a file/directory-prefix collision" }
       } else { $prefixes.Add($prefix, [pscustomobject]@{ Path = $prefix; Kind = $kind }) }
     }
@@ -35,10 +36,10 @@ function Assert-CrgTreeNamespace {
 function Read-CrgGitTreeBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$ObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$ObjectFormat)
   if ($null -eq $Bytes) { throw 'tree listing must be an explicit byte buffer, not null' }
   if ($Bytes.Length -gt 0 -and $Bytes[$Bytes.Length - 1] -ne 0) { throw 'tree listing is missing its final NUL' }
-  $width = if ($ObjectFormat -ceq 'sha1') { 40 } elseif ($ObjectFormat -ceq 'sha256') { 64 } else { throw 'tree object format must be canonical sha1 or sha256' }
+  $width = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } elseif ([string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal)) { 64 } else { throw 'tree object format must be canonical sha1 or sha256' }
   $headerPattern = '\A(?<mode>[0-9]{6}) (?<type>blob|tree|commit) (?<oid>[0-9a-f]{' + $width + '})\z'
   $utf8 = New-Object Text.UTF8Encoding($false, $true)
   $entries = New-Object 'System.Collections.Generic.List[object]'
@@ -72,8 +73,8 @@ function Read-CrgPairedTreeBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PublicTreeBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PrivateTreeBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$GoverningConfigBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$CandidateConfigBytes)
   $public = Read-CrgGitTreeBytes -Bytes $PublicTreeBytes -ObjectFormat $PublicObjectFormat
@@ -83,7 +84,7 @@ function Read-CrgPairedTreeBytes {
   foreach ($entry in @($public) + @($private)) {
     $existing = $null
     if ($byPath.TryGetValue($entry.Path, [ref]$existing)) {
-      if ($existing.Path -cne $entry.Path) { throw "paired tree path '$($entry.Path)' has a Windows case alias" }
+      if (-not [string]::Equals($existing.Path, $entry.Path, [StringComparison]::Ordinal)) { throw "paired tree path '$($entry.Path)' has a Windows case alias" }
       if ($existing.Mode -cne '040000' -or $entry.Mode -cne '040000') { throw "paired trees collide at occupied leaf '$($entry.Path)'" }
       # Sharing a container does not equate or replace separate database OIDs.
     } else { $byPath.Add($entry.Path, $entry); $combined.Add($entry) }
@@ -107,10 +108,10 @@ function Read-CrgPairedTreeBytes {
         @($paths | Where-Object { $_.StartsWith($path + '/', [StringComparison]::Ordinal) }).Count -gt 0) { throw "candidate file declaration '$path' conflicts with a tree directory" }
   }
   foreach ($path in @($candidate.PrivateDirectories) + $declaredFiles) {
-    if ($path -cin $candidate.PrivateDirectories -and $byPath.ContainsKey($path) -and $byPath[$path].Mode -cne '040000') { throw "candidate directory declaration '$path' conflicts with a tree leaf" }
+    if ([System.Linq.Enumerable]::Contains([string[]]@($candidate.PrivateDirectories), [string]$path, [StringComparer]::Ordinal) -and $byPath.ContainsKey($path) -and -not [string]::Equals($byPath[$path].Mode, '040000', [StringComparison]::Ordinal)) { throw "candidate directory declaration '$path' conflicts with a tree leaf" }
     $parent = $path
     while ($parent.Contains('/')) {
-      $parent = $parent.Substring(0, $parent.LastIndexOf('/'))
+      $parent = $parent.Substring(0, $parent.LastIndexOf([char]'/'))
       if ($byPath.ContainsKey($parent) -and $byPath[$parent].Mode -cne '040000') { throw "candidate declaration '$path' has an occupied file parent" }
     }
   }

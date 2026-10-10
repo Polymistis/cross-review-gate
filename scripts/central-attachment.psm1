@@ -8,7 +8,7 @@ function Get-CrgAttachmentCommand {
   $relative = 'scripts/' + $Module + '.psm1'
   $commands = @(Get-Command -Name $Name -Module $Module -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($null -eq $Runtime -or $Runtime.Payloads -isnot [System.Collections.IDictionary] -or
-      $relative -cnotin @($Runtime.Payloads.Keys) -or $commands.Count -ne 1 -or
+      -not [System.Linq.Enumerable]::Contains([string[]]@($Runtime.Payloads.Keys), [string]$relative, [System.StringComparer]::Ordinal) -or $commands.Count -ne 1 -or
       -not [string]::Equals($commands[0].Module.Path, $Runtime.Payloads[$relative].Path, [StringComparison]::OrdinalIgnoreCase)) {
     throw "attachment requires the retained '$Module/$Name' command"
   }
@@ -30,6 +30,21 @@ function Assert-CrgAttachmentAbsent {
       throw 'Attach requires an unattached worktree without pending paired publication'
     }
   }
+}
+
+function Get-CrgUnactivatedAttachmentHandoff {
+  param([object]$Runtime, [string]$PublicGitDirectory)
+  foreach ($leaf in @('crg-attachment', 'crg-pair')) {
+    $record = & $Runtime.ReadFile -Path (Join-Path $PublicGitDirectory $leaf) -Maximum 65536 -AllowAbsent
+    if ($null -eq $record -or $record.Present -isnot [bool] -or $record.Present) {
+      throw 'attachment correction requires an unactivated worktree without a completed-pair pointer'
+    }
+  }
+  $handoff = & $Runtime.ReadFile -Path (Join-Path $PublicGitDirectory 'crg-handoff') -Maximum 16384 -AllowAbsent
+  if ($null -eq $handoff -or $handoff.Present -isnot [bool]) { throw 'attachment handoff presence is unconfirmed' }
+  if (-not $handoff.Present) { return $null }
+  if ($handoff.Bytes -isnot [byte[]]) { throw 'attachment handoff did not provide exact bytes' }
+  return ,([byte[]]$handoff.Bytes.Clone())
 }
 
 function New-CrgAttachmentDirectory {
@@ -101,7 +116,7 @@ function Write-CrgAttachmentRecord {
   } $Directory $Leaf $text
   $record = & $Runtime.ReadFile -Path (Join-Path $Directory $Leaf) -Maximum 65536
   if ($null -eq $record -or $record.Bytes -isnot [byte[]] -or
-      (Get-CrgAttachmentDigest -Bytes $record.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $Bytes)) { throw "attachment record '$Leaf' conflicts with the proposed exact association; existing bytes remain preserved" }
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $record.Bytes), (Get-CrgAttachmentDigest -Bytes $Bytes), [System.StringComparison]::Ordinal)) { throw "attachment record '$Leaf' conflicts with the proposed exact association; existing bytes remain preserved" }
 }
 
 function Register-CrgAttachmentOwner {
@@ -109,9 +124,12 @@ function Register-CrgAttachmentOwner {
   $reader = Get-CrgAttachmentCommand -Runtime $Operation.Runtime -Module private-governance -Name Read-CrgAttachmentBytes
   $attachment = & $reader -Bytes $Operation.AttachmentBytes
   $project = $Operation.ProjectContext
-  if ($attachment.PrivateGitDir -cne $project.Domains.private.GitDir -or $attachment.PublicRef -cne $project.Domains.public.Ref -or
-      $attachment.PrivateRef -cne $project.Domains.private.Ref -or $attachment.ProjectId -cne $project.Status.ProjectId -or
-      $attachment.RuntimeStore -cne $Operation.Runtime.Store -or $Operation.OperationLock.PublicGitDirectory -cne $project.Domains.public.GitDir) {
+  # Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
+  if (-not [string]::Equals($attachment.PrivateGitDir, $project.Domains.private.GitDir, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($attachment.PublicRef, $project.Domains.public.Ref, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($attachment.PrivateRef, $project.Domains.private.Ref, [System.StringComparison]::Ordinal) -or -not [string]::Equals($attachment.ProjectId, $project.Status.ProjectId, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($attachment.RuntimeStore, $Operation.Runtime.Store, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($Operation.OperationLock.PublicGitDirectory, $project.Domains.public.GitDir, [System.StringComparison]::Ordinal)) {
     throw 'attachment owner registration differs from the held project association'
   }
   $id = [guid]::NewGuid().ToString('N')
@@ -132,10 +150,165 @@ function Get-CrgAttachmentOwner {
       -not $script:CrgAttachmentOwners.ContainsKey($Operation.AttachmentOwnerId)) { throw 'attachment metadata requires the current registered owner' }
   $owner = $script:CrgAttachmentOwners[$Operation.AttachmentOwnerId]
   if (-not [object]::ReferenceEquals($owner.Operation, $Operation) -or -not [object]::ReferenceEquals($owner.OperationLock, $Operation.OperationLock) -or
-      (Get-CrgAttachmentDigest -Bytes $Operation.AttachmentBytes) -cne (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes)) { throw 'attachment owner or proposed bytes changed' }
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $Operation.AttachmentBytes), (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal)) { throw 'attachment owner or proposed bytes changed' }
   $assertLock = Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-diff -Name Assert-CrgPairedOperationLock
   & $assertLock -Lock $owner.OperationLock
   return $owner
+}
+
+function Test-CrgAttachmentExactBytes {
+  param([AllowNull()][byte[]]$Left, [AllowNull()][byte[]]$Right)
+  if ($null -eq $Left -or $null -eq $Right) { return $null -eq $Left -and $null -eq $Right }
+  return [Linq.Enumerable]::SequenceEqual($Left, $Right)
+}
+
+function Read-CrgCentralAttachmentCorrectionAnchor {
+  param([object]$Operation, [byte[]]$ExpectedHandoffBytes, [object]$ExpectedAnchor)
+  if ($null -eq $Operation -or -not [string]::Equals($Operation.Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal) -or
+      $null -eq $Operation.ProjectContext -or $null -eq $Operation.ReadOwner -or
+      $null -eq $Operation.OperationLock -or $ExpectedHandoffBytes -isnot [byte[]]) {
+    throw 'attachment correction requires the held first-attachment operation and exact preceding handoff'
+  }
+  $runtime = $Operation.Runtime; $project = $Operation.ProjectContext
+  $actualHandoff = Get-CrgUnactivatedAttachmentHandoff -Runtime $runtime -PublicGitDirectory $project.Domains.public.GitDir
+  if ($actualHandoff -isnot [byte[]] -or
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $actualHandoff), (Get-CrgAttachmentDigest -Bytes $ExpectedHandoffBytes), [System.StringComparison]::Ordinal)) {
+    throw 'attachment correction handoff changed during admission'
+  }
+  $owner = Get-CrgAttachmentOwner -Operation $Operation
+  $proposal = & $runtime.ReadFile -Path (Join-Path $owner.PublicGitDirectory 'crg-attachment-pending') -Maximum 16384
+  if ($proposal.Bytes -isnot [byte[]] -or
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $proposal.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal)) {
+    throw 'attachment correction proposal differs from the held association'
+  }
+  $association = & $runtime.ReadFile -Path (Join-Path $owner.PrivateGitDirectory $owner.AssociationLeaf) -Maximum 65536
+  if ($association.Bytes -isnot [byte[]] -or
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $association.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AssociationBytes), [System.StringComparison]::Ordinal)) {
+    throw 'attachment correction requires the exact already-published private association'
+  }
+  $handoffReader = Get-CrgAttachmentCommand -Runtime $runtime -Module paired-governance -Name Read-CrgFirstAttachmentHandoffBytes
+  $receiptKey = & $handoffReader.Module {
+    param([byte[]]$Bytes)
+    $lines = Read-CrgPairRecords -Bytes $Bytes -Maximum 16384
+    $names = @(Get-CrgHandoffNames -Origin 'first-attachment-v1')
+    if ($lines.Count -ne $names.Count + 1 -or -not [string]::Equals($lines[0], 'crg-first-attachment-handoff v1', [System.StringComparison]::Ordinal)) {
+      throw 'attachment correction requires a first-attachment handoff'
+    }
+    $key = ''
+    for ($index = 0; $index -lt $names.Count; $index++) {
+      $value = Read-CrgPairField -Line $lines[$index + 1] -Name $names[$index]
+      if ($names[$index] -ceq 'receipt-sha256') { $key = $value }
+    }
+    if ($key -cnotmatch '\A[0-9a-f]{64}\z') { throw 'attachment correction handoff has an invalid receipt identity' }
+    return $key
+  } $actualHandoff
+  $retention = Get-CrgAttachmentCommand -Runtime $runtime -Module paired-retention -Name Read-CrgFirstAttachmentRetention
+  # The prior release cannot be reopened outside Resume. Validate only the
+  # immutable result/receipt anchor here; no prior review artifact grants credit.
+  $record = & $retention.Module {
+    param($ProjectContext, $ReceiptSha256)
+    $item = Read-CrgRetentionRecord -ProjectContext $ProjectContext -ReceiptSha256 $ReceiptSha256 -ExpectedOrigin 'first-attachment-v1'
+    $results = [ordered]@{}
+    foreach ($domain in @('public', 'private')) {
+      $result = Read-CrgRetentionDomainResult -ProjectContext $ProjectContext -Domain $domain -Fields $item.Receipt.Fields -Origin 'first-attachment-v1'
+      $results.Add($domain, $result)
+    }
+    $publicRef = 'refs/crg-results/' + $item.Receipt.Fields['public-result']
+    if (-not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref $publicRef), $item.Receipt.Fields['public-result'], [System.StringComparison]::Ordinal)) {
+      throw 'attachment correction prior public result retention is absent or conflicting'
+    }
+    return [pscustomobject]@{ Receipt = $item.Receipt; ReceiptBytes = $item.ReceiptBytes; Results = $results }
+  } $project $receiptKey
+  $handoff = & $handoffReader -Bytes $actualHandoff -ReceiptBytes $record.ReceiptBytes `
+    -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
+  $fields = $record.Receipt.Fields
+  $expected = @{ 'project-id' = $project.Status.ProjectId; 'public-worktree' = $project.Root
+    'public-git-dir' = $project.Domains.public.GitDir; 'public-common-dir' = $project.Domains.public.CommonDir
+    'private-git-dir' = $project.Domains.private.GitDir; 'public-ref' = $project.Domains.public.Ref
+    'private-ref' = $project.Domains.private.Ref }
+  foreach ($name in $expected.Keys) {
+    if (-not [string]::Equals($fields[$name], $expected[$name], [System.StringComparison]::Ordinal)) { throw "attachment correction prior receipt differs at '$name'" }
+  }
+  if (-not [string]::Equals($fields['attachment-sha256'], (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal)) {
+    throw 'attachment correction prior receipt differs from the exact proposal'
+  }
+  foreach ($domain in @('public', 'private')) {
+    if (-not [string]::Equals($fields[$domain + '-result'], $project.Domains[$domain].Parent, [System.StringComparison]::Ordinal) -or
+        -not [System.StringComparer]::Ordinal.Equals($record.Results[$domain].Result.TreeOid, $project.Domains[$domain].ParentTree) -or
+        -not [string]::Equals($fields[$domain + '-tree'], $record.Results[$domain].Result.TreeOid, [System.StringComparison]::Ordinal)) {
+      throw 'attachment correction requires both branches at the exact retained results'
+    }
+  }
+  $classifier = Get-CrgAttachmentCommand -Runtime $runtime -Module paired-resume-state -Name Get-CrgFirstAttachmentResumeState
+  $state = & $classifier -HandoffBytes $actualHandoff -ReceiptBytes $record.ReceiptBytes -PointerBytes $null `
+    -ActualPublicOid $project.Domains.public.Parent -ActualPrivateOid $project.Domains.private.Parent `
+    -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
+  if (-not [string]::Equals($state.State, 'both-new', [System.StringComparison]::Ordinal) -or -not [string]::Equals($state.PointerState, 'absent', [System.StringComparison]::Ordinal) -or
+      $state.RequiresFreshReview -ne $true -or $state.ReadyForPublication -ne $false) {
+    throw 'attachment correction requires the exact both-new unactivated recovery state'
+  }
+  $anchor = [pscustomobject]@{ HandoffBytes = [byte[]]$actualHandoff.Clone(); HandoffSha256 = $handoff.HandoffSha256
+    ReceiptSha256 = $record.Receipt.ReceiptSha256; RuntimeManifestSha256 = $fields['runtime-manifest-sha256']
+    PublicResult = $fields['public-result']; PublicTree = $fields['public-tree']
+    PrivateResult = $fields['private-result']; PrivateTree = $fields['private-tree'] }
+  if ($null -ne $ExpectedAnchor) {
+    foreach ($name in @('HandoffSha256', 'ReceiptSha256', 'RuntimeManifestSha256', 'PublicResult', 'PublicTree', 'PrivateResult', 'PrivateTree')) {
+      if (-not [string]::Equals($anchor.$name, $ExpectedAnchor.$name, [System.StringComparison]::Ordinal)) { throw "attachment correction anchor changed at '$name'" }
+    }
+  }
+  return $anchor
+}
+
+function Assert-CrgCentralAttachmentCorrectionCandidate {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $true)][object]$Operation,
+    [Parameter(Mandatory = $true)][object]$Anchor,
+    [switch]$RequireChanges)
+  $anchor = Read-CrgCentralAttachmentCorrectionAnchor -Operation $Operation -ExpectedHandoffBytes $Anchor.HandoffBytes -ExpectedAnchor $Anchor
+  $runtime = $Operation.Runtime; $project = $Operation.ProjectContext
+  $getIndex = Get-CrgAttachmentCommand -Runtime $runtime -Module central-context -Name Get-CrgCentralIndexTree
+  $indexes = [ordered]@{}
+  foreach ($domain in @('public', 'private')) { $indexes.Add($domain, (& $getIndex -ProjectContext $project -Domain $domain)) }
+  if (-not [string]::Equals($indexes.public.TreeOid, $anchor.PublicTree, [System.StringComparison]::Ordinal)) { throw 'attachment correction cannot change the retained public result tree' }
+  $readTree = Get-CrgAttachmentCommand -Runtime $runtime -Module central-context -Name Read-CrgCentralTreeBytes
+  $parseTree = Get-CrgAttachmentCommand -Runtime $runtime -Module paired-tree -Name Read-CrgGitTreeBytes
+  $oldBytes = & $readTree -ProjectContext $project -Domain private -TreeOid $anchor.PrivateTree
+  $oldTreeEntries = & $parseTree -Bytes $oldBytes -ObjectFormat $project.Domains.private.ObjectFormat
+  $newTreeEntries = & $parseTree -Bytes $indexes.private.TreeBytes -ObjectFormat $project.Domains.private.ObjectFormat
+  $oldEntries = Get-CrgAttachmentTreeEntryMap -Entries $oldTreeEntries
+  $newEntries = Get-CrgAttachmentTreeEntryMap -Entries $newTreeEntries
+  if ($oldEntries.Count -ne $newEntries.Count) { throw 'attachment correction cannot add or delete private paths' }
+  $allowed = @('AGENTS.md', 'CLAUDE.md'); $changed = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($path in $oldEntries.Keys) {
+    if (-not $newEntries.ContainsKey($path)) { throw 'attachment correction cannot add or delete private paths' }
+    $old = $oldEntries[$path]; $new = $newEntries[$path]
+    if ([string]::Equals($path, 'AGENTS.md', [System.StringComparison]::Ordinal) -or [string]::Equals($path, 'CLAUDE.md', [System.StringComparison]::Ordinal)) {
+      if (-not [string]::Equals($old.Type, 'blob', [System.StringComparison]::Ordinal) -or -not [string]::Equals($new.Type, 'blob', [System.StringComparison]::Ordinal) -or
+          -not ([string]::Equals($old.Mode, '100644', [System.StringComparison]::Ordinal) -or [string]::Equals($old.Mode, '100755', [System.StringComparison]::Ordinal)) -or
+          -not [string]::Equals($new.Mode, $old.Mode, [System.StringComparison]::Ordinal)) {
+        throw "attachment correction root instruction '$path' changed shape or mode"
+      }
+      if (-not [string]::Equals($new.Oid, $old.Oid, [System.StringComparison]::Ordinal)) { $changed.Add($path) }
+    } elseif (-not [string]::Equals($new.Mode, $old.Mode, [System.StringComparison]::Ordinal) -or -not [string]::Equals($new.Type, $old.Type, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($new.Oid, $old.Oid, [System.StringComparison]::Ordinal)) {
+      throw "attachment correction changed non-instruction private path '$path'"
+    }
+  }
+  foreach ($path in $allowed) {
+    if (-not $oldEntries.ContainsKey($path)) { throw "attachment correction requires existing private root instruction '$path'" }
+  }
+  if ($RequireChanges -and $changed.Count -eq 0) { throw 'attachment correction must change at least one retained root instruction' }
+  $readSource = Get-CrgAttachmentCommand -Runtime $runtime -Module central-context -Name Read-CrgCentralPreparationSource
+  $oldSource = & $readSource -ProjectContext $project -PublicTreeOid $anchor.PublicTree -PrivateTreeOid $anchor.PrivateTree
+  $newSource = & $readSource -ProjectContext $project -PublicTreeOid $indexes.public.TreeOid -PrivateTreeOid $indexes.private.TreeOid
+  if (-not (Test-CrgAttachmentExactBytes -Left $oldSource.ConfigBytes -Right $newSource.ConfigBytes) -or
+      -not (Test-CrgAttachmentExactBytes -Left $oldSource.ValuesBytes -Right $newSource.ValuesBytes) -or
+      $oldSource.ModePresent -ne $newSource.ModePresent -or
+      -not (Test-CrgAttachmentExactBytes -Left $oldSource.ModeBytes -Right $newSource.ModeBytes)) {
+    throw 'attachment correction cannot change project configuration, values, or mode sources'
+  }
+  return [pscustomobject]@{ Anchor = $anchor; Indexes = $indexes; ChangedInstructions = $changed.ToArray()
+    ValidationState = 'validated-first-attachment-instruction-correction'; ReadyForPublication = $false }
 }
 
 function Copy-CrgAttachmentPrivateIndex {
@@ -169,7 +342,7 @@ function Copy-CrgAttachmentPrivateIndex {
         if ($added) { $handle.DangerousRelease() }
       }
       $actual = Get-CrgOwnedBinaryFileDigest -Record @{ Handle = $handle }
-      if ($actual.Length -ne $Bytes.Length -or $actual.Sha256 -cne $ExpectedDigest) { throw 'adopted private index scratch differs from the preserved source bytes' }
+      if ($actual.Length -ne $Bytes.Length -or -not [string]::Equals($actual.Sha256, $ExpectedDigest, [System.StringComparison]::Ordinal)) { throw 'adopted private index scratch differs from the preserved source bytes' }
       if (-not [CrgAttributeNeutral.NativeV1]::RenamePublicationFileRelative($handle, $parent.Handle, 'crg-private-index', [ref]$errorCode)) {
         throw "adopted private index no-replace publication failed (Win32 error $errorCode); any existing destination remains preserved"
       }
@@ -191,15 +364,29 @@ function Copy-CrgAttachmentPrivateIndex {
   } $PublicGitDirectory $captured $expectedDigest
   $copied = & $Runtime.ReadFile -Path (Join-Path $PublicGitDirectory 'crg-private-index') -Maximum 67108864
   if ($null -eq $copied -or $copied.Bytes -isnot [byte[]] -or
-      (Get-CrgAttachmentDigest -Bytes $copied.Bytes) -cne $expectedDigest) { throw 'adopted private index readback differs from the preserved source bytes' }
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $copied.Bytes), $expectedDigest, [System.StringComparison]::Ordinal)) { throw 'adopted private index readback differs from the preserved source bytes' }
 }
 
 function Get-CrgAttachmentEntryMap {
   param([object[]]$Entries)
   $map = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
   foreach ($entry in $Entries) {
-    if ($null -eq $entry -or $entry.Path -isnot [string] -or $entry.Mode -cnotin @('100644', '100755', '120000', '160000') -or $map.ContainsKey($entry.Path)) {
+    if ($null -eq $entry -or $entry.Path -isnot [string] -or
+        -not [System.Linq.Enumerable]::Contains([string[]]@('100644', '100755', '120000', '160000'), [string]$entry.Mode, [System.StringComparer]::Ordinal) -or $map.ContainsKey($entry.Path)) {
       throw 'attachment requires a unique complete ordinary index inventory'
+    }
+    $map.Add($entry.Path, $entry)
+  }
+  return ,$map
+}
+
+function Get-CrgAttachmentTreeEntryMap {
+  param([object[]]$Entries)
+  $map = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+  foreach ($entry in $Entries) {
+    if ($null -eq $entry -or $entry.Path -isnot [string] -or
+        -not [System.Linq.Enumerable]::Contains([string[]]@('040000', '100644', '100755', '120000', '160000'), [string]$entry.Mode, [System.StringComparer]::Ordinal) -or $map.ContainsKey($entry.Path)) {
+      throw 'attachment correction requires a unique complete tree inventory'
     }
     $map.Add($entry.Path, $entry)
   }
@@ -209,12 +396,15 @@ function Get-CrgAttachmentEntryMap {
 function Update-CrgAttachmentProjectContext {
   param([object]$Operation, [object]$ReadContext)
   $project = $Operation.ProjectContext
-  $captured = & $ReadContext -TargetRepo $project.Root -Context $Operation.Runtime -AttachmentBytes $Operation.AttachmentBytes
+  $arguments = @{ TargetRepo = $project.Root; Context = $Operation.Runtime; AttachmentBytes = $Operation.AttachmentBytes }
+  if ($null -ne $Operation.PSObject.Properties['CorrectionAnchor']) { $arguments.PendingRecovery = $true }
+  $captured = & $ReadContext @arguments
   foreach ($domain in @('public', 'private')) {
     foreach ($name in @('GitDir', 'CommonDir', 'ObjectDir', 'IndexPath', 'Ref', 'Parent', 'ObjectFormat')) {
-      if ($project.Domains[$domain].$name -cne $captured.Domains[$domain].$name) { throw "first-attachment $domain association changed at '$name' during admission" }
+      if (-not [string]::Equals($project.Domains[$domain].$name, $captured.Domains[$domain].$name, [System.StringComparison]::Ordinal)) { throw "first-attachment $domain association changed at '$name' during admission" }
     }
-    if ($project.Domains[$domain].Parent -cne 'absent' -and $project.Domains[$domain].ParentTree -cne $captured.Domains[$domain].ParentTree) { throw 'first-attachment parent tree changed during admission' }
+    if (-not [string]::Equals($project.Domains[$domain].Parent, 'absent', [System.StringComparison]::Ordinal) -and
+        -not [string]::Equals($project.Domains[$domain].ParentTree, $captured.Domains[$domain].ParentTree, [System.StringComparison]::Ordinal)) { throw 'first-attachment parent tree changed during admission' }
   }
   # Guard custody retains this project object. Refresh only independently
   # corroborated captured fields without replacing the identity held by guards.
@@ -239,13 +429,13 @@ function Set-CrgAttachmentMigrationCandidate {
   $parseTree = Get-CrgAttachmentCommand -Runtime $runtime -Module paired-tree -Name Read-CrgGitTreeBytes
   $parentBytes = & $readTree -ProjectContext $project -Domain public -TreeOid $project.Domains.public.ParentTree
   $parentTree = & $parseTree -Bytes $parentBytes -ObjectFormat $project.Domains.public.ObjectFormat
-  $parentEntries = @($parentTree | Where-Object { $_.Mode -cne '040000' })
+  $parentEntries = @($parentTree | Where-Object { -not [string]::Equals($_.Mode, '040000', [System.StringComparison]::Ordinal) })
   $parentMap = Get-CrgAttachmentEntryMap -Entries $parentEntries
   $privateParentEntries = @()
-  if ($project.Domains.private.Parent -cne 'absent') {
+  if (-not [string]::Equals($project.Domains.private.Parent, 'absent', [System.StringComparison]::Ordinal)) {
     $privateParentBytes = & $readTree -ProjectContext $project -Domain private -TreeOid $project.Domains.private.ParentTree
     $privateParentTree = & $parseTree -Bytes $privateParentBytes -ObjectFormat $project.Domains.private.ObjectFormat
-    $privateParentEntries = @($privateParentTree | Where-Object { $_.Mode -cne '040000' })
+    $privateParentEntries = @($privateParentTree | Where-Object { -not [string]::Equals($_.Mode, '040000', [System.StringComparison]::Ordinal) })
   }
   $privateParentMap = Get-CrgAttachmentEntryMap -Entries $privateParentEntries
   $privateDeletions = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -255,10 +445,11 @@ function Set-CrgAttachmentMigrationCandidate {
   $changed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
   foreach ($path in @($public.Keys) + @($parentMap.Keys)) {
     if (-not $public.ContainsKey($path) -or -not $parentMap.ContainsKey($path) -or
-        $public[$path].Mode -cne $parentMap[$path].Mode -or $public[$path].Oid -cne $parentMap[$path].Oid) { $null = $changed.Add($path) }
+        -not [string]::Equals($public[$path].Mode, $parentMap[$path].Mode, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($public[$path].Oid, $parentMap[$path].Oid, [System.StringComparison]::Ordinal)) { $null = $changed.Add($path) }
   }
   foreach ($change in (& $ownership -GoverningConfigBytes $ConfigBytes -CandidateConfigBytes $ConfigBytes -Paths ([string[]]@($changed)))) {
-    if ($change.Ownership -cne 'private') { throw "Attach preserves but does not include unrelated staged software change '$($change.Path)'; complete that candidate before migration" }
+    if (-not [string]::Equals($change.Ownership, 'private', [System.StringComparison]::Ordinal)) { throw "Attach preserves but does not include unrelated staged software change '$($change.Path)'; complete that candidate before migration" }
   }
   $selectorSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
   foreach ($path in @($config.PrivateDirectories) + @($config.PrivateFiles) + @('PROJECT-MODE.md', 'PLAN.md', 'History.md')) { $null = $selectorSet.Add($path) }
@@ -276,7 +467,7 @@ function Set-CrgAttachmentMigrationCandidate {
   $removals = New-Object 'System.Collections.Generic.List[string]'
   foreach ($entry in $classified) {
     $path = $entry.Path
-    if ($entry.Ownership -cne 'private') {
+    if (-not [string]::Equals($entry.Ownership, 'private', [System.StringComparison]::Ordinal)) {
       if ($private.ContainsKey($path)) { throw "adopted private index contains software path '$path'; resolve classification explicitly before Attach" }
       continue
     }
@@ -286,13 +477,13 @@ function Set-CrgAttachmentMigrationCandidate {
     }
     if ($public.ContainsKey($path)) {
       $source = $public[$path]
-      if ($source.Mode -cnotin @('100644', '100755')) { throw "private migration requires a regular staged file at '$path'" }
+      if (-not ([string]::Equals($source.Mode, '100644', [System.StringComparison]::Ordinal) -or [string]::Equals($source.Mode, '100755', [System.StringComparison]::Ordinal))) { throw "private migration requires a regular staged file at '$path'" }
       $bytes = & $readBlob -ProjectContext $project -Domain public -BlobOid $source.Oid -Maximum 16777216
       if ($private.ContainsKey($path)) {
         $existing = $private[$path]
-        if ($existing.Mode -cne $source.Mode) { throw "public/private staged modes conflict at '$path'; both versions remain preserved" }
+        if (-not [string]::Equals($existing.Mode, $source.Mode, [System.StringComparison]::Ordinal)) { throw "public/private staged modes conflict at '$path'; both versions remain preserved" }
         $existingBytes = & $readBlob -ProjectContext $project -Domain private -BlobOid $existing.Oid -Maximum 16777216
-        if ((Get-CrgAttachmentDigest -Bytes $existingBytes) -cne (Get-CrgAttachmentDigest -Bytes $bytes)) {
+        if (-not [string]::Equals((Get-CrgAttachmentDigest -Bytes $existingBytes), (Get-CrgAttachmentDigest -Bytes $bytes), [System.StringComparison]::Ordinal)) {
           throw "public/private staged contents conflict at '$path'; resolve the intended candidate explicitly"
         }
       } else { $entries.Add([pscustomobject]@{ Path = $path; Mode = $source.Mode; Bytes = $bytes }) }
@@ -308,11 +499,11 @@ function Set-CrgAttachmentMigrationCandidate {
   # The initial declaration must describe the exact staged configuration, not
   # a loose rewrite that silently overrides preserved adoption staging.
   $configPath = '.crg-project/project.conf'
-  $candidateConfig = @($entries | Where-Object { $_.Path -ceq $configPath })
+  $candidateConfig = @($entries | Where-Object { [string]::Equals($_.Path, $configPath, [System.StringComparison]::Ordinal) })
   if ($candidateConfig.Count -eq 1) { $candidateConfigBytes = $candidateConfig[0].Bytes }
   elseif ($private.ContainsKey($configPath)) { $candidateConfigBytes = & $readBlob -ProjectContext $project -Domain private -BlobOid $private[$configPath].Oid -Maximum 65536 }
   else { throw 'initial private candidate lacks the required project configuration' }
-  if ((Get-CrgAttachmentDigest -Bytes $candidateConfigBytes) -cne (Get-CrgAttachmentDigest -Bytes $ConfigBytes)) { throw 'working project configuration differs from the preserved staged candidate' }
+  if (-not [string]::Equals((Get-CrgAttachmentDigest -Bytes $candidateConfigBytes), (Get-CrgAttachmentDigest -Bytes $ConfigBytes), [System.StringComparison]::Ordinal)) { throw 'working project configuration differs from the preserved staged candidate' }
   & $releaseReads -Owner $Operation.ReadOwner
   if ($entries.Count -gt 0) { $null = & $writePrivate -ProjectContext $project -OperationLock $lock -Entries $entries.ToArray() }
   if ($removals.Count -gt 0) { $null = & $removePaths -ProjectContext $project -OperationLock $lock -Domain public -Paths $removals.ToArray() }
@@ -324,7 +515,7 @@ function Open-CrgCentralAttachment {
   param([Parameter(Mandatory = $true)][object]$Runtime,
     [Parameter(Mandatory = $true)][string]$TargetRepo,
     [Parameter(Mandatory = $true, ParameterSetName = 'Attach')][string]$MessageFile,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Attach')][ValidateSet('codex', 'claude')][string]$AuthoringAgent,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Attach')][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent,
     [Parameter(ParameterSetName = 'Attach')][string]$PrivateGitDir,
     [Parameter(Mandatory = $true, ParameterSetName = 'StagePaths')][ValidateNotNullOrEmpty()][string[]]$StagePaths)
   $stageOnly = $PSCmdlet.ParameterSetName -ceq 'StagePaths'
@@ -357,8 +548,8 @@ function Open-CrgCentralAttachment {
       }
     } -Paths $StagePaths
   }
-  if ([IO.Path]::GetFullPath($TargetRepo) -cne $TargetRepo) { throw 'Attach requires an explicit canonical public worktree root' }
-  $gitExe = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
+  if (-not [string]::Equals([IO.Path]::GetFullPath($TargetRepo), $TargetRepo, [System.StringComparison]::Ordinal)) { throw 'Attach requires an explicit canonical public worktree root' }
+  $gitExe = & $capture.Module { Get-CrgCentralGitExecutable }
   $operation = [pscustomobject]@{ OriginalRuntime = $Runtime; Runtime = $Runtime; ProjectContext = $null; OperationLock = $null; ReadOwner = $null; GitExecutableOwner = $null
     AttachmentBytes = $null; CapturedInput = $null; GuardCustody = $null; NewDirectoryOwners = (New-Object 'System.Collections.Generic.List[object]')
     AuthoringAgent = $AuthoringAgent; Origin = 'first-attachment-v1'; Closed = $false; ReadyForPublication = $false }
@@ -373,18 +564,20 @@ function Open-CrgCentralAttachment {
     $parent = & $readLine -Arguments ($prefix + @('rev-parse', '--verify', "$publicRef^{commit}")) -GitExe $gitExe
     $parentTree = & $readLine -Arguments ($prefix + @('rev-parse', '--verify', "$parent^{tree}")) -GitExe $gitExe
     $format = & $readLine -Arguments ($prefix + @('rev-parse', '--show-object-format')) -GitExe $gitExe
-    if ($format -cnotin @('sha1', 'sha256')) { throw 'Attach public object format is unsupported' }
+    if (-not ([string]::Equals($format, 'sha1', [System.StringComparison]::Ordinal) -or [string]::Equals($format, 'sha256', [System.StringComparison]::Ordinal))) { throw 'Attach public object format is unsupported' }
     $operation.OperationLock = & $openLock -PublicGitDirectory $gitDir
     $roots = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($path in @($root, $gitDir, $commonDir)) { $null = $roots.Add($path) }
     $operation.ReadOwner = & $openReads -Runtime $Runtime -OperationLock $operation.OperationLock -ProjectRoots ([string[]]@($roots)) -ExecutableReads @($operation.GitExecutableOwner)
     $operation.Runtime = $operation.ReadOwner.Runtime
-    Assert-CrgAttachmentAbsent -Runtime $operation.Runtime -PublicGitDirectory $gitDir
+    $pendingHandoffBytes = Get-CrgUnactivatedAttachmentHandoff -Runtime $operation.Runtime -PublicGitDirectory $gitDir
     $pendingRecord = & $operation.Runtime.ReadFile -Path (Join-Path $gitDir 'crg-attachment-pending') -Maximum 16384 -AllowAbsent
+    if ($null -ne $pendingHandoffBytes -and -not $pendingRecord.Present) { throw 'attachment correction requires the exact pending proposal' }
     if ($stageOnly) {
       if (-not $pendingRecord.Present) { throw 'pending attachment staging requires an existing proposal' }
       $proposal = & $readAttachment -Bytes $pendingRecord.Bytes
-      if ($proposal.PublicRef -cne $publicRef -or $proposal.RuntimeStore -cne $Runtime.Store) { throw 'pending attachment proposal differs from the retained public branch or runtime store' }
+      if (-not [string]::Equals($proposal.PublicRef, $publicRef, [System.StringComparison]::Ordinal) -or
+          -not [string]::Equals($proposal.RuntimeStore, $Runtime.Store, [System.StringComparison]::Ordinal)) { throw 'pending attachment proposal differs from the retained public branch or runtime store' }
       $PrivateGitDir = $proposal.PrivateGitDir
       $validateStorage = Get-CrgAttachmentCommand -Runtime $operation.Runtime -Module private-governance -Name Assert-CrgPrivateStorageLocation
       & $validateStorage -PublicRoot $root -PublicGitDir $gitDir -PublicCommonDir $commonDir -PrivateGitDir $PrivateGitDir
@@ -395,7 +588,7 @@ function Open-CrgCentralAttachment {
       if ($initialization.Present) {
         $expectedInitialization = Get-CrgAttachmentInitializationBytes -AttachmentBytes $pendingRecord.Bytes -PublicGitDirectory $gitDir -ObjectFormat $format
         foreach ($record in @($initialization, $initialized)) {
-          if ((Get-CrgAttachmentDigest -Bytes $record.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $expectedInitialization)) { throw 'pending attachment initialization differs from the exact proposal or object format' }
+          if (-not [string]::Equals((Get-CrgAttachmentDigest -Bytes $record.Bytes), (Get-CrgAttachmentDigest -Bytes $expectedInitialization), [System.StringComparison]::Ordinal)) { throw 'pending attachment initialization differs from the exact proposal or object format' }
         }
       }
       $null = $roots.Add($PrivateGitDir)
@@ -405,8 +598,9 @@ function Open-CrgCentralAttachment {
       $privatePrefix = @("--git-dir=$PrivateGitDir", "--work-tree=$root")
       $privateRef = & $readLine -Arguments ($privatePrefix + @('symbolic-ref', '--no-recurse', '-q', 'HEAD')) -GitExe $gitExe
       $privateFormat = & $readLine -Arguments ($privatePrefix + @('rev-parse', '--show-object-format')) -GitExe $gitExe
-      if ($privateRef -cne $proposal.PrivateRef -or $privateFormat -cnotin @('sha1', 'sha256') -or
-          ($initialization.Present -and $privateFormat -cne $format)) { throw 'pending attachment private branch or object format differs from the initialized proposal' }
+      if (-not [string]::Equals($privateRef, $proposal.PrivateRef, [System.StringComparison]::Ordinal) -or
+          -not ([string]::Equals($privateFormat, 'sha1', [System.StringComparison]::Ordinal) -or [string]::Equals($privateFormat, 'sha256', [System.StringComparison]::Ordinal)) -or
+          ($initialization.Present -and -not [string]::Equals($privateFormat, $format, [System.StringComparison]::Ordinal))) { throw 'pending attachment private branch or object format differs from the initialized proposal' }
       $domains = [ordered]@{
         public = [pscustomobject]@{ GitDir = $gitDir; CommonDir = $commonDir; ObjectDir = (Join-Path $commonDir 'objects'); IndexPath = (Join-Path $gitDir 'index'); Ref = $publicRef; Parent = $parent; ParentTree = $parentTree; ObjectFormat = $format }
         private = [pscustomobject]@{ GitDir = $PrivateGitDir; CommonDir = $PrivateGitDir; ObjectDir = (Join-Path $PrivateGitDir 'objects'); IndexPath = (Join-Path $gitDir 'crg-private-index'); Ref = $privateRef; Parent = 'absent'; ParentTree = ''; ObjectFormat = $privateFormat }
@@ -426,11 +620,21 @@ function Open-CrgCentralAttachment {
       Register-CrgAttachmentOwner -Operation $operation
       $owner = Get-CrgAttachmentOwner -Operation $operation
       $association = & $operation.Runtime.ReadFile -Path (Join-Path $PrivateGitDir $owner.AssociationLeaf) -Maximum 65536 -AllowAbsent
-      if ($association.Present -and (Get-CrgAttachmentDigest -Bytes $association.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $owner.AssociationBytes)) { throw 'private branch is already associated with another public worktree or attachment' }
+      if ($association.Present -and -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $association.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AssociationBytes), [System.StringComparison]::Ordinal)) { throw 'private branch is already associated with another public worktree or attachment' }
+      if ($null -ne $pendingHandoffBytes) {
+        foreach ($path in $StagePaths) {
+          if (-not ([string]::Equals($path, 'AGENTS.md', [System.StringComparison]::Ordinal) -or [string]::Equals($path, 'CLAUDE.md', [System.StringComparison]::Ordinal))) { throw 'published attachment correction staging accepts only literal AGENTS.md or CLAUDE.md' }
+          $working = & $operation.Runtime.ReadFile -Path (Join-Path $root $path) -Maximum 16777216
+          if (-not $working.Present -or $working.Bytes -isnot [byte[]]) { throw "attachment correction cannot delete root instruction '$path'" }
+        }
+        $anchor = Read-CrgCentralAttachmentCorrectionAnchor -Operation $operation -ExpectedHandoffBytes $pendingHandoffBytes
+        $null = Assert-CrgCentralAttachmentCorrectionCandidate -Operation $operation -Anchor $anchor
+        $operation | Add-Member -NotePropertyName CorrectionAnchor -NotePropertyValue $anchor
+      }
       $operation.GuardCustody = & $openGuards -ProjectContext $project -OperationLock $operation.OperationLock -Origin 'first-attachment-v1'
       foreach ($domain in @('public', 'private')) {
         $hooksPath = & $readHooksPath -ProjectContext $project -OperationLock $operation.OperationLock -Domain $domain
-        if ($null -eq $hooksPath -or $hooksPath.Value.State -cne 'unset') { throw "$domain effective core.hooksPath must be positively unset before attachment staging" }
+        if ($null -eq $hooksPath -or -not [string]::Equals($hooksPath.Value.State, 'unset', [System.StringComparison]::Ordinal)) { throw "$domain effective core.hooksPath must be positively unset before attachment staging" }
       }
       $fixedIndex = & $operation.Runtime.ReadFile -Path $domains.private.IndexPath -Maximum 67108864 -AllowAbsent
       if (-not $fixedIndex.Present) { throw 'pending attachment staging requires the existing fixed private index' }
@@ -439,9 +643,12 @@ function Open-CrgCentralAttachment {
       $operation | Add-Member -NotePropertyName ValidationState -NotePropertyValue 'held-pending-attachment-candidate'
       return $operation
     }
-    $configRecord = & $operation.Runtime.ReadFile -Path (Join-Path $root '.crg-project/project.conf') -Maximum 65536
-    $null = & $readConfig -Bytes $configRecord.Bytes
-    $configBytes = [byte[]]$configRecord.Bytes.Clone()
+    $configBytes = $null
+    if ($null -eq $pendingHandoffBytes) {
+      $configRecord = & $operation.Runtime.ReadFile -Path (Join-Path $root '.crg-project/project.conf') -Maximum 65536
+      $null = & $readConfig -Bytes $configRecord.Bytes
+      $configBytes = [byte[]]$configRecord.Bytes.Clone()
+    }
     $messagePath = if ([IO.Path]::IsPathRooted($MessageFile)) { [IO.Path]::GetFullPath($MessageFile) } else { [IO.Path]::GetFullPath((Join-Path $root $MessageFile)) }
     if (-not $messagePath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Attach message file must be inside the explicit public worktree' }
     $messageRecord = & $operation.Runtime.ReadFile -Path $messagePath -Maximum 1048576
@@ -451,8 +658,9 @@ function Open-CrgCentralAttachment {
     $proposal = $null
     if ($pendingRecord.Present) {
       $proposal = & $readAttachment -Bytes $pendingRecord.Bytes
-      if ($proposal.PublicRef -cne $publicRef -or $proposal.RuntimeStore -cne $Runtime.Store -or
-          (-not [string]::IsNullOrWhiteSpace($PrivateGitDir) -and $PrivateGitDir -cne $proposal.PrivateGitDir)) { throw 'pending attachment proposal conflicts with the requested association' }
+      if (-not [string]::Equals($proposal.PublicRef, $publicRef, [System.StringComparison]::Ordinal) -or
+          -not [string]::Equals($proposal.RuntimeStore, $Runtime.Store, [System.StringComparison]::Ordinal) -or
+          (-not [string]::IsNullOrWhiteSpace($PrivateGitDir) -and -not [string]::Equals($PrivateGitDir, $proposal.PrivateGitDir, [System.StringComparison]::Ordinal))) { throw 'pending attachment proposal conflicts with the requested association' }
       $PrivateGitDir = $proposal.PrivateGitDir
     }
     $projectId = if ($null -eq $proposal) { [guid]::NewGuid().ToString('N') } else { $proposal.ProjectId }
@@ -473,14 +681,16 @@ function Open-CrgCentralAttachment {
         ('private-git-dir ' + $PrivateGitDir), ('public-ref ' + $publicRef), ('private-ref ' + $privateRef)) -join "`n"
       $initialBytes = [Text.UTF8Encoding]::new($false).GetBytes($initialText + "`n")
       $null = & $readAttachment -Bytes $initialBytes
-      if ($pendingRecord.Present -and (Get-CrgAttachmentDigest -Bytes $pendingRecord.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $initialBytes)) { throw 'new private initialization differs from the pending proposal; adoption is never initialized' }
+      if ($pendingRecord.Present -and -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $pendingRecord.Bytes), (Get-CrgAttachmentDigest -Bytes $initialBytes), [System.StringComparison]::Ordinal)) { throw 'new private initialization differs from the pending proposal; adoption is never initialized' }
       $initializationBytes = Get-CrgAttachmentInitializationBytes -AttachmentBytes $initialBytes -PublicGitDirectory $gitDir -ObjectFormat $format
       foreach ($record in @($initialization, $initialized)) {
-        if ($record.Present -and (Get-CrgAttachmentDigest -Bytes $record.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $initializationBytes)) { throw 'private initialization record conflicts with the exact proposal or object format' }
+        if ($record.Present -and -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $record.Bytes), (Get-CrgAttachmentDigest -Bytes $initializationBytes), [System.StringComparison]::Ordinal)) { throw 'private initialization record conflicts with the exact proposal or object format' }
       }
-      & $releaseReads -Owner $operation.ReadOwner -Paths @((Join-Path $gitDir 'crg-attachment-pending'), (Join-Path $gitDir 'crg-attachment-initialization'))
-      Write-CrgAttachmentRecord -Runtime $operation.Runtime -NativeModule $openLock.Module -Directory $gitDir -Leaf 'crg-attachment-pending' -Bytes $initialBytes
-      Write-CrgAttachmentRecord -Runtime $operation.Runtime -NativeModule $openLock.Module -Directory $gitDir -Leaf 'crg-attachment-initialization' -Bytes $initializationBytes
+      if ($null -eq $pendingHandoffBytes) {
+        & $releaseReads -Owner $operation.ReadOwner -Paths @((Join-Path $gitDir 'crg-attachment-pending'), (Join-Path $gitDir 'crg-attachment-initialization'))
+        Write-CrgAttachmentRecord -Runtime $operation.Runtime -NativeModule $openLock.Module -Directory $gitDir -Leaf 'crg-attachment-pending' -Bytes $initialBytes
+        Write-CrgAttachmentRecord -Runtime $operation.Runtime -NativeModule $openLock.Module -Directory $gitDir -Leaf 'crg-attachment-initialization' -Bytes $initializationBytes
+      }
     }
     $continueInitialization = $null -ne $initialBytes -and -not $initialized.Present
     $privateDirectory = $null
@@ -517,21 +727,28 @@ function Open-CrgCentralAttachment {
       ('private-git-dir ' + $PrivateGitDir), ('public-ref ' + $publicRef), ('private-ref ' + $domains.private.Ref)) -join "`n"
     $operation.AttachmentBytes = [Text.UTF8Encoding]::new($false).GetBytes($attachmentText + "`n")
     $null = & $readAttachment -Bytes $operation.AttachmentBytes
-    if ($pendingRecord.Present -and (Get-CrgAttachmentDigest -Bytes $pendingRecord.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $operation.AttachmentBytes)) { throw 'pending proposal no longer matches the actual private branch; no association is replaced' }
+    if ($pendingRecord.Present -and -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $pendingRecord.Bytes), (Get-CrgAttachmentDigest -Bytes $operation.AttachmentBytes), [System.StringComparison]::Ordinal)) { throw 'pending proposal no longer matches the actual private branch; no association is replaced' }
     $project.Status = [pscustomobject]@{ ProjectId = $projectId; Attachment = 'unactivated proposed association'; PublicRoot = $root
       PublicGitDir = $gitDir; PublicCommonDir = $commonDir; PublicRef = $publicRef; PrivateGitDir = $PrivateGitDir; PrivateRef = $domains.private.Ref }
-    & $releaseReads -Owner $operation.ReadOwner
-    Write-CrgAttachmentRecord -Runtime $operation.Runtime -NativeModule $openLock.Module -Directory $gitDir -Leaf 'crg-attachment-pending' -Bytes $operation.AttachmentBytes
+    if ($null -eq $pendingHandoffBytes) {
+      & $releaseReads -Owner $operation.ReadOwner
+      Write-CrgAttachmentRecord -Runtime $operation.Runtime -NativeModule $openLock.Module -Directory $gitDir -Leaf 'crg-attachment-pending' -Bytes $operation.AttachmentBytes
+    }
     Register-CrgAttachmentOwner -Operation $operation
     $owner = Get-CrgAttachmentOwner -Operation $operation
     $association = & $operation.Runtime.ReadFile -Path (Join-Path $PrivateGitDir $owner.AssociationLeaf) -Maximum 65536 -AllowAbsent
-    if ($association.Present -and (Get-CrgAttachmentDigest -Bytes $association.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $owner.AssociationBytes)) { throw 'private branch is already associated with another public worktree or attachment' }
+    if ($association.Present -and -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $association.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AssociationBytes), [System.StringComparison]::Ordinal)) { throw 'private branch is already associated with another public worktree or attachment' }
+    if ($null -ne $pendingHandoffBytes) {
+      $anchor = Read-CrgCentralAttachmentCorrectionAnchor -Operation $operation -ExpectedHandoffBytes $pendingHandoffBytes
+      $null = Assert-CrgCentralAttachmentCorrectionCandidate -Operation $operation -Anchor $anchor -RequireChanges
+      $operation | Add-Member -NotePropertyName CorrectionAnchor -NotePropertyValue $anchor
+    }
     $operation.GuardCustody = & $openGuards -ProjectContext $project -OperationLock $operation.OperationLock -Origin 'first-attachment-v1'
     # Index initialization and staging can invoke Git hooks. Establish the same
     # effective hook location before those writes, not only before publication.
     foreach ($domain in @('public', 'private')) {
       $hooksPath = & $readHooksPath -ProjectContext $project -OperationLock $operation.OperationLock -Domain $domain
-      if ($null -eq $hooksPath -or $hooksPath.Value.State -cne 'unset') { throw "$domain effective core.hooksPath must be positively unset before attachment staging" }
+      if ($null -eq $hooksPath -or -not [string]::Equals($hooksPath.Value.State, 'unset', [System.StringComparison]::Ordinal)) { throw "$domain effective core.hooksPath must be positively unset before attachment staging" }
     }
     $fixedIndex = & $operation.Runtime.ReadFile -Path $domains.private.IndexPath -Maximum 67108864 -AllowAbsent
     if (-not $fixedIndex.Present) {
@@ -545,17 +762,28 @@ function Open-CrgCentralAttachment {
         $null = & $initializeIndex -ProjectContext $project -OperationLock $operation.OperationLock
       }
     }
-    & $releaseReads -Owner $operation.ReadOwner
-    $null = & $emptyTree -ProjectContext $project -OperationLock $operation.OperationLock
-    Update-CrgAttachmentProjectContext -Operation $operation -ReadContext $readContext
-    $migration = Set-CrgAttachmentMigrationCandidate -Operation $operation -ConfigBytes $configBytes
+    if ($null -eq $pendingHandoffBytes) {
+      & $releaseReads -Owner $operation.ReadOwner
+      $null = & $emptyTree -ProjectContext $project -OperationLock $operation.OperationLock
+      Update-CrgAttachmentProjectContext -Operation $operation -ReadContext $readContext
+      $migration = Set-CrgAttachmentMigrationCandidate -Operation $operation -ConfigBytes $configBytes
+    } else {
+      # Both published indexes already define the correction baseline. Initial
+      # migration would inspect and stage unrelated working paths.
+      $migration = [pscustomobject]@{ PrivateAdditions = @(); PublicRemovals = @() }
+    }
     $operation | Add-Member -NotePropertyName Migration -NotePropertyValue $migration
     $message = & $operation.Runtime.ReadFile -Path $messagePath -Maximum 1048576
     if ($null -eq $message -or $message.Bytes -isnot [byte[]] -or
-        (Get-CrgAttachmentDigest -Bytes $message.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $messageBytes)) { throw 'Attach message changed during migration admission' }
-    Assert-CrgAttachmentAbsent -Runtime $operation.Runtime -PublicGitDirectory $gitDir
+        -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $message.Bytes), (Get-CrgAttachmentDigest -Bytes $messageBytes), [System.StringComparison]::Ordinal)) { throw 'Attach message changed during admission' }
+    if ($null -eq $pendingHandoffBytes) {
+      Assert-CrgAttachmentAbsent -Runtime $operation.Runtime -PublicGitDirectory $gitDir
+    } else {
+      $null = Assert-CrgCentralAttachmentCorrectionCandidate -Operation $operation -Anchor $operation.CorrectionAnchor -RequireChanges
+    }
     Update-CrgAttachmentProjectContext -Operation $operation -ReadContext $readContext
     $operation.CapturedInput = & $readInput -ProjectContext $operation.ProjectContext -AttachmentBytes $operation.AttachmentBytes -OperationId ([guid]::NewGuid().ToString('N')) -MessageBytes $message.Bytes -TempParent $PrivateGitDir -MaximumBlobBytes 33554432 -MaximumContextBytes 536870912
+    if ($null -ne $pendingHandoffBytes -and -not $operation.CapturedInput.HasChanges) { throw 'attachment correction did not produce a changed captured pair' }
     return $operation
   } catch {
     # The caller receives live ownership even when a dependency cannot establish
@@ -610,7 +838,7 @@ function Register-CrgCentralAttachmentRecovery {
   $assertReads = Get-CrgAttachmentCommand -Runtime $Operation.Runtime -Module paired-operation -Name Assert-CrgPairedOperationReads
   & $assertReads -Owner $Operation.ReadOwner
   $pending = & $Operation.Runtime.ReadFile -Path (Join-Path $Operation.ProjectContext.Domains.public.GitDir 'crg-attachment-pending') -Maximum 16384
-  if ($pending.Bytes -isnot [byte[]] -or (Get-CrgAttachmentDigest -Bytes $pending.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $AttachmentBytes)) { throw 'attachment recovery proposal differs from the independently retained transaction' }
+  if ($pending.Bytes -isnot [byte[]] -or -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $pending.Bytes), (Get-CrgAttachmentDigest -Bytes $AttachmentBytes), [System.StringComparison]::Ordinal)) { throw 'attachment recovery proposal differs from the independently retained transaction' }
   $Operation | Add-Member -NotePropertyName AttachmentBytes -NotePropertyValue ([byte[]]$AttachmentBytes.Clone()) -Force
   if ($null -eq $Operation.PSObject.Properties['Closed']) { $Operation | Add-Member -NotePropertyName Closed -NotePropertyValue $false }
   if ($null -eq $Operation.PSObject.Properties['NewDirectoryOwners']) { $Operation | Add-Member -NotePropertyName NewDirectoryOwners -NotePropertyValue (New-Object 'System.Collections.Generic.List[object]') }
@@ -629,7 +857,7 @@ function Complete-CrgCentralAttachmentAssociation {
     param([byte[]]$Bytes)
     $lines = Read-CrgPairRecords -Bytes $Bytes -Maximum 16384
     $names = @(Get-CrgHandoffNames -Origin 'first-attachment-v1')
-    if ($lines.Count -ne $names.Count + 1 -or $lines[0] -cne 'crg-first-attachment-handoff v1') { throw 'association completion requires the durable first-attachment handoff' }
+    if ($lines.Count -ne $names.Count + 1 -or -not [string]::Equals($lines[0], 'crg-first-attachment-handoff v1', [System.StringComparison]::Ordinal)) { throw 'association completion requires the durable first-attachment handoff' }
     $key = ''
     for ($index = 0; $index -lt $names.Count; $index++) {
       $value = Read-CrgPairField -Line $lines[$index + 1] -Name $names[$index]
@@ -640,8 +868,9 @@ function Complete-CrgCentralAttachmentAssociation {
   $retention = Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-retention -Name Read-CrgFirstAttachmentRetention
   $record = & $retention.Module { param($Project, $Key) Read-CrgRetentionRecord -ProjectContext $Project -ReceiptSha256 $Key -ExpectedOrigin 'first-attachment-v1' } $project $receiptKey
   $handoff = & $readHandoff -Bytes $handoffFile.Bytes -ReceiptBytes $record.ReceiptBytes -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
-  if ($handoff.Fields['attachment-sha256'] -cne (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes) -or
-      $record.Receipt.Fields['public-git-dir'] -cne $owner.PublicGitDirectory -or $record.Receipt.Fields['private-git-dir'] -cne $owner.PrivateGitDirectory) { throw 'durable first-attachment handoff differs from the registered association' }
+  if (-not [string]::Equals($handoff.Fields['attachment-sha256'], (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($record.Receipt.Fields['public-git-dir'], $owner.PublicGitDirectory, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($record.Receipt.Fields['private-git-dir'], $owner.PrivateGitDirectory, [System.StringComparison]::Ordinal)) { throw 'durable first-attachment handoff differs from the registered association' }
   $release = Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-operation -Name Release-CrgPairedOperationReadFiles
   & $release -Owner $Operation.ReadOwner -Paths @((Join-Path $owner.PrivateGitDirectory $owner.AssociationLeaf))
   $native = (Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-diff -Name Assert-CrgPairedOperationLock).Module
@@ -657,11 +886,11 @@ function Remove-CrgCentralAttachmentProposal {
   $pointer = & $owner.Runtime.ReadFile -Path (Join-Path $owner.PublicGitDirectory 'crg-pair') -Maximum 256
   $pending = & $owner.Runtime.ReadFile -Path (Join-Path $owner.PublicGitDirectory 'crg-attachment-pending') -Maximum 16384
   $handoff = & $owner.Runtime.ReadFile -Path (Join-Path $owner.PublicGitDirectory 'crg-handoff') -Maximum 16384 -AllowAbsent
-  if ($handoff.Present -or (Get-CrgAttachmentDigest -Bytes $attachment.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes) -or
-      (Get-CrgAttachmentDigest -Bytes $pending.Bytes) -cne (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes)) { throw 'attachment proposal cleanup requires exact activated attachment and no pending publication' }
+  if ($handoff.Present -or -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $attachment.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $pending.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal)) { throw 'attachment proposal cleanup requires exact activated attachment and no pending publication' }
   $readPointer = Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-governance -Name Read-CrgCompletedPairPointerBytes
   $completed = & $readPointer -Bytes $pointer.Bytes
-  if ($completed.Origin -cne 'first-attachment-v1') { throw 'initial proposal cleanup requires first-attachment completion' }
+  if (-not [string]::Equals($completed.Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal)) { throw 'initial proposal cleanup requires first-attachment completion' }
   $release = Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-operation -Name Release-CrgPairedOperationReadFiles
   & $release -Owner $Operation.ReadOwner -Paths @((Join-Path $owner.PublicGitDirectory 'crg-attachment-pending'))
   $native = (Get-CrgAttachmentCommand -Runtime $owner.Runtime -Module paired-diff -Name Assert-CrgPairedOperationLock).Module
@@ -677,7 +906,7 @@ function Remove-CrgCentralAttachmentProposal {
       $actual = Get-CrgOwnedBinaryFileDigest -Record @{ Handle = $handle }
       $sha = [Security.Cryptography.SHA256]::Create()
       try { $expectedSha = ([BitConverter]::ToString($sha.ComputeHash($Expected))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
-      if ($actual.Length -ne $Expected.Length -or $actual.Sha256 -cne $expectedSha) { throw 'pending attachment proposal changed before exact cleanup' }
+      if ($actual.Length -ne $Expected.Length -or -not [string]::Equals($actual.Sha256, $expectedSha, [System.StringComparison]::Ordinal)) { throw 'pending attachment proposal changed before exact cleanup' }
       if (-not [CrgAttributeNeutral.NativeV1]::DeleteHeldExact($handle, $false, [ref]$errorCode)) { throw "pending attachment proposal exact cleanup failed (Win32 error $errorCode)" }
     } finally {
       if ($null -ne $handle) { $handle.Dispose() }
@@ -686,4 +915,4 @@ function Remove-CrgCentralAttachmentProposal {
   } $owner.PublicGitDirectory $owner.AttachmentBytes
 }
 
-Export-ModuleMember -Function Open-CrgCentralAttachment, Close-CrgCentralAttachment, Register-CrgCentralAttachmentRecovery, Complete-CrgCentralAttachmentAssociation, Remove-CrgCentralAttachmentProposal
+Export-ModuleMember -Function Open-CrgCentralAttachment, Close-CrgCentralAttachment, Register-CrgCentralAttachmentRecovery, Complete-CrgCentralAttachmentAssociation, Remove-CrgCentralAttachmentProposal, Assert-CrgCentralAttachmentCorrectionCandidate

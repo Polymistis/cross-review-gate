@@ -62,12 +62,12 @@ function Assert-CrgScopedAuthorityBody {
     }
     $path = $text.Substring(3, $text.Length - 4)
     if ([string]::IsNullOrEmpty($path) -or $path.StartsWith('/', [System.StringComparison]::Ordinal) -or $path.EndsWith('/', [System.StringComparison]::Ordinal) -or
-        $path.IndexOf('\') -ge 0 -or $path.IndexOf('`') -ge 0) { throw "scoped-authority path '$path' is not canonical" }
+        $path.IndexOf([char]'\') -ge 0 -or $path.IndexOf([char]'`') -ge 0) { throw "scoped-authority path '$path' is not canonical" }
     foreach ($character in $path.ToCharArray()) {
       if ([int][char]$character -lt 0x20 -or [int][char]$character -eq 0x7F) { throw 'scoped-authority path contains a control character' }
     }
     foreach ($segment in @($path -split '/', 0)) {
-      if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') { throw "scoped-authority path '$path' has a noncanonical segment" }
+      if ([string]::IsNullOrEmpty($segment) -or [string]::Equals($segment, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($segment, '..', [System.StringComparison]::Ordinal)) { throw "scoped-authority path '$path' has a noncanonical segment" }
     }
     if (-not $seen.Add($path)) { throw "scoped-authority path '$path' is duplicated" }
   }
@@ -76,20 +76,20 @@ function Assert-CrgScopedAuthorityBody {
 function Read-CrgInstallValuesBytes {
   param([Parameter(Mandatory = $true)][byte[]]$Bytes)
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 262144 -Label 'CROSS-REVIEW-VALUES.md'
-  if ($records.Count -eq 0 -or $records[0].Text -cne 'cross-review-values v1') { throw 'CROSS-REVIEW-VALUES.md has an invalid header' }
+  if ($records.Count -eq 0 -or -not [string]::Equals($records[0].Text, 'cross-review-values v1', [System.StringComparison]::Ordinal)) { throw 'CROSS-REVIEW-VALUES.md has an invalid header' }
   $names = @('project-context', 'project-hazards', 'scoped-authority')
-  $blocks = [ordered]@{}
+  $blocks = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
   $cursor = 1
   foreach ($name in $names) {
     $open = "<!-- crg-install-value v1 $name BEGIN -->"
     $close = "<!-- crg-install-value v1 $name END -->"
-    if ($cursor -ge $records.Count -or $records[$cursor].Text -cne $open) { throw "CROSS-REVIEW-VALUES.md is missing the ordered $name opening marker" }
+    if ($cursor -ge $records.Count -or -not [string]::Equals($records[$cursor].Text, $open, [System.StringComparison]::Ordinal)) { throw "CROSS-REVIEW-VALUES.md is missing the ordered $name opening marker" }
     $bodyStart = $records[$cursor].EndExclusive
     $cursor++
     $closeRecord = $null
     while ($cursor -lt $records.Count) {
       $recordText = [string]$records[$cursor].Text
-      if ($recordText -ceq $close) { $closeRecord = $records[$cursor]; break }
+      if ([string]::Equals($recordText, $close, [System.StringComparison]::Ordinal)) { $closeRecord = $records[$cursor]; break }
       if ($recordText.StartsWith('<!-- crg-install-value v1 ', [System.StringComparison]::Ordinal) -or
           $recordText.StartsWith('<!-- crg-render-slot v1 ', [System.StringComparison]::Ordinal)) {
         throw "CROSS-REVIEW-VALUES.md contains a structural marker inside $name"
@@ -138,14 +138,14 @@ function Assert-CrgNoReservedProjectPlaceholder {
 function Get-CrgRenderSlotLayout {
   param(
     [Parameter(Mandatory = $true)][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('review-prompt', 'agents-template')][string]$Target,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target,
     [switch]$FinalOutput
   )
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 1048576 -Label $Target
-  $required = if ($Target -ceq 'review-prompt') { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
+  $required = if ([string]::Equals($Target, 'review-prompt', [System.StringComparison]::Ordinal)) { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
   $allowed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
   foreach ($name in $required) { $null = $allowed.Add($name) }
-  $found = [ordered]@{}
+  $found = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
   $active = $null
   foreach ($record in $records) {
     $text = [string]$record.Text
@@ -179,7 +179,7 @@ function Invoke-CrgInstallValueRender {
   param(
     [Parameter(Mandatory = $true)][object]$Values,
     [Parameter(Mandatory = $true)][byte[]]$TemplateBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('review-prompt', 'agents-template')][string]$Target
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target
   )
   if ($null -eq $Values.Blocks) { throw 'renderer received no parsed values blocks' }
   $layout = Get-CrgRenderSlotLayout -Bytes $TemplateBytes -Target $Target
@@ -230,10 +230,10 @@ function Get-CrgPreparationRoleLayout {
   $open = $null; $close = $null
   foreach ($record in $records) {
     if (-not $record.Text.StartsWith('<!-- crg-document-role-policy ', [StringComparison]::Ordinal)) { continue }
-    if ($record.Text -ceq '<!-- crg-document-role-policy v1 BEGIN -->') {
+    if ([string]::Equals($record.Text, '<!-- crg-document-role-policy v1 BEGIN -->', [StringComparison]::Ordinal)) {
       if ($null -ne $open -or $null -ne $close) { throw 'project role policy has duplicate or nested boundaries' }
       $open = $record
-    } elseif ($record.Text -ceq '<!-- crg-document-role-policy v1 END -->') {
+    } elseif ([string]::Equals($record.Text, '<!-- crg-document-role-policy v1 END -->', [StringComparison]::Ordinal)) {
       if ($null -eq $open -or $null -ne $close) { throw 'project role policy has an orphan or duplicate closing boundary' }
       $close = $record
     } else { throw 'project role policy contains an unknown boundary' }
@@ -248,11 +248,58 @@ function Get-CrgPreparationRoleLayout {
   return [pscustomobject]@{ Open = $open; Close = $close }
 }
 
+# The code unit-test scope a configuration and its own project mode permit:
+# $null is the stock ban. A mode allowance counts only under a valid
+# declaration of that mode; absent and fallback declarations run shipped
+# defaults, which never loosen the ban. An empty scope leaves every compiled
+# byte stock, so a project that never loosens the ban, or whose mode allowance
+# is not in effect, is reviewed under exactly the stock ban text.
+function Get-CrgUnitTestScope {
+  param([object]$Config, [string]$ModeState, [object]$Mode)
+  $policy = $Config.UnitTests
+  if ($null -eq $policy) { return $null }
+  $all = $null -ne $policy.AllowedInMode -and [string]::Equals($ModeState, 'valid', [StringComparison]::Ordinal) -and [string]::Equals($Mode.Mode, $policy.AllowedInMode, [StringComparison]::Ordinal)
+  $paths = @($policy.AllowedPaths)
+  if (-not $all -and $paths.Count -eq 0) { return $null }
+  return [pscustomobject]@{ All = $all; Paths = $paths }
+}
+
+# Returns the unit-test policy boundaries, or $null when a template carries
+# none: templates released before 2.5.0 have no boundary and can only meet the
+# stock ban, which never reads them.
+function Get-CrgPreparationUnitTestLayout {
+  param([byte[]]$Bytes)
+  $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 1048576 -Label 'project unit-test template'
+  $open = $null; $close = $null
+  foreach ($record in $records) {
+    if (-not $record.Text.StartsWith('<!-- crg-unit-test-policy ', [StringComparison]::Ordinal)) { continue }
+    if ([string]::Equals($record.Text, '<!-- crg-unit-test-policy v1 BEGIN -->', [StringComparison]::Ordinal)) {
+      if ($null -ne $open -or $null -ne $close) { throw 'project unit-test policy has duplicate or nested boundaries' }
+      $open = $record
+    } elseif ([string]::Equals($record.Text, '<!-- crg-unit-test-policy v1 END -->', [StringComparison]::Ordinal)) {
+      if ($null -eq $open -or $null -ne $close) { throw 'project unit-test policy has an orphan or duplicate closing boundary' }
+      $close = $record
+    } else { throw 'project unit-test policy contains an unknown boundary' }
+  }
+  if ($null -eq $open -and $null -eq $close) { return $null }
+  if ($null -eq $open -or $null -eq $close) { throw 'project unit-test policy requires both boundaries' }
+  $roles = Get-CrgPreparationRoleLayout -Bytes $Bytes
+  $slots = Get-CrgRenderSlotLayout -Bytes $Bytes -Target 'review-prompt'
+  $ranges = New-Object 'System.Collections.Generic.List[object]'
+  foreach ($slot in $slots.Slots.Values) { $ranges.Add(@($slot.Open.Start, $slot.Close.EndExclusive)) }
+  $ranges.Add(@($roles.Open.Start, $roles.Close.EndExclusive))
+  foreach ($range in $ranges) {
+    if ($open.Start -lt $range[1] -and $close.EndExclusive -gt $range[0]) { throw 'project unit-test policy overlaps an install-value slot or the document-role policy' }
+  }
+  return [pscustomobject]@{ Open = $open; Close = $close }
+}
+
 function Get-CrgProjectPreparation {
   param([string]$Kind, [string]$RuntimeSha256, [AllowNull()][byte[]]$ConfigBytes,
     [AllowNull()][byte[]]$ValuesBytes, [bool]$ModePresent, [AllowNull()][byte[]]$ModeBytes,
     [AllowNull()][byte[]]$TemplateBytes)
-  if ($Kind -cnotin @('governing', 'candidate') -or $RuntimeSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'project preparation kind or runtime binding is invalid' }
+  # Ordinal: -ceq/-cne/-cin compare by culture and ignore characters such as U+00AD.
+  if (-not ([string]::Equals($Kind, 'governing', [StringComparison]::Ordinal) -or [string]::Equals($Kind, 'candidate', [StringComparison]::Ordinal)) -or $RuntimeSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'project preparation kind or runtime binding is invalid' }
   foreach ($item in @(
       @{ Name = 'config'; Bytes = $ConfigBytes; Maximum = 65536 },
       @{ Name = 'values'; Bytes = $ValuesBytes; Maximum = 262144 },
@@ -279,6 +326,7 @@ function Get-CrgProjectPreparation {
   $roles = $script:CrgUtf8NoBom.GetBytes(($roleLines -join "`n") + "`n")
   if ($roles.Length -gt 262144) { throw 'rendered project roles exceed the byte bound' }
   $null = Get-CrgPreparationRoleLayout -Bytes $TemplateBytes
+  $null = Get-CrgPreparationUnitTestLayout -Bytes $TemplateBytes
   $prompt = Invoke-CrgInstallValueRender -Values $values -TemplateBytes $TemplateBytes -Target 'review-prompt'
   $layout = Get-CrgPreparationRoleLayout -Bytes $prompt
   if ($config.Roles.Count -gt 0) {
@@ -309,6 +357,55 @@ function Get-CrgProjectPreparation {
       $prompt = $stream.ToArray()
     } finally { $stream.Dispose() }
     $null = Get-CrgPreparationRoleLayout -Bytes $prompt
+    $null = Get-CrgRenderSlotLayout -Bytes $prompt -Target 'review-prompt' -FinalOutput
+  }
+  $unitLayout = Get-CrgPreparationUnitTestLayout -Bytes $prompt
+  $unitTestScope = Get-CrgUnitTestScope -Config $config -ModeState $modeState -Mode $mode
+  if ($null -ne $unitTestScope) {
+    if ($null -eq $unitLayout) { throw 'a configured code unit-test policy requires a template with unit-test policy boundaries' }
+    $scope = if ($unitTestScope.All) {
+      'anywhere in this project: the configuration permits them in prototype mode, and the governing project mode is prototype'
+    } else {
+      'only in files under these folders: ' + ((@($unitTestScope.Paths) | ForEach-Object { '`' + $_ + '/`' }) -join ', ')
+    }
+    # Replace the whole stock ban: its every-mode, every-surface wording
+    # contradicts a configured scope. Outside the scope the stock rules stand.
+    $body = @(
+      '**Code unit-test policy (project configuration; report under `TEST-QUALITY`).**',
+      'The governing project configuration narrows the operator''s code unit-test',
+      "ban for this project. Code unit tests are permitted $scope.",
+      'The scope comes from the reviewed configuration and project mode at the',
+      'governing revision; candidate changes to either never widen it for this review.',
+      '',
+      '- Outside the permitted scope, never write, add, expand, rewrite, maintain,',
+      '  restore, or run code unit tests. Renaming a unit test as a probe, check,',
+      '  experiment, diagnostic, or verification script does not create an exception.',
+      '- Outside the permitted scope, remove existing code unit tests and',
+      '  unit-test-only assets through the applicable authorized repository workflow.',
+      '- Live testing, manual checks, ordinary program runs, and functional',
+      '  validation remain permitted and important everywhere. Preserve production',
+      '  input validation, error handling, runtime assertions, and safety checks.',
+      '- Reviewers must not request missing code unit tests or treat unit-test',
+      '  deletion as a defect, inside or outside the permitted scope, and must never',
+      '  credit a code unit test or its run as execution evidence.',
+      '- Only a reviewed change to the project configuration or, for a prototype',
+      '  allowance, to the project-mode declaration can alter this scope.',
+      '',
+      'New or restored code unit tests outside the permitted scope, and instructions',
+      'requiring code unit tests outside it, are `BLOCKER:` findings under',
+      '`TEST-QUALITY`. Ordinary scope discipline still applies to untouched',
+      'pre-existing files.'
+    ) -join "`n"
+    $bodyBytes = $script:CrgUtf8NoBom.GetBytes($body + "`n")
+    $stream = New-Object IO.MemoryStream
+    try {
+      $stream.Write($prompt, 0, $unitLayout.Open.EndExclusive)
+      $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+      $stream.Write($prompt, $unitLayout.Close.Start, $prompt.Length - $unitLayout.Close.Start)
+      if ($stream.Length -gt 1048576) { throw 'rendered project prompt exceeds the byte bound' }
+      $prompt = $stream.ToArray()
+    } finally { $stream.Dispose() }
+    $null = Get-CrgPreparationUnitTestLayout -Bytes $prompt
     $null = Get-CrgRenderSlotLayout -Bytes $prompt -Target 'review-prompt' -FinalOutput
   }
   return [pscustomobject]@{
@@ -346,7 +443,7 @@ function ConvertTo-CrgProjectPreparationBytes {
 
 function New-CrgProjectPreparationBytes {
   [CmdletBinding()]
-  param([Parameter(Mandatory = $true)][ValidateSet('governing', 'candidate')][string]$Kind,
+  param([Parameter(Mandatory = $true)][ValidatePattern('\A(?:governing|candidate)\z', Options = 'None')][string]$Kind,
     [Parameter(Mandatory = $true)][string]$RuntimeSha256,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ConfigBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ValuesBytes,
@@ -374,21 +471,21 @@ function Read-CrgPreparationLine {
 function Read-CrgProjectPreparationBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('governing', 'candidate')][string]$ExpectedKind,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:governing|candidate)\z', Options = 'None')][string]$ExpectedKind,
     [Parameter(Mandatory = $true)][string]$ExpectedRuntimeSha256,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$TemplateBytes)
   if ($null -eq $Bytes -or $Bytes.Length -eq 0 -or $Bytes.Length -gt 20971520) { throw 'project preparation has an invalid complete byte length' }
   $cursor = 0
   $names = @('kind', 'runtime-sha256', 'config-sha256', 'values-sha256', 'mode-state', 'mode-sha256', 'template-sha256', 'roles-sha256', 'prompt-sha256')
-  if ((Read-CrgPreparationLine -Bytes $Bytes -Cursor ([ref]$cursor)) -cne 'crg-project-preparation v1') { throw 'project preparation has an invalid header' }
+  if (-not [string]::Equals((Read-CrgPreparationLine -Bytes $Bytes -Cursor ([ref]$cursor)), 'crg-project-preparation v1', [StringComparison]::Ordinal)) { throw 'project preparation has an invalid header' }
   $fields = [ordered]@{}
   foreach ($name in $names) {
     $line = Read-CrgPreparationLine -Bytes $Bytes -Cursor ([ref]$cursor)
     if (-not $line.StartsWith($name + ' ', [StringComparison]::Ordinal)) { throw "project preparation is missing ordered field '$name'" }
     $fields[$name] = $line.Substring($name.Length + 1)
   }
-  if ($fields['kind'] -cne $ExpectedKind -or $fields['runtime-sha256'] -cne $ExpectedRuntimeSha256 -or
-      $fields['mode-state'] -cnotin @('absent', 'valid', 'fallback')) { throw 'project preparation differs from the required kind/runtime or has an invalid mode state' }
+  if (-not [string]::Equals($fields['kind'], $ExpectedKind, [StringComparison]::Ordinal) -or -not [string]::Equals($fields['runtime-sha256'], $ExpectedRuntimeSha256, [StringComparison]::Ordinal) -or
+      -not [System.Linq.Enumerable]::Contains([string[]]@('absent', 'valid', 'fallback'), [string]$fields['mode-state'], [StringComparer]::Ordinal)) { throw 'project preparation differs from the required kind/runtime or has an invalid mode state' }
   $frames = [ordered]@{}
   $bounds = [ordered]@{ config = 65536; values = 262144; mode = 16777216; roles = 262144; prompt = 1048576 }
   foreach ($name in $bounds.Keys) {
@@ -400,7 +497,7 @@ function Read-CrgProjectPreparationBytes {
     $cursor += $length
   }
   if ($cursor -ne $Bytes.Length) { throw 'project preparation contains trailing bytes' }
-  $preparation = Get-CrgProjectPreparation -Kind $ExpectedKind -RuntimeSha256 $ExpectedRuntimeSha256 -ConfigBytes $frames['config'] -ValuesBytes $frames['values'] -ModePresent ($fields['mode-state'] -cne 'absent') -ModeBytes $frames['mode'] -TemplateBytes $TemplateBytes
+  $preparation = Get-CrgProjectPreparation -Kind $ExpectedKind -RuntimeSha256 $ExpectedRuntimeSha256 -ConfigBytes $frames['config'] -ValuesBytes $frames['values'] -ModePresent (-not [string]::Equals($fields['mode-state'], 'absent', [StringComparison]::Ordinal)) -ModeBytes $frames['mode'] -TemplateBytes $TemplateBytes
   $canonical = ConvertTo-CrgProjectPreparationBytes -Preparation $preparation
   if (-not (Compare-CrgInstallValueBytes -Left $Bytes -Right $canonical)) { throw 'project preparation differs from exact recompilation of the captured inputs' }
   $preparation | Add-Member -NotePropertyName PreparationSha256 -NotePropertyValue (Get-CrgPreparationDigest -Bytes $canonical)
@@ -428,6 +525,9 @@ function New-CrgPairedModeBlockBytes {
     if (-not $candidate.ModePresent) { $fields.CandidateState = 'deleted' }
     elseif ($candidate.ModeState -ceq 'valid') { $fields.CandidateState = 'valid'; $fields.CandidateDetail = "mode=$($candidate.Mode.Mode)" }
     else { $fields.CandidateState = 'invalid'; $fields.CandidateDetail = "grammar: $($candidate.Mode.ErrReason); anchor: $($candidate.Mode.ErrAnchor)" }
+  }
+  if ($null -ne (Get-CrgUnitTestScope -Config $governing.Config -ModeState $governing.ModeState -Mode $governing.Mode)) {
+    $fields.ConfiguredUnitTestPolicy = $true
   }
   $format = Get-CrgPreparationCommand -Module 'review-preparation' -Name 'Format-ProjectModeBlock'
   return ,($script:CrgUtf8NoBom.GetBytes((& $format @fields)))

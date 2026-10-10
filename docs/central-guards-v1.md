@@ -202,6 +202,6 @@ checks, not content-secret detection or a claim to remove previously public data
 Provider/model authorization, review routing, merge panels, package activation,
 consumer migration and arbitrary private synchronization remain outside this
 module. Verification uses source inspection, static parsing, builds, normal
-authorized operation, and applicable functional testing. Code unit tests or
-renamed code unit tests are not authorized; other testing categories are not
-prohibited merely by category.
+authorized operation, and functional validation. Code unit tests or renamed
+code unit tests are not authorized; live testing, manual checks, ordinary
+program runs, and functional validation remain permitted.

@@ -100,6 +100,35 @@ not an acceptance rule. The actual raw commit must reproduce the agreed
 message bytes and captured identity headers exactly. A mismatch can leave an
 unreferenced object but cannot authorize a ref update.
 
+## Public path staging
+
+`Add-CrgPairedGitPublicPaths` requires `ProjectContext`, the actual
+`OperationLock`, the public-eligible `Paths`, and a nonempty
+`-PrivateExclusions` set. It writes only `:(top,literal)<positive>` entries to
+an owned pathspec file and runs
+`git add --force --pathspec-from-file=<file> --pathspec-file-nul`. Every
+positive must be a present file or gitlink directory the caller classified,
+and the caller must already have removed any stale index leaf that a positive
+replaces (a former directory under a new file, or the reverse) through
+`Remove-CrgPairedGitIndexPaths`; `git add` records the removal of index
+entries a positive shadows, so that precondition, not the add, keeps removals
+on the explicit route. `--force` stays because the caller's eligibility
+classification, not Git's ignore rules, decides what a selected path is.
+
+Git 2.55 pathspec matching of untracked files under negative pathspecs is
+order-dependent, so negatives are not passed to git. Before the add, a private
+exclusion that is a prefix of any positive (a positive under a private
+directory) is a failed stage. After the add, `git ls-files --stage -z` of the
+positives (the literal reader `Get-CrgPairedGitStageInventory` also uses) must
+show each positive in the public index, including a gitlink (mode 160000); a
+missing positive is a failed stage. The same inventory of the private
+exclusions is taken before and after the add: a private entry the add created,
+or whose mode or object changed, is a failed stage, not a warning. A
+private-owned path already in the public index before the add is not this
+operation's failure — selection-mode staging removes only selected private
+paths from the public index, and the public commit check refuses any that
+remain.
+
 ## Namespace, ancestry and lifetime
 
 Both databases must remain distinct, with exact common/object directories and
@@ -122,12 +151,17 @@ Outgoing ancestry enumeration refuses existing graft/shallow overlays and binds
 remains retained through every ancestry child and any uncertain cleanup; a later
 overlay insertion cannot alter the accepted outgoing set. Ambient override
 variables remain refused rather than used as caller-selected history controls.
+Every Git child runs with `advice.graftFileDeprecated=false`: Git 2.55 prints a
+graft-deprecation hint for any graft file, including the empty control file,
+and that hint in the merged transcript would make every ancestry result
+noncanonical.
 
 Admitted reference-transaction behavior remains enabled through the retained
 projection; unsupported custom hooks still refuse. All Git children
 use `paired-process` descendant ownership and `paired-diff` private transcript
-custody. Each child has a fixed ten-second completion bound and bounded output
-acquisition. Merged diagnostics cannot be parsed as canonical success. A ref
+custody. Each child has a completion bound — the launcher's default, a
+caller-set value within the launcher's accepted range, or the fixed Git LFS
+hook lifetime — and bounded output acquisition. Merged diagnostics cannot be parsed as canonical success. A ref
 update can already have changed state when a diagnostic or reread fails; the
 caller must inspect actual refs rather than assume rollback.
 

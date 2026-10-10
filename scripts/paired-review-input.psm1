@@ -19,8 +19,9 @@ function Get-CrgPreparedInputDigest {
 
 function Get-CrgPreparedBlobOid {
   param([byte[]]$Bytes, [string]$ObjectFormat)
-  if ($ObjectFormat -ceq 'sha1') { $hash = [Security.Cryptography.SHA1]::Create() }
-  elseif ($ObjectFormat -ceq 'sha256') { $hash = [Security.Cryptography.SHA256]::Create() }
+  # Ordinal: -ceq/-cne/-cin compare by culture and ignore characters such as U+00AD.
+  if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { $hash = [Security.Cryptography.SHA1]::Create() }
+  elseif ([string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal)) { $hash = [Security.Cryptography.SHA256]::Create() }
   else { throw 'prepared blob has an unsupported object format' }
   try {
     $header = [Text.Encoding]::ASCII.GetBytes('blob ' + $Bytes.Length.ToString([Globalization.CultureInfo]::InvariantCulture) + [char]0)
@@ -104,9 +105,9 @@ function Format-CrgPreparedCommitLogEntry {
   param([string]$Sha, [byte[]]$ContentBytes)
   $escaped = ConvertTo-CrgPreparedCommitLogEscapedText -Bytes $ContentBytes
   $lines = @($escaped -split "`n", 0)
-  if ($lines.Count -ge 2 -and $lines[$lines.Count - 1] -eq '') {
+  if ($lines.Count -ge 2 -and $lines[$lines.Count - 1].Length -eq 0) {
     $lines = $lines[0..($lines.Count - 2)]
-  } elseif ($lines.Count -eq 1 -and $lines[0] -eq '') {
+  } elseif ($lines.Count -eq 1 -and $lines[0].Length -eq 0) {
     $lines = @()
   }
   $quoted = (@($lines | ForEach-Object { "> $_" }) -join "`n")
@@ -117,11 +118,11 @@ function Format-CrgPreparedCommitHistory {
   param([byte[]]$Bytes, [string]$ObjectFormat, [string]$Parent, [ref]$AggregateBytes)
   $bounds = Get-CrgPreparedHistoryBounds
   if ($null -eq $Bytes -or $Bytes.Length -gt $bounds.FramedDomainBytes) { throw 'commit-log capture overflow: absent or oversized framed domain history' }
-  if ($Parent -ceq 'absent') {
+  if ([string]::Equals($Parent, 'absent', [StringComparison]::Ordinal)) {
     if ($Bytes.Length -ne 0) { throw 'absent private ancestry cannot carry history bytes' }
     return ''
   }
-  $width = if ($ObjectFormat -ceq 'sha1') { 40 } elseif ($ObjectFormat -ceq 'sha256') { 64 } else { throw 'history has an unsupported object format' }
+  $width = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } elseif ([string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal)) { 64 } else { throw 'history has an unsupported object format' }
   if ($Parent -cnotmatch ('\A[0-9a-f]{' + $width + '}\z')) { throw 'history parent identity is not canonical' }
   $marker = [Text.Encoding]::ASCII.GetBytes("crg-commit-history v1`n")
   if ($Bytes.Length -lt $marker.Length) { throw 'history capture framing is absent' }
@@ -146,7 +147,7 @@ function Format-CrgPreparedCommitHistory {
     if ($length -ge $Bytes.Length - $offset -or $Bytes[$offset + $length] -ne 10) { throw 'history entry does not contain its exact raw length and framing LF' }
     $content = New-Object byte[] $length
     [Array]::Copy($Bytes, $offset, $content, 0, $length)
-    $hash = if ($ObjectFormat -ceq 'sha1') { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
+    $hash = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
     try {
       $objectHeader = [Text.Encoding]::ASCII.GetBytes('commit ' + $length.ToString([Globalization.CultureInfo]::InvariantCulture) + [char]0)
       $null = $hash.TransformBlock($objectHeader, 0, $objectHeader.Length, $null, 0)
@@ -168,8 +169,8 @@ function Get-CrgPreparedInputNames {
 }
 
 function Get-CrgPreparedOriginCommands {
-  param([ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
-  if ($Origin -ceq 'first-attachment-v1') {
+  param([ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     return @{ Header = 'crg-prepared-first-attachment v1'; ReadUnit = 'Read-CrgFirstAttachmentUnitBytes';
       NewUnit = 'New-CrgFirstAttachmentUnitBytes'; Mode = 'New-CrgFirstAttachmentModeBlockBytes' }
   }
@@ -179,14 +180,14 @@ function Get-CrgPreparedOriginCommands {
 
 function Read-CrgPreparedDescriptorFields {
   param([AllowNull()][byte[]]$Bytes, [string]$ExpectedSha256,
-    [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1')
+    [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1')
   if ($ExpectedSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'prepared descriptor expected digest is not canonical sha256' }
   $lines = Read-CrgPreparedInputRecords -Bytes $Bytes -Maximum 16384 -Label 'descriptor'
   $digest = Get-CrgPreparedInputDigest -Bytes $Bytes
   if ($digest -cne $ExpectedSha256) { throw 'prepared descriptor digest differs from the caller pin' }
   $names = @(Get-CrgPreparedInputNames)
   $originCommands = Get-CrgPreparedOriginCommands -Origin $Origin
-  if ($lines.Count -ne $names.Count + 1 -or $lines[0] -cne $originCommands.Header) { throw 'prepared descriptor must contain the exact required origin records' }
+  if ($lines.Count -ne $names.Count + 1 -or -not [string]::Equals($lines[0], $originCommands.Header, [StringComparison]::Ordinal)) { throw 'prepared descriptor must contain the exact required origin records' }
   $fields = [ordered]@{}
   for ($i = 0; $i -lt $names.Count; $i++) {
     $name = $names[$i]
@@ -196,8 +197,8 @@ function Read-CrgPreparedDescriptorFields {
     if ($name.EndsWith('-sha256', [StringComparison]::Ordinal)) {
       if ($value -cnotmatch '\A[0-9a-f]{64}\z') { throw "prepared descriptor field '$name' requires lowercase sha256" }
     } elseif ($name.EndsWith('-object-format', [StringComparison]::Ordinal)) {
-      if ($value -cnotin @('sha1', 'sha256')) { throw "prepared descriptor field '$name' has an unsupported object format" }
-    } elseif ($value -cne '-' -and $value -cnotmatch '\A(public|private) (.+)\z') {
+      if (-not ([string]::Equals($value, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($value, 'sha256', [StringComparison]::Ordinal))) { throw "prepared descriptor field '$name' has an unsupported object format" }
+    } elseif (-not [string]::Equals($value, '-', [StringComparison]::Ordinal) -and $value -cnotmatch '\A(public|private) (.+)\z') {
       throw 'prepared descriptor consistency selection has invalid grammar'
     }
     $fields.Add($name, $value)
@@ -210,7 +211,7 @@ function Read-CrgPreparedDescriptorCore {
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$GoverningConfigBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $record = Read-CrgPreparedDescriptorFields -Bytes $Bytes -ExpectedSha256 $ExpectedSha256 -Origin $Origin
   $fields = $record.Fields
   $digest = $record.DescriptorSha256
@@ -223,7 +224,7 @@ function Read-CrgPreparedDescriptorCore {
   # Exact comparison to the strict config parser also checks canonical path
   # grammar without adding a second private-path parser. Parent provenance is
   # still unresolved: supplied config bytes are not a preceding-blob receipt.
-  if ($fields['consistency-document'] -cne $selection) { throw 'prepared descriptor consistency selection differs from captured governing configuration' }
+  if (-not [string]::Equals($fields['consistency-document'], $selection, [StringComparison]::Ordinal)) { throw 'prepared descriptor consistency selection differs from captured governing configuration' }
   return [pscustomobject]@{
     Schema = 1; DescriptorSha256 = $digest; Fields = $fields; GoverningConfig = $governing
     ValidationState = 'descriptor-metadata-only'; ReadyForReview = $false
@@ -317,13 +318,13 @@ function Read-CrgPreparedBundleCore {
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PrivateTreeBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$RuntimeTemplateBytes,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$ContextBlobBuffers,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $originCommands = Get-CrgPreparedOriginCommands -Origin $Origin
   $descriptor = Read-CrgPreparedDescriptorCore -Bytes $DescriptorBytes -ExpectedSha256 $ExpectedDescriptorSha256 -GoverningConfigBytes $GoverningConfigBytes -Origin $Origin
   $bindings = Get-CrgPreparedBufferBindings
   if ($null -eq $Buffers -or $Buffers.Count -ne $bindings.Count) { throw 'prepared bundle requires every fixed buffer and no extra buffer' }
   foreach ($name in $Buffers.Keys) {
-    if ($name -isnot [string] -or $name -cnotin @($bindings.Keys) -or $Buffers[$name] -isnot [byte[]]) { throw 'prepared bundle requires exact fixed names with byte-array values' }
+    if ($name -isnot [string] -or -not [System.Linq.Enumerable]::Contains([string[]]@($bindings.Keys), [string]$name, [StringComparer]::Ordinal) -or $Buffers[$name] -isnot [byte[]]) { throw 'prepared bundle requires exact fixed names with byte-array values' }
   }
   if ($Buffers['COMMIT-LOG.txt'].Length -gt (Get-CrgPreparedHistoryBounds).RenderedBytes) { throw 'prepared commit-log display exceeds the rendered history bound' }
   $publicFormat = $descriptor.Fields['public-object-format']
@@ -347,7 +348,7 @@ function Read-CrgPreparedBundleCore {
   foreach ($kind in @('governing', 'candidate')) {
     $preparations[$kind] = & $readPreparation -Bytes $Buffers[$kind + '.preparation'] -ExpectedKind $kind -ExpectedRuntimeSha256 $unit.Fields['runtime-manifest-sha256'] -TemplateBytes $RuntimeTemplateBytes
   }
-  if ($Origin -ceq 'first-attachment-v1') {
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     $readBootstrap = Get-CrgPreparedInputCommand -Module 'project-preparation' -Name 'Read-CrgBootstrapProjectPreparationBytes'
     $preparations['governing'] = & $readBootstrap -Bytes $Buffers['governing.preparation'] -ExpectedRuntimeSha256 $unit.Fields['runtime-manifest-sha256'] -TemplateBytes $RuntimeTemplateBytes
   }
@@ -357,14 +358,14 @@ function Read-CrgPreparedBundleCore {
   $formatMode = Get-CrgPreparedInputCommand -Module 'project-preparation' -Name $originCommands.Mode
   $modeArguments = @{ GoverningBytes = $Buffers['governing.preparation']; CandidateBytes = $Buffers['candidate.preparation'];
     ExpectedRuntimeSha256 = $unit.Fields['runtime-manifest-sha256']; TemplateBytes = $RuntimeTemplateBytes }
-  if ($Origin -ceq 'paired-v1') { $modeArguments.GoverningRef = $unit.Fields['private-parent'] }
+  if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) { $modeArguments.GoverningRef = $unit.Fields['private-parent'] }
   $modeBlock = & $formatMode @modeArguments
   if ((Get-CrgPreparedInputDigest -Bytes $modeBlock) -cne $bufferDigests['PROJECT-MODE.txt']) { throw 'prepared project mode differs from the governing/candidate compiled states' }
   $readTrees = Get-CrgPreparedInputCommand -Module 'paired-tree' -Name 'Read-CrgPairedTreeBytes'
   $trees = & $readTrees -PublicTreeBytes $PublicTreeBytes -PrivateTreeBytes $PrivateTreeBytes -PublicObjectFormat $publicFormat -PrivateObjectFormat $privateFormat -GoverningConfigBytes $GoverningConfigBytes -CandidateConfigBytes $CandidateConfigBytes
   $leaves = Get-CrgPreparedLeafMap -Trees $trees
   $inventoryLines = Read-CrgPreparedInputRecords -Bytes $Buffers['context-inventory.txt'] -Maximum ([int]::MaxValue) -Label 'context inventory'
-  if ($inventoryLines[0] -cne 'crg-pair-context v1' -or $inventoryLines.Count -ne $leaves.Count + 1) { throw 'prepared context inventory must contain exactly the paired tree leaves' }
+  if (-not [string]::Equals($inventoryLines[0], 'crg-pair-context v1', [StringComparison]::Ordinal) -or $inventoryLines.Count -ne $leaves.Count + 1) { throw 'prepared context inventory must contain exactly the paired tree leaves' }
   $inventory = New-Object 'System.Collections.Generic.List[object]'
   $blobPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
   $previous = $null
@@ -403,7 +404,7 @@ function Read-CrgPreparedBundleCore {
   $valuesPath = 'CROSS-REVIEW-VALUES.md'
   if (-not $leaves.ContainsKey($valuesPath) -or $leaves[$valuesPath].Domain -cne 'private' -or $leaves[$valuesPath].Entry.Mode -cnotin @('100644', '100755') -or
       $preparations['candidate'].ValuesSha256 -cne (Get-CrgPreparedInputDigest -Bytes $ContextBlobBuffers[$valuesPath])) { throw 'candidate compiled values differ from a regular private candidate blob' }
-  $modeEntries = @(@($trees.PublicEntries) + @($trees.PrivateEntries) | Where-Object { $_.Path -ceq 'PROJECT-MODE.md' })
+  $modeEntries = @(@($trees.PublicEntries) + @($trees.PrivateEntries) | Where-Object { [string]::Equals($_.Path, 'PROJECT-MODE.md', [StringComparison]::Ordinal) })
   $modePresent = $modeEntries.Count -gt 0
   if ($modePresent -and ($modeEntries.Count -ne 1 -or $modeEntries[0].Mode -cnotin @('100644', '100755'))) { throw 'candidate mode capture requires a regular blob; non-file presence is not absence' }
   if ($modePresent -ne $preparations['candidate'].ModePresent) { throw 'candidate compiled mode presence differs from the paired candidate tree' }
@@ -418,9 +419,9 @@ function Read-CrgPreparedBundleCore {
   }
   $testEnvelope = Get-CrgPreparedInputCommand -Module 'review-preparation' -Name 'Test-PlanConsistencyEvidenceEnvelope'
   $envelope = & $testEnvelope -Text $texts['PLAN-CONSISTENCY-REPORT.md']
-  if (-not $envelope.Ok -or $envelope.State -ceq 'indeterminate') { throw 'prepared consistency envelope is malformed or indeterminate' }
+  if (-not $envelope.Ok -or [string]::Equals($envelope.State, 'indeterminate', [StringComparison]::Ordinal)) { throw 'prepared consistency envelope is malformed or indeterminate' }
   $expectedReport = Get-CrgPreparedConsistencyReport -GoverningConfig $descriptor.GoverningConfig -Leaves $leaves -ContextBlobBuffers $ContextBlobBuffers -Texts $texts
-  if ($texts['PLAN-CONSISTENCY-REPORT.md'] -cne $expectedReport) { throw 'prepared consistency envelope differs from the selected captured inputs' }
+  if (-not [string]::Equals($texts['PLAN-CONSISTENCY-REPORT.md'], $expectedReport, [StringComparison]::Ordinal)) { throw 'prepared consistency envelope differs from the selected captured inputs' }
   # Recompilation binds displayed policy, not supplied listings to Git objects
   # or display scope/history to actual capture. Live custody remains caller-owned.
   return [pscustomobject]@{
@@ -437,8 +438,8 @@ function Read-CrgPreparedBundleCore {
 function New-CrgPreparedBundleCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$IdentityFields,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$GoverningPreparationBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$CandidatePreparationBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PublicTreeBytes,
@@ -446,25 +447,25 @@ function New-CrgPreparedBundleCore {
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$RuntimeTemplateBytes,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$ContextBlobBuffers,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$EvidenceBuffers,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $originCommands = Get-CrgPreparedOriginCommands -Origin $Origin
   $identityNames = @('operation-id', 'project-id', 'attachment-sha256', 'public-worktree', 'public-git-dir', 'public-common-dir',
     'private-git-dir', 'public-ref', 'private-ref', 'public-parent', 'private-parent', 'public-tree', 'private-tree',
     'previous-pair', 'runtime-manifest-sha256')
-  if ($Origin -ceq 'first-attachment-v1') { $identityNames[13] = 'private-baseline-tree' }
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) { $identityNames[13] = 'private-baseline-tree' }
   if ($null -eq $IdentityFields -or $IdentityFields.Count -ne $identityNames.Count) { throw 'assembly requires only the exact captured identity fields' }
   foreach ($name in $IdentityFields.Keys) {
-    if ($name -isnot [string] -or $name -cnotin $identityNames -or $IdentityFields[$name] -isnot [string]) { throw 'assembly identity fields must use exact names and string values' }
+    if ($name -isnot [string] -or -not [System.Linq.Enumerable]::Contains([string[]]$identityNames, [string]$name, [StringComparer]::Ordinal) -or $IdentityFields[$name] -isnot [string]) { throw 'assembly identity fields must use exact names and string values' }
   }
   $evidenceNames = @('public.patch', 'private.patch', 'public.stat', 'private.stat', 'public.name-status', 'private.name-status',
     'public.history', 'private.history', 'COMMIT-MESSAGE.txt')
   if ($null -eq $EvidenceBuffers -or $EvidenceBuffers.Count -ne $evidenceNames.Count) { throw 'assembly requires every raw evidence buffer and no displayed overrides' }
   foreach ($name in $EvidenceBuffers.Keys) {
-    if ($name -isnot [string] -or $name -cnotin $evidenceNames -or $EvidenceBuffers[$name] -isnot [byte[]]) { throw 'assembly evidence must use exact names and byte arrays' }
+    if ($name -isnot [string] -or -not [System.Linq.Enumerable]::Contains([string[]]$evidenceNames, [string]$name, [StringComparer]::Ordinal) -or $EvidenceBuffers[$name] -isnot [byte[]]) { throw 'assembly evidence must use exact names and byte arrays' }
   }
   $readPreparation = Get-CrgPreparedInputCommand -Module 'project-preparation' -Name 'Read-CrgProjectPreparationBytes'
   $governing = & $readPreparation -Bytes $GoverningPreparationBytes -ExpectedKind governing -ExpectedRuntimeSha256 $IdentityFields['runtime-manifest-sha256'] -TemplateBytes $RuntimeTemplateBytes
-  if ($Origin -ceq 'first-attachment-v1') {
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     $readBootstrap = Get-CrgPreparedInputCommand -Module 'project-preparation' -Name 'Read-CrgBootstrapProjectPreparationBytes'
     $governing = & $readBootstrap -Bytes $GoverningPreparationBytes -ExpectedRuntimeSha256 $IdentityFields['runtime-manifest-sha256'] -TemplateBytes $RuntimeTemplateBytes
   }
@@ -501,7 +502,7 @@ function New-CrgPreparedBundleCore {
   $formatMode = Get-CrgPreparedInputCommand -Module 'project-preparation' -Name $originCommands.Mode
   $modeArguments = @{ GoverningBytes = $GoverningPreparationBytes; CandidateBytes = $CandidatePreparationBytes;
     ExpectedRuntimeSha256 = $IdentityFields['runtime-manifest-sha256']; TemplateBytes = $RuntimeTemplateBytes }
-  if ($Origin -ceq 'paired-v1') { $modeArguments.GoverningRef = $IdentityFields['private-parent'] }
+  if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) { $modeArguments.GoverningRef = $IdentityFields['private-parent'] }
   $buffers.Add('PROJECT-MODE.txt', (& $formatMode @modeArguments))
   # Labels belong only to the display buffers. The consistency producer above
   # and unit digests below always consume the unmodified raw-domain patches.
@@ -542,10 +543,10 @@ function New-CrgPreparedBundleCore {
   $buffers.Add('review-unit.txt', $unit)
   $unitSha = Get-CrgPreparedInputDigest -Bytes $unit
   $scopeLines = @('# Paired staged review', "Review unit: $unitSha")
-  if ($Origin -ceq 'first-attachment-v1') { $scopeLines[0] = '# First-attachment review' }
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) { $scopeLines[0] = '# First-attachment review' }
   foreach ($name in $identityNames) { $scopeLines += $name + ': ' + $fields[$name] }
   $policyAuthority = 'Current review policy comes from preceding approved private governance.'
-  if ($Origin -ceq 'first-attachment-v1') {
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     $policyAuthority = 'Current review policy comes from the retained approved runtime bootstrap, not adopted ancestry. The complete private candidate is reviewed against the Git empty tree; review remains mandatory even when both results retain existing commits.'
   }
   $scopeLines += @('', $policyAuthority,
@@ -594,14 +595,14 @@ function Read-CrgPreparedFilesCore {
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumHistoryBytes,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][long]$MaximumContextBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $originCommands = Get-CrgPreparedOriginCommands -Origin $Origin
   foreach ($pin in @($PreparedPairSha256, $PreparedPublicTreeSha256, $PreparedPrivateTreeSha256, $ExpectedRuntimeSha256)) {
     if ($pin -cnotmatch '\A[0-9a-f]{64}\z') { throw 'prepared file input requires canonical caller digest pins' }
   }
   if ($PreparedPairPath -cnotmatch '\A[A-Za-z]:\\' -or $PreparedPairPath.Contains('/') -or
-      [IO.Path]::GetFullPath($PreparedPairPath) -cne $PreparedPairPath -or
-      [IO.Path]::GetFileName($PreparedPairPath) -cne 'prepared-pair.txt') { throw 'prepared descriptor path must be a canonical absolute local prepared-pair.txt path' }
+      -not [string]::Equals([IO.Path]::GetFullPath($PreparedPairPath), $PreparedPairPath, [StringComparison]::Ordinal) -or
+      -not [string]::Equals([IO.Path]::GetFileName($PreparedPairPath), 'prepared-pair.txt', [StringComparison]::Ordinal)) { throw 'prepared descriptor path must be a canonical absolute local prepared-pair.txt path' }
   $root = [IO.Path]::GetDirectoryName($PreparedPairPath)
   $descriptorBytes = Read-CrgPreparedHeldFileBytes -ReadFile $ReadFile -Path $PreparedPairPath -Maximum 16384
   $descriptor = Read-CrgPreparedDescriptorFields -Bytes $descriptorBytes -ExpectedSha256 $PreparedPairSha256 -Origin $Origin
@@ -703,8 +704,8 @@ function Read-CrgPreparedFirstAttachmentBundleBytes {
 function New-CrgPreparedPairBundleBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$IdentityFields,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$GoverningPreparationBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$CandidatePreparationBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PublicTreeBytes,
@@ -718,8 +719,8 @@ function New-CrgPreparedPairBundleBytes {
 function New-CrgPreparedFirstAttachmentBundleBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$IdentityFields,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$GoverningPreparationBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$CandidatePreparationBytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PublicTreeBytes,

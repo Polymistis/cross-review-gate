@@ -100,7 +100,8 @@ function ConvertFrom-CrgRawEnvironmentEntry {
     throw [System.InvalidOperationException]::new('raw environment entries must be non-empty and NUL-free')
   }
   $startsWithEquals = $Entry.StartsWith('=', [System.StringComparison]::Ordinal)
-  $separator = if ($startsWithEquals) { $Entry.IndexOf('=', 1) } else { $Entry.IndexOf('=') }
+  # Ordinal: string IndexOf, -ceq/-cne and -cin compare by culture and ignore characters such as U+00AD.
+  $separator = if ($startsWithEquals) { $Entry.IndexOf([char]'=', 1) } else { $Entry.IndexOf([char]'=') }
   if (($startsWithEquals -and $separator -le 1) -or (-not $startsWithEquals -and $separator -le 0)) {
     throw [System.InvalidOperationException]::new('raw environment entry does not use name=value grammar')
   }
@@ -172,7 +173,7 @@ function Set-CrgNoReplaceObjectsProcessSingleton {
   try { [string[]]$finalEntries = @(& $reader) }
   catch { throw [System.InvalidOperationException]::new('raw process-environment enumeration failed', $_.Exception) }
   $final = @(Get-CrgNoReplaceRawEntries -Entries $finalEntries)
-  if ($final.Count -ne 1 -or $final[0].Name -cne 'GIT_NO_REPLACE_OBJECTS' -or $final[0].Value -cne '1') {
+  if ($final.Count -ne 1 -or -not [string]::Equals($final[0].Name, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::Ordinal) -or -not [string]::Equals($final[0].Value, '1', [System.StringComparison]::Ordinal)) {
     throw [System.InvalidOperationException]::new("canonical GIT_NO_REPLACE_OBJECTS postcondition failed (raw spelling count=$($final.Count))")
   }
 }
@@ -250,12 +251,12 @@ function Assert-CrgScopedAuthorityBody {
     }
     $path = $text.Substring(3, $text.Length - 4)
     if ([string]::IsNullOrEmpty($path) -or $path.StartsWith('/', [System.StringComparison]::Ordinal) -or $path.EndsWith('/', [System.StringComparison]::Ordinal) -or
-        $path.IndexOf('\') -ge 0 -or $path.IndexOf('`') -ge 0) { throw "scoped-authority path '$path' is not canonical" }
+        $path.IndexOf([char]'\') -ge 0 -or $path.IndexOf([char]'`') -ge 0) { throw "scoped-authority path '$path' is not canonical" }
     foreach ($character in $path.ToCharArray()) {
       if ([int][char]$character -lt 0x20 -or [int][char]$character -eq 0x7F) { throw 'scoped-authority path contains a control character' }
     }
     foreach ($segment in @($path -split '/', 0)) {
-      if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') { throw "scoped-authority path '$path' has a noncanonical segment" }
+      if ([string]::IsNullOrEmpty($segment) -or [string]::Equals($segment, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($segment, '..', [System.StringComparison]::Ordinal)) { throw "scoped-authority path '$path' has a noncanonical segment" }
     }
     if (-not $seen.Add($path)) { throw "scoped-authority path '$path' is duplicated" }
   }
@@ -264,20 +265,20 @@ function Assert-CrgScopedAuthorityBody {
 function Read-CrgInstallValuesBytes {
   param([Parameter(Mandatory = $true)][byte[]]$Bytes)
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 262144 -Label 'CROSS-REVIEW-VALUES.md'
-  if ($records.Count -eq 0 -or $records[0].Text -cne 'cross-review-values v1') { throw 'CROSS-REVIEW-VALUES.md has an invalid header' }
+  if ($records.Count -eq 0 -or -not [string]::Equals($records[0].Text, 'cross-review-values v1', [System.StringComparison]::Ordinal)) { throw 'CROSS-REVIEW-VALUES.md has an invalid header' }
   $names = @('project-context', 'project-hazards', 'scoped-authority')
-  $blocks = [ordered]@{}
+  $blocks = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
   $cursor = 1
   foreach ($name in $names) {
     $open = "<!-- crg-install-value v1 $name BEGIN -->"
     $close = "<!-- crg-install-value v1 $name END -->"
-    if ($cursor -ge $records.Count -or $records[$cursor].Text -cne $open) { throw "CROSS-REVIEW-VALUES.md is missing the ordered $name opening marker" }
+    if ($cursor -ge $records.Count -or -not [string]::Equals($records[$cursor].Text, $open, [System.StringComparison]::Ordinal)) { throw "CROSS-REVIEW-VALUES.md is missing the ordered $name opening marker" }
     $bodyStart = $records[$cursor].EndExclusive
     $cursor++
     $closeRecord = $null
     while ($cursor -lt $records.Count) {
       $recordText = [string]$records[$cursor].Text
-      if ($recordText -ceq $close) { $closeRecord = $records[$cursor]; break }
+      if ([string]::Equals($recordText, $close, [System.StringComparison]::Ordinal)) { $closeRecord = $records[$cursor]; break }
       if ($recordText.StartsWith('<!-- crg-install-value v1 ', [System.StringComparison]::Ordinal) -or
           $recordText.StartsWith('<!-- crg-render-slot v1 ', [System.StringComparison]::Ordinal)) {
         throw "CROSS-REVIEW-VALUES.md contains a structural marker inside $name"
@@ -326,14 +327,14 @@ function Assert-CrgNoReservedProjectPlaceholder {
 function Get-CrgRenderSlotLayout {
   param(
     [Parameter(Mandatory = $true)][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('review-prompt', 'agents-template')][string]$Target,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target,
     [switch]$FinalOutput
   )
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 1048576 -Label $Target
-  $required = if ($Target -ceq 'review-prompt') { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
+  $required = if ([string]::Equals($Target, 'review-prompt', [System.StringComparison]::Ordinal)) { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
   $allowed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
   foreach ($name in $required) { $null = $allowed.Add($name) }
-  $found = [ordered]@{}
+  $found = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
   $active = $null
   foreach ($record in $records) {
     $text = [string]$record.Text
@@ -367,7 +368,7 @@ function Invoke-CrgInstallValueRender {
   param(
     [Parameter(Mandatory = $true)][object]$Values,
     [Parameter(Mandatory = $true)][byte[]]$TemplateBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('review-prompt', 'agents-template')][string]$Target
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target
   )
   if ($null -eq $Values.Blocks) { throw 'renderer received no parsed values blocks' }
   $layout = Get-CrgRenderSlotLayout -Bytes $TemplateBytes -Target $Target
@@ -818,7 +819,7 @@ function Get-CrgPathChain {
   $current = $root
   if ($relative.Length -gt 0) {
     foreach ($part in @($relative -split '[\\/]')) {
-      if ([string]::IsNullOrEmpty($part) -or $part -ceq '.' -or $part -ceq '..' -or $part.Contains(':')) {
+      if ([string]::IsNullOrEmpty($part) -or [string]::Equals($part, '.', [System.StringComparison]::Ordinal) -or [string]::Equals($part, '..', [System.StringComparison]::Ordinal) -or $part.Contains(':')) {
         throw "path '$Path' contains an unsafe directory component"
       }
       $current = Get-CrgCanonicalFsPath -Path (Join-Path $current $part)
@@ -977,7 +978,7 @@ function Set-CrgChildNoReplaceSingleton {
   }
   $Environment['GIT_NO_REPLACE_OBJECTS'] = '1'
   $final = @(Get-CrgEnvironmentKeys -Environment $Environment | Where-Object { [string]::Equals($_, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::OrdinalIgnoreCase) })
-  if ($final.Count -ne 1 -or $final[0] -cne 'GIT_NO_REPLACE_OBJECTS' -or [string]$Environment[$final[0]] -cne '1') {
+  if ($final.Count -ne 1 -or -not [string]::Equals($final[0], 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::Ordinal) -or -not [string]::Equals([string]$Environment[$final[0]], '1', [System.StringComparison]::Ordinal)) {
     throw 'child GIT_NO_REPLACE_OBJECTS singleton verification failed'
   }
 }
@@ -990,7 +991,7 @@ function Assert-CrgGitChildEnvironment {
     if ((Test-CrgProhibitedGitSelectorName -Name $name) -and -not $allowed.Contains($name)) {
       throw "prohibited selector '$name' reached a Git child environment"
     }
-    if ((Test-CrgProhibitedGitSelectorName -Name $name) -and $allowed.Contains($name) -and $name -cnotin @('GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')) {
+    if ((Test-CrgProhibitedGitSelectorName -Name $name) -and $allowed.Contains($name) -and -not ([string]::Equals($name, 'GIT_OBJECT_DIRECTORY', [System.StringComparison]::Ordinal) -or [string]::Equals($name, 'GIT_ALTERNATE_OBJECT_DIRECTORIES', [System.StringComparison]::Ordinal))) {
       throw "selector '$name' is not an admitted renderer-internal Git setting"
     }
   }
@@ -1031,7 +1032,7 @@ function Invoke-CrgRendererGit {
   if ($null -ne $InternalEnvironment) {
     foreach ($nameObject in $InternalEnvironment.Keys) {
       $name = [string]$nameObject
-      if ($name -cnotin @('GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')) { throw "unapproved internal Git selector '$name'" }
+      if (-not ([string]::Equals($name, 'GIT_OBJECT_DIRECTORY', [System.StringComparison]::Ordinal) -or [string]::Equals($name, 'GIT_ALTERNATE_OBJECT_DIRECTORIES', [System.StringComparison]::Ordinal))) { throw "unapproved internal Git selector '$name'" }
       $value = [string]$InternalEnvironment[$nameObject]
       if ([string]::IsNullOrWhiteSpace($value) -or $value.IndexOf([char]0) -ge 0 -or -not [System.IO.Path]::IsPathRooted($value)) { throw "invalid internal Git selector value for '$name'" }
       $environment[$name] = Get-CrgCanonicalFsPath -Path $value
@@ -1113,7 +1114,7 @@ function Resolve-CrgRendererRepository {
   if (-not [System.IO.Path]::IsPathRooted($objectNative)) { $objectNative = Join-Path $top $objectNative }
   $objectDir = Get-CrgCanonicalFsPath -Path $objectNative
   $format = Get-CrgSingleGitLine -Result (Invoke-CrgTargetGit -RepoRoot $top -Arguments @('rev-parse', '--show-object-format')) -Label 'Git object-format resolution'
-  if ($format -cnotin @('sha1', 'sha256')) { throw "unsupported target Git object format '$format'" }
+  if (-not ([string]::Equals($format, 'sha1', [System.StringComparison]::Ordinal) -or [string]::Equals($format, 'sha256', [System.StringComparison]::Ordinal))) { throw "unsupported target Git object format '$format'" }
   return [pscustomobject]@{ Root = $top; GitDir = $gitDir; CommonDir = $common; ObjectDir = $objectDir; ObjectFormat = $format }
 }
 
@@ -1125,7 +1126,7 @@ function Assert-CrgRepositoryResolutionStable {
       throw "target repository $field changed after namespace retention"
     }
   }
-  if ($Expected.ObjectFormat -cne $actual.ObjectFormat) { throw 'target repository object format changed after namespace retention' }
+  if (-not [string]::Equals($Expected.ObjectFormat, $actual.ObjectFormat, [System.StringComparison]::Ordinal)) { throw 'target repository object format changed after namespace retention' }
 }
 
 function ConvertFrom-CrgGitNulRecords {
@@ -1150,7 +1151,7 @@ function Get-CrgRendererHeadState {
   $verify = Invoke-CrgTargetGit -RepoRoot $Repo.Root -Arguments @('rev-parse', '-q', '--verify', 'HEAD^{commit}')
   if ($verify.Exit -eq 0) {
     $oid = Get-CrgSingleGitLine -Result $verify -Label 'HEAD resolution'
-    $pattern = if ($Repo.ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
+    $pattern = if ([string]::Equals($Repo.ObjectFormat, 'sha256', [System.StringComparison]::Ordinal)) { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
     if ($oid -cnotmatch $pattern) { throw 'HEAD resolved to a noncanonical object ID' }
     return [pscustomobject]@{ State = 'present'; Oid = $oid }
   }
@@ -1172,7 +1173,7 @@ function Get-CrgHeadPathEntry {
   if ($null -ne $result.Bytes) { $probeBytes = [byte[]]$result.Bytes }
   $records = @(ConvertFrom-CrgGitNulRecords -Bytes $probeBytes -Label "HEAD probe for '$Path'")
   if ($records.Count -eq 0) { return [pscustomobject]@{ State = 'absent'; Mode = ''; Oid = '' } }
-  if ($records.Count -ne 1 -or $records[0] -cnotmatch '^(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$' -or $Matches[3] -cne $Path) {
+  if ($records.Count -ne 1 -or $records[0] -cnotmatch '^(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$' -or -not [string]::Equals($Matches[3], $Path, [System.StringComparison]::Ordinal)) {
     throw "HEAD path '$Path' is not one regular blob"
   }
   return [pscustomobject]@{ State = 'regular'; Mode = [string]$Matches[1]; Oid = [string]$Matches[2] }
@@ -1186,7 +1187,7 @@ function Get-CrgIndexPathEntry {
   if ($null -ne $result.Bytes) { $probeBytes = [byte[]]$result.Bytes }
   $records = @(ConvertFrom-CrgGitNulRecords -Bytes $probeBytes -Label "index probe for '$Path'")
   if ($records.Count -eq 0) { return [pscustomobject]@{ State = 'absent'; Mode = ''; Oid = '' } }
-  if ($records.Count -ne 1 -or $records[0] -cnotmatch '^(100644|100755) ([0-9a-f]{40}|[0-9a-f]{64}) 0\t(.+)$' -or $Matches[3] -cne $Path) {
+  if ($records.Count -ne 1 -or $records[0] -cnotmatch '^(100644|100755) ([0-9a-f]{40}|[0-9a-f]{64}) 0\t(.+)$' -or -not [string]::Equals($Matches[3], $Path, [System.StringComparison]::Ordinal)) {
     throw "index path '$Path' is unmerged, duplicated, or not one regular stage-0 blob"
   }
   return [pscustomobject]@{ State = 'regular'; Mode = [string]$Matches[1]; Oid = [string]$Matches[2] }
@@ -1224,7 +1225,9 @@ function Get-CrgRenderAuthority {
     Get-CrgPathAuthorityEvidence -Repo $Repo -Head $head -Path 'scripts/codex/review-prompt-template.md'
     Get-CrgPathAuthorityEvidence -Repo $Repo -Head $head -Path 'docs/AGENTS.md.template'
   )
-  $families = @($evidence | ForEach-Object { if ($_.Class.StartsWith('TRACKED-', [System.StringComparison]::Ordinal)) { 'TRACKED' } else { 'LOCAL' } } | Select-Object -Unique)
+  $familySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+  foreach ($item in $evidence) { [void]$familySet.Add($(if ($item.Class.StartsWith('TRACKED-', [System.StringComparison]::Ordinal)) { 'TRACKED' } else { 'LOCAL' })) }
+  $families = @($familySet)
   if ($families.Count -ne 1) { throw 'render-bearing outputs have a mixed TRACKED/LOCAL authority classification' }
   return [pscustomobject]@{ Family = [string]$families[0]; Head = $head; Outputs = $evidence }
 }
@@ -1252,7 +1255,7 @@ function Assert-CrgAuthorityEvidenceEqual {
 
 function Read-CrgGitBlobBytes {
   param([object]$Repo, [string]$Oid, [uint64]$Maximum, [string]$Label)
-  $pattern = if ($Repo.ObjectFormat -ceq 'sha256') { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
+  $pattern = if ([string]::Equals($Repo.ObjectFormat, 'sha256', [System.StringComparison]::Ordinal)) { '^[0-9a-f]{64}$' } else { '^[0-9a-f]{40}$' }
   if ($Oid -cnotmatch $pattern) { throw "$Label has a noncanonical blob object ID" }
   $result = Invoke-CrgTargetGit -RepoRoot $Repo.Root -Arguments @('cat-file', 'blob', $Oid) -MaximumOutputBytes ([int64]$Maximum + 1)
   if ($result.Exit -ne 0 -or $result.ErrorText.Length -ne 0) { throw "$Label blob read failed" }
@@ -1361,7 +1364,7 @@ function Remove-CrgAttributeStateScratch {
 # directory to Git would reopen a replacement race. Encode the few required
 # loose objects directly under retained create-new parents instead.
 function Get-CrgAttributeStateLooseObjectBytes {
-  param([ValidateSet('blob', 'tree')][string]$Type, [byte[]]$Bytes)
+  param([ValidatePattern('\A(?:blob|tree)\z', Options = 'None')][string]$Type, [byte[]]$Bytes)
   if ($null -eq $Bytes) { throw 'attribute-state object encoding received null bytes' }
   [byte[]]$header = [System.Text.Encoding]::ASCII.GetBytes("$Type $($Bytes.Length)`0")
   [byte[]]$raw = New-Object byte[] ($header.Length + $Bytes.Length)
@@ -1381,11 +1384,11 @@ function Get-CrgAttributeStateLooseObjectBytes {
 }
 
 function Get-CrgAttributeStateObjectId {
-  param([ValidateSet('blob', 'tree')][string]$Type, [byte[]]$Bytes, [ValidateSet('sha1', 'sha256')][string]$Format)
+  param([ValidatePattern('\A(?:blob|tree)\z', Options = 'None')][string]$Type, [byte[]]$Bytes, [ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$Format)
   if ($null -eq $Bytes) { throw 'attribute-state object-ID calculation received null bytes' }
   [byte[]]$header = [System.Text.Encoding]::ASCII.GetBytes("$Type $($Bytes.Length)`0")
   $stream = New-Object System.IO.MemoryStream
-  $hash = if ($Format -ceq 'sha256') { [System.Security.Cryptography.SHA256]::Create() } else { [System.Security.Cryptography.SHA1]::Create() }
+  $hash = if ([string]::Equals($Format, 'sha256', [System.StringComparison]::Ordinal)) { [System.Security.Cryptography.SHA256]::Create() } else { [System.Security.Cryptography.SHA1]::Create() }
   try {
     $stream.Write($header, 0, $header.Length)
     if ($Bytes.Length -gt 0) { $stream.Write($Bytes, 0, $Bytes.Length) }
@@ -1395,7 +1398,7 @@ function Get-CrgAttributeStateObjectId {
 }
 
 function New-CrgAttributeStateScratch {
-  param([ValidateSet('sha1', 'sha256')][string]$ObjectFormat, [string]$Token = '')
+  param([ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$ObjectFormat, [string]$Token = '')
   Initialize-CrgRendererFileNative
   if ([string]::IsNullOrEmpty($Token)) { $Token = [Guid]::NewGuid().ToString('N') }
   if ($Token -cnotmatch '\A[0-9a-f]{32}\z') { throw 'attribute-state scratch token is not canonical lowercase hexadecimal' }
@@ -1453,7 +1456,7 @@ function New-CrgAttributeStateScratch {
 }
 
 function Add-CrgAttributeStateObject {
-  param([object]$Custody, [ValidateSet('blob', 'tree')][string]$Type, [byte[]]$Bytes)
+  param([object]$Custody, [ValidatePattern('\A(?:blob|tree)\z', Options = 'None')][string]$Type, [byte[]]$Bytes)
   if ($null -eq $Custody -or $Custody.Removed -or $null -eq $Bytes -or $null -eq $Custody.ObjectsHandle) { throw 'attribute-state object write received no live retained store' }
   $oid = Get-CrgAttributeStateObjectId -Type $Type -Bytes $Bytes -Format $Custody.ObjectFormat
   if ($Custody.Files.ContainsKey($oid)) { return $oid }
@@ -1505,12 +1508,12 @@ function New-CrgCachedAttributeStateSource {
   $listing = Invoke-CrgTargetGit -RepoRoot $Repo.Root -Arguments (@('ls-files', '--stage', '-z', '--') + $attributePaths)
   if ($listing.Exit -ne 0 -or $listing.ErrorText.Length -ne 0) { throw 'cached attribute-source inventory probe failed' }
   $records = @(ConvertFrom-CrgGitNulRecords -Bytes $listing.Bytes -Label 'cached attribute-source inventory')
-  $oidLength = if ($Repo.ObjectFormat -ceq 'sha256') { 64 } else { 40 }
+  $oidLength = if ([string]::Equals($Repo.ObjectFormat, 'sha256', [System.StringComparison]::Ordinal)) { 64 } else { 40 }
   $sourceEntries = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
   foreach ($record in $records) {
     if ($record -cnotmatch "\A(100644|100755) ([0-9a-f]{$oidLength}) 0\t(.+)\z") { throw "cached attribute-source inventory returned a non-stage-0 regular entry: '$record'" }
     $path = [string]$Matches[3]
-    if ($path -cnotin $attributePaths -or $sourceEntries.ContainsKey($path)) { throw "cached attribute-source inventory returned an unexpected or duplicate path: '$path'" }
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@($attributePaths), [string]$path, [System.StringComparer]::Ordinal) -or $sourceEntries.ContainsKey($path)) { throw "cached attribute-source inventory returned an unexpected or duplicate path: '$path'" }
     $sourceEntries[$path] = [pscustomobject]@{ Mode = [string]$Matches[1]; Oid = [string]$Matches[2] }
   }
 
@@ -1522,7 +1525,23 @@ function New-CrgCachedAttributeStateSource {
 
     $makeTree = {
       param([object[]]$Entries, [string]$Label)
-      $ordered = @($Entries | Sort-Object -Property Name -CaseSensitive)
+      # Git orders tree entries by their UTF-8 bytes, comparing a tree's name
+      # as if it ended with '/'. Sort-Object compares by culture, and an
+      # ordinal string sort compares UTF-16 code units, which order a
+      # character above U+FFFF before U+E000-U+FFFF where the bytes do not;
+      # the key is the bytes as lowercase hex, whose ordinal order is theirs.
+      # An index array is sorted with the keys: Windows PowerShell passes an
+      # object[] items array to [Array]::Sort as a converted copy, so the
+      # items themselves would stay unsorted.
+      [object[]]$unordered = @($Entries)
+      $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+      [string[]]$sortKeys = @($unordered | ForEach-Object {
+        $name = if ([string]::Equals($_.Type, 'tree', [System.StringComparison]::Ordinal)) { "$($_.Name)/" } else { [string]$_.Name }
+        [BitConverter]::ToString($utf8.GetBytes($name)).Replace('-', '').ToLowerInvariant()
+      })
+      [int[]]$sortIndex = if ($unordered.Length -gt 0) { 0..($unordered.Length - 1) } else { @() }
+      [Array]::Sort($sortKeys, $sortIndex, [System.StringComparer]::Ordinal)
+      [object[]]$ordered = @($sortIndex | ForEach-Object { $unordered[$_] })
       $payload = New-Object System.IO.MemoryStream
       try {
         foreach ($entry in $ordered) {
@@ -1603,7 +1622,7 @@ function Assert-CrgAttributeGraphStates {
   if ($result.Exit -ne 0 -or $result.ErrorText.Length -ne 0) { throw "$label failed with Git exit $($result.Exit): $($result.ErrorText.Trim())" }
   $actual = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
   foreach ($path in @(ConvertFrom-CrgGitNulRecords -Bytes $result.Bytes -Label $label)) {
-    if ($path -cnotin $paths -or -not $actual.Add($path)) { throw "$label returned an unexpected or duplicate path '$path'" }
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@($paths), [string]$path, [System.StringComparer]::Ordinal) -or -not $actual.Add($path)) { throw "$label returned an unexpected or duplicate path '$path'" }
   }
   foreach ($path in $paths) {
     if (-not $actual.Contains($path)) { throw "'$path' has a string-valued collision or invalid special state in the $label" }
@@ -1629,18 +1648,20 @@ function Get-CrgAttributeGraph {
     if ($result.Exit -ne 0 -or $result.ErrorText.Length -ne 0) { throw 'checkout-attribute graph probe failed' }
     $records = @(ConvertFrom-CrgGitNulRecords -Bytes $result.Bytes -Label 'checkout-attribute graph probe')
     if ($records.Count -ne ($paths.Count * $attributes.Count * 3)) { throw 'checkout-attribute graph returned an incomplete matrix' }
-    $graph = [ordered]@{}
+    $graph = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
     for ($i = 0; $i -lt $records.Count; $i += 3) {
       $path = $records[$i]; $attribute = $records[$i + 1]; $value = $records[$i + 2]
-      if ($path -cnotin $paths -or $attribute -cnotin $attributes) { throw 'checkout-attribute graph returned an unknown path or attribute' }
+      if (-not [System.Linq.Enumerable]::Contains([string[]]@($paths), [string]$path, [System.StringComparer]::Ordinal) -or
+          -not [System.Linq.Enumerable]::Contains([string[]]@($attributes), [string]$attribute, [System.StringComparer]::Ordinal)) { throw 'checkout-attribute graph returned an unknown path or attribute' }
       $key = "$path`0$attribute"
       if ($graph.Contains($key)) { throw 'checkout-attribute graph duplicated a path/attribute result' }
       $graph[$key] = $value
     }
     foreach ($path in $paths) {
-      if ($graph["$path`0text"] -cne 'set' -or $graph["$path`0eol"] -cne 'lf') { throw "'$path' lacks effective text eol=lf checkout authority" }
+      if (-not [string]::Equals($graph["$path`0text"], 'set', [System.StringComparison]::Ordinal) -or -not [string]::Equals($graph["$path`0eol"], 'lf', [System.StringComparison]::Ordinal)) { throw "'$path' lacks effective text eol=lf checkout authority" }
       foreach ($attribute in @('filter', 'ident', 'working-tree-encoding')) {
-        if ($graph["$path`0$attribute"] -cnotin @('unset', 'unspecified')) { throw "'$path' has active checkout attribute '$attribute'" }
+        $state = $graph["$path`0$attribute"]
+        if (-not ([string]::Equals($state, 'unset', [System.StringComparison]::Ordinal) -or [string]::Equals($state, 'unspecified', [System.StringComparison]::Ordinal))) { throw "'$path' has active checkout attribute '$attribute'" }
       }
     }
     Assert-CrgAttributeGraphStates -Repo $Repo -Cached:$Cached -StateSource $stateSource
@@ -1654,7 +1675,7 @@ function Assert-CrgAttributeGraphsEqual {
   param([object]$IndexGraph, [object]$WorkingGraph)
   if ($IndexGraph.Count -ne $WorkingGraph.Count) { throw 'index and working-tree checkout-attribute graph sizes differ' }
   foreach ($key in $IndexGraph.Keys) {
-    if (-not $WorkingGraph.Contains($key) -or [string]$IndexGraph[$key] -cne [string]$WorkingGraph[$key]) {
+    if (-not $WorkingGraph.Contains($key) -or -not [string]::Equals([string]$IndexGraph[$key], [string]$WorkingGraph[$key], [System.StringComparison]::Ordinal)) {
       $display = $key.Replace([char]0, [char]':')
       throw "index and working-tree checkout attributes differ at '$display'"
     }
@@ -1662,10 +1683,10 @@ function Assert-CrgAttributeGraphsEqual {
 }
 
 function Get-CrgGitBlobObjectId {
-  param([Parameter(Mandatory = $true)][byte[]]$Bytes, [ValidateSet('sha1', 'sha256')][string]$Format)
+  param([Parameter(Mandatory = $true)][byte[]]$Bytes, [ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$Format)
   [byte[]]$header = [System.Text.Encoding]::ASCII.GetBytes("blob $($Bytes.Length)`0")
   $stream = New-Object System.IO.MemoryStream
-  $hash = if ($Format -ceq 'sha256') { [System.Security.Cryptography.SHA256]::Create() } else { [System.Security.Cryptography.SHA1]::Create() }
+  $hash = if ([string]::Equals($Format, 'sha256', [System.StringComparison]::Ordinal)) { [System.Security.Cryptography.SHA256]::Create() } else { [System.Security.Cryptography.SHA1]::Create() }
   try {
     $stream.Write($header, 0, $header.Length)
     $stream.Write($Bytes, 0, $Bytes.Length)
@@ -1685,13 +1706,13 @@ function Assert-CrgTrackedAttributeBehavior {
     # pathname-only creation and recursive cleanup cannot establish ownership.
     $custody = New-CrgAttributeStateScratch -ObjectFormat $Repo.ObjectFormat
     $writtenOid = Add-CrgAttributeStateObject -Custody $custody -Type blob -Bytes $lf
-    if ($writtenOid -cne $expectedOid) { throw 'isolated attribute-probe object ID differs from the expected LF blob' }
+    if (-not [string]::Equals($writtenOid, $expectedOid, [System.StringComparison]::Ordinal)) { throw 'isolated attribute-probe object ID differs from the expected LF blob' }
     $internal = @{ GIT_OBJECT_DIRECTORY = $custody.Objects; GIT_ALTERNATE_OBJECT_DIRECTORIES = $Repo.ObjectDir }
     foreach ($path in @('CROSS-REVIEW-VALUES.md', 'scripts/codex/review-prompt-template.md', 'docs/AGENTS.md.template')) {
       foreach ($input in @($lf, $crlf)) {
         $clean = Invoke-CrgTargetGit -RepoRoot $Repo.Root -Arguments @('-c', 'core.autocrlf=true', 'hash-object', "--path=$path", '--stdin') -InputBytes $input -InternalEnvironment $internal
         $cleanOid = Get-CrgSingleGitLine -Result $clean -Label "core.autocrlf clean probe for '$path'"
-        if ($cleanOid -cne $expectedOid) { throw "checkout clean behavior for '$path' does not preserve the required LF blob" }
+        if (-not [string]::Equals($cleanOid, $expectedOid, [System.StringComparison]::Ordinal)) { throw "checkout clean behavior for '$path' does not preserve the required LF blob" }
       }
       $checkout = Invoke-CrgTargetGit -RepoRoot $Repo.Root -Arguments @('-c', 'core.autocrlf=true', 'cat-file', '--filters', "--path=$path", $expectedOid) -MaximumOutputBytes 4096 -InternalEnvironment $internal
       if ($checkout.Exit -ne 0 -or $checkout.ErrorText.Length -ne 0 -or -not (Compare-CrgInstallValueBytes -Left $checkout.Bytes -Right $lf)) {
@@ -1727,7 +1748,7 @@ function Read-CrgRendererStateBytes {
   $text = [System.Text.Encoding]::ASCII.GetString($Bytes)
   $lines = @($text.Substring(0, $text.Length - 1) -split "`n", 0)
   if ($lines.Count -ne 26 -or @($lines | Where-Object { $_.Length -eq 0 }).Count -ne 0) { throw 'renderer state must contain exactly 26 nonempty LF-terminated records' }
-  if ($lines[0] -cne 'crg-render-project-values-transaction v1' -or $lines[1] -cne 'phase: PREPARED') { throw 'renderer state has an invalid header or phase' }
+  if (-not [string]::Equals($lines[0], 'crg-render-project-values-transaction v1', [System.StringComparison]::Ordinal) -or -not [string]::Equals($lines[1], 'phase: PREPARED', [System.StringComparison]::Ordinal)) { throw 'renderer state has an invalid header or phase' }
   if ($lines[2] -cnotmatch '^transaction-id: ([0-9a-f]{32})$') { throw 'renderer state has an invalid transaction ID' }
   $transactionId = [string]$Matches[1]
   if ($lines[3] -cnotmatch '^values-sha256: ([0-9a-f]{64})$') { throw 'renderer state has an invalid values digest' }
@@ -1738,8 +1759,8 @@ function Read-CrgRendererStateBytes {
   for ($i = 0; $i -lt 2; $i++) {
     $offset = $offsets[$i]
     $prefix = "output-$($i + 1)"
-    if ($lines[$offset] -cne "$prefix`: $($ids[$i])") { throw "renderer state has an invalid $prefix identifier" }
-    $fieldValues = [ordered]@{}
+    if (-not [string]::Equals($lines[$offset], "$prefix`: $($ids[$i])", [System.StringComparison]::Ordinal)) { throw "renderer state has an invalid $prefix identifier" }
+    $fieldValues = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
     $expected = @(
       'preimage-volume-id', 'preimage-file-id', 'preimage-link-count', 'preimage-length', 'preimage-sha256',
       'postimage-volume-id', 'postimage-file-id', 'postimage-link-count', 'postimage-length', 'postimage-sha256'
@@ -1754,7 +1775,7 @@ function Read-CrgRendererStateBytes {
     foreach ($field in @('preimage-volume-id', 'postimage-volume-id')) { if ($fieldValues[$field] -cnotmatch '^[0-9a-f]{16}$') { throw "renderer state field '$prefix-$field' is invalid" } }
     foreach ($field in @('preimage-file-id', 'postimage-file-id')) { if ($fieldValues[$field] -cnotmatch '^[0-9a-f]{32}$') { throw "renderer state field '$prefix-$field' is invalid" } }
     foreach ($field in @('preimage-sha256', 'postimage-sha256')) { if ($fieldValues[$field] -cnotmatch '^[0-9a-f]{64}$') { throw "renderer state field '$prefix-$field' is invalid" } }
-    foreach ($field in @('preimage-link-count', 'postimage-link-count')) { if ($fieldValues[$field] -cne '1') { throw "renderer state field '$prefix-$field' must be literal 1" } }
+    foreach ($field in @('preimage-link-count', 'postimage-link-count')) { if (-not [string]::Equals($fieldValues[$field], '1', [System.StringComparison]::Ordinal)) { throw "renderer state field '$prefix-$field' must be literal 1" } }
     $preLength = ConvertTo-CrgCanonicalLength -Text $fieldValues['preimage-length'] -Label "$prefix preimage length"
     $postLength = ConvertTo-CrgCanonicalLength -Text $fieldValues['postimage-length'] -Label "$prefix postimage length"
     $outputs.Add([pscustomobject]@{
@@ -1805,8 +1826,8 @@ function ConvertTo-CrgRecordedSnapshot {
 function Assert-CrgHeldSnapshotMatches {
   param([object]$Handle, [object]$Expected, [string]$Label, [uint64]$Maximum = 1048576)
   $read = Read-CrgHeldFileBytes -Handle $Handle -Maximum $Maximum -Label $Label
-  if ($read.Snapshot.VolumeId -cne $Expected.VolumeId -or $read.Snapshot.FileId -cne $Expected.FileId -or
-      $read.Snapshot.LinkCount -ne 1 -or [uint64]$read.Snapshot.Length -ne [uint64]$Expected.Length -or $read.Sha256 -cne $Expected.Sha256) {
+  if (-not [string]::Equals($read.Snapshot.VolumeId, $Expected.VolumeId, [System.StringComparison]::Ordinal) -or -not [string]::Equals($read.Snapshot.FileId, $Expected.FileId, [System.StringComparison]::Ordinal) -or
+      $read.Snapshot.LinkCount -ne 1 -or [uint64]$read.Snapshot.Length -ne [uint64]$Expected.Length -or -not [string]::Equals($read.Sha256, $Expected.Sha256, [System.StringComparison]::Ordinal)) {
     throw "$Label does not match the recorded native identity, length, or digest"
   }
   return $read
@@ -1814,7 +1835,7 @@ function Assert-CrgHeldSnapshotMatches {
 
 function Get-CrgOutputSpecById {
   param([Parameter(Mandatory = $true)][string]$Id)
-  $matches = @($script:CrgRendererOutputs | Where-Object { $_.Id -ceq $Id })
+  $matches = @($script:CrgRendererOutputs | Where-Object { [string]::Equals($_.Id, $Id, [System.StringComparison]::Ordinal) })
   if ($matches.Count -ne 1) { throw "unknown renderer output identifier '$Id'" }
   return $matches[0]
 }
@@ -2065,14 +2086,13 @@ function Invoke-CrgRendererRecovery {
       $recorded = $State.Record.Outputs[$i]
       $path = $paths.Outputs[$i]
       if ($recorded.Id -cne $path.Id) { throw 'renderer recovery record/output mapping is inconsistent' }
-      $locations = [ordered]@{
-        destination = $path.Destination
-        stage = Join-Path $path.Parent $path.StageLeaf
-        custody = Join-Path $path.Parent $path.CustodyLeaf
-        backup = Join-Path $path.Parent $path.BackupLeaf
-        archive = Join-Path $path.Parent $path.ArchiveLeaf
-      }
-      $occupants = [ordered]@{}
+      $locations = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+      $locations['destination'] = $path.Destination
+      $locations['stage'] = Join-Path $path.Parent $path.StageLeaf
+      $locations['custody'] = Join-Path $path.Parent $path.CustodyLeaf
+      $locations['backup'] = Join-Path $path.Parent $path.BackupLeaf
+      $locations['archive'] = Join-Path $path.Parent $path.ArchiveLeaf
+      $occupants = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
       foreach ($name in $locations.Keys) {
         $occupant = Open-CrgRecoveryOccupant -Pins $Pins -Path $locations[$name] -Label "$($path.Id) recovery $name"
         $occupants[$name] = $occupant
@@ -2101,7 +2121,7 @@ function Invoke-CrgRendererRecovery {
       $occupants = $path.RecoveryOccupants
       $post = $occupants[$path.PostLocation]
       if ($path.PostLocation -ceq 'destination') {
-        if ($occupants['stage'].State -ne 'absent') { throw "$($path.Id) stage is occupied while rollback needs the fixed stage" }
+        if (-not [string]::Equals($occupants['stage'].State, 'absent', [System.StringComparison]::Ordinal)) { throw "$($path.Id) stage is occupied while rollback needs the fixed stage" }
         Move-CrgHeldNoReplace -Handle $post.Handle -DestinationParent $post.Binding.Parent -DestinationLeaf $path.StageLeaf -DestinationPath (Join-Path $path.Parent $path.StageLeaf) -Label "$($path.Id) rollback-to-stage"
         $path.PostLocation = 'stage'
       }
@@ -2109,7 +2129,7 @@ function Invoke-CrgRendererRecovery {
       if ($null -ne $copy.Handle) { $held.Add($copy.Handle) | Out-Null }
       $copyChecks.Add([pscustomobject]@{ Copy = $copy; Expected = $recorded.Post; Bytes = $post.Bytes; Label = "$($path.Id) aborted-postimage recovery copy" }) | Out-Null
       if ($path.PostLocation -ceq 'stage') {
-        if ($occupants['archive'].State -ne 'absent') { throw "$($path.Id) aborted archive is occupied" }
+        if (-not [string]::Equals($occupants['archive'].State, 'absent', [System.StringComparison]::Ordinal)) { throw "$($path.Id) aborted archive is occupied" }
         $archiveBinding = Get-CrgParentAndLeaf -Pins $Pins -Path (Join-Path $path.Parent $path.ArchiveLeaf) -Label "$($path.Id) aborted archive"
         Move-CrgHeldNoReplace -Handle $post.Handle -DestinationParent $archiveBinding.Parent -DestinationLeaf $archiveBinding.Leaf -DestinationPath $archiveBinding.FullPath -Label "$($path.Id) aborted archive"
         $path.PostLocation = 'archive'
@@ -2125,7 +2145,7 @@ function Invoke-CrgRendererRecovery {
       $copy = Get-CrgRecoveryCopy -Pins $Pins -Path $path.PreimageCopy -ExpectedBytes $pre.Bytes -Expected $recorded.Pre -Label "$($path.Id) preimage recovery copy"
       if ($null -ne $copy.Handle) { $held.Add($copy.Handle) | Out-Null }
       $copyChecks.Add([pscustomobject]@{ Copy = $copy; Expected = $recorded.Pre; Bytes = $pre.Bytes; Label = "$($path.Id) preimage recovery copy" }) | Out-Null
-      if ($path.PreLocation -ne 'destination') {
+      if (-not [string]::Equals($path.PreLocation, 'destination', [System.StringComparison]::Ordinal)) {
         $destinationParent = Get-CrgPinnedDirectoryHandle -Pins $Pins -Path $path.Parent
         if (-not (Test-CrgRelativeNameAbsent -ParentHandle $destinationParent -Leaf $path.Leaf -Label "$($path.Id) rollback destination")) { throw "$($path.Id) rollback destination is occupied" }
         Move-CrgHeldNoReplace -Handle $pre.Handle -DestinationParent $destinationParent -DestinationLeaf $path.Leaf -DestinationPath $path.Destination -Label "$($path.Id) preimage restore"

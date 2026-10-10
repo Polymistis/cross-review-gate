@@ -1,5 +1,13 @@
 # Record identity only: parsed receipts cannot recreate live review authorization.
 
+# Get-CrgPairSemanticVerdict must classify a verdict with the same grammar as the
+# review hosts, so Get-VerdictExitCode comes from the shared review functions
+# rather than a copy. The explicit export list keeps every dot-sourced function
+# private to this module. A load failure aborts the import: without the grammar
+# no artifact may be classified.
+try { . (Join-Path $PSScriptRoot 'review-common.ps1') }
+catch { throw "paired governance could not load the shared review functions: $($_.Exception.Message)" }
+
 function Get-CrgPairDigest {
   param([byte[]]$Bytes)
   $sha = [Security.Cryptography.SHA256]::Create()
@@ -22,26 +30,27 @@ function Read-CrgPairRecords {
 }
 
 function Get-CrgPairPrefixNames {
-  param([ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1')
+  param([ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1')
   $names = @('operation-id', 'project-id', 'attachment-sha256', 'public-worktree', 'public-git-dir', 'public-common-dir',
     'private-git-dir', 'public-ref', 'private-ref', 'public-parent', 'private-parent', 'public-tree', 'private-tree',
     'previous-pair', 'runtime-manifest-sha256', 'governing-preparation-sha256', 'candidate-preparation-sha256',
     'public-diff-sha256', 'private-diff-sha256', 'consistency-envelope-sha256', 'message-private-blob', 'message-sha256')
-  if ($Origin -ceq 'first-attachment-v1') { $names[13] = 'private-baseline-tree' }
+  # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) { $names[13] = 'private-baseline-tree' }
   return $names
 }
 
 function Get-CrgHandoffNames {
-  param([ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1')
+  param([ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1')
   $names = @('operation-id', 'project-id', 'attachment-sha256', 'receipt-sha256', 'previous-pair', 'runtime-manifest-sha256',
     'public-ref', 'public-old', 'public-new', 'private-ref', 'private-old', 'private-new')
-  if ($Origin -ceq 'first-attachment-v1') { return @($names | Where-Object { $_ -cne 'previous-pair' }) }
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) { return @($names | Where-Object { -not [string]::Equals($_, 'previous-pair', [StringComparison]::Ordinal) }) }
   return $names
 }
 
 function Get-CrgPairOriginHeader {
-  param([ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin, [switch]$Handoff)
-  if ($Origin -ceq 'first-attachment-v1') {
+  param([ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin, [switch]$Handoff)
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     if ($Handoff) { return 'crg-first-attachment-handoff v1' }
     return 'crg-first-attachment-receipt v1'
   }
@@ -53,10 +62,10 @@ function Assert-CrgPairOriginField {
   param([string]$Origin, [string]$Name, [string]$Value, [string]$PublicObjectFormat, [string]$PrivateObjectFormat)
   # Initial governance is reviewed from the real empty tree, not from adopted
   # private ancestry. Absence is explicit and never masquerades as a commit OID.
-  if ($Origin -ceq 'first-attachment-v1' -and $Name -ceq 'private-parent' -and $Value -ceq 'absent') { return }
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -and [string]::Equals($Name, 'private-parent', [StringComparison]::Ordinal) -and [string]::Equals($Value, 'absent', [StringComparison]::Ordinal)) { return }
   Assert-CrgPairField -Name $Name -Value $Value -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat
-  if ($Origin -ceq 'first-attachment-v1' -and $Name -ceq 'private-baseline-tree') {
-    $hash = if ($PrivateObjectFormat -eq 'sha1') { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -and [string]::Equals($Name, 'private-baseline-tree', [StringComparison]::Ordinal)) {
+    $hash = if ([string]::Equals($PrivateObjectFormat, 'sha1', [StringComparison]::Ordinal)) { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
     try { $emptyTree = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::ASCII.GetBytes('tree 0' + [char]0)))).Replace('-', '').ToLowerInvariant() }
     finally { $hash.Dispose() }
     if ($Value -cne $emptyTree) { throw 'first attachment requires the actual empty governance tree baseline' }
@@ -68,33 +77,34 @@ function Assert-CrgPairPath {
   if ($Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Contains('/')) { throw 'paired path must use an absolute local drive and backslashes' }
   foreach ($part in @($Path.Substring(3) -split '\\', 0)) {
     # Same textual Windows boundary as attachment parsing; directory custody is not a byte-parser claim.
-    if ($part.Length -eq 0 -or $part -in @('.', '..') -or $part.EndsWith('.') -or $part -cne $part.Trim() -or
+    if ($part.Length -eq 0 -or [string]::Equals($part, '.', [StringComparison]::Ordinal) -or [string]::Equals($part, '..', [StringComparison]::Ordinal) -or
+        $part.EndsWith('.', [StringComparison]::Ordinal) -or -not [string]::Equals($part, $part.Trim(), [StringComparison]::Ordinal) -or
         $part -match '[<>:"|?*\x00-\x1f\x7f]' -or
         $part -match '\A(CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(\.|\z)' -or
-        (-not $GitDirectory -and $part -ieq '.git')) { throw 'paired path has an unsupported Windows component' }
+        (-not $GitDirectory -and [string]::Equals($part, '.git', [StringComparison]::OrdinalIgnoreCase))) { throw 'paired path has an unsupported Windows component' }
   }
 }
 
 function Assert-CrgPairField {
   param([string]$Name, [string]$Value, [string]$PublicObjectFormat, [string]$PrivateObjectFormat)
-  if ($Name -in @('operation-id', 'project-id')) {
+  if ([string]::Equals($Name, 'operation-id', [StringComparison]::Ordinal) -or [string]::Equals($Name, 'project-id', [StringComparison]::Ordinal)) {
     if ($Value -cnotmatch '\A[0-9a-f]{32}\z') { throw "paired field '$Name' requires lowercase id32" }
-  } elseif ($Name.EndsWith('-sha256') -or $Name -ceq 'previous-pair') {
+  } elseif ($Name.EndsWith('-sha256', [StringComparison]::Ordinal) -or [string]::Equals($Name, 'previous-pair', [StringComparison]::Ordinal)) {
     if ($Value -cnotmatch '\A[0-9a-f]{64}\z') { throw "paired field '$Name' requires lowercase sha256" }
-  } elseif ($Name -in @('public-worktree', 'public-git-dir', 'public-common-dir', 'private-git-dir')) {
-    Assert-CrgPairPath -Path $Value -GitDirectory:($Name -cne 'public-worktree')
-  } elseif ($Name -in @('public-ref', 'private-ref')) {
+  } elseif ([System.Linq.Enumerable]::Contains([string[]]@('public-worktree', 'public-git-dir', 'public-common-dir', 'private-git-dir'), [string]$Name, [StringComparer]::Ordinal)) {
+    Assert-CrgPairPath -Path $Value -GitDirectory:(-not [string]::Equals($Name, 'public-worktree', [StringComparison]::Ordinal))
+  } elseif ([string]::Equals($Name, 'public-ref', [StringComparison]::Ordinal) -or [string]::Equals($Name, 'private-ref', [StringComparison]::Ordinal)) {
     if (-not $Value.StartsWith('refs/heads/', [StringComparison]::Ordinal) -or $Value -match '[\s~^?*\[\\:<>"|\x00-\x1f\x7f]' -or
         $Value.Contains('..') -or $Value.Contains('@{')) { throw 'paired branch ref is not canonical' }
     foreach ($part in @($Value -split '/', 0)) {
-      if ($part.Length -eq 0 -or $part.StartsWith('.') -or $part.EndsWith('.') -or $part.EndsWith('.lock', [StringComparison]::OrdinalIgnoreCase) -or
+      if ($part.Length -eq 0 -or $part.StartsWith('.', [StringComparison]::Ordinal) -or $part.EndsWith('.', [StringComparison]::Ordinal) -or $part.EndsWith('.lock', [StringComparison]::OrdinalIgnoreCase) -or
           $part -match '\A(CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(\.|\z)') { throw 'paired branch ref has an unsupported component' }
     }
   } else {
     $format = $PrivateObjectFormat
     if ($Name.StartsWith('public-', [StringComparison]::Ordinal)) { $format = $PublicObjectFormat }
     $width = 64
-    if ($format -eq 'sha1') { $width = 40 }
+    if ([string]::Equals($format, 'sha1', [StringComparison]::Ordinal)) { $width = 40 }
     if ($Value -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $Value -match '\A0+\z') { throw "paired field '$Name' has an invalid database object ID" }
   }
 }
@@ -110,7 +120,7 @@ function Get-CrgPairInputValues {
   param([System.Collections.IDictionary]$Fields, [string[]]$Names)
   if ($null -eq $Fields -or $Fields.Count -ne $Names.Count) { throw 'paired constructor fields do not match the exact schema' }
   foreach ($key in $Fields.Keys) {
-    if ($key -isnot [string] -or $key -cnotin $Names -or $Fields[$key] -isnot [string]) { throw 'paired constructor requires exact field names and string values' }
+    if ($key -isnot [string] -or -not [System.Linq.Enumerable]::Contains([string[]]$Names, [string]$key, [StringComparer]::Ordinal) -or $Fields[$key] -isnot [string]) { throw 'paired constructor requires exact field names and string values' }
   }
   $values = @($Names | ForEach-Object { $Fields[$_] })
   # Constructors accept one field value per record, never injected record text.
@@ -123,12 +133,12 @@ function Get-CrgPairInputValues {
 function Read-CrgReviewUnitCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $lines = Read-CrgPairRecords -Bytes $Bytes -Maximum 65536
   $names = @(Get-CrgPairPrefixNames -Origin $Origin)
-  if ($lines.Count -ne $names.Count + 1 -or $lines[0] -cne (Get-CrgPairOriginHeader -Origin $Origin)) { throw 'review unit must contain only the exact origin-specific receipt identity prefix' }
+  if ($lines.Count -ne $names.Count + 1 -or -not [string]::Equals($lines[0], (Get-CrgPairOriginHeader -Origin $Origin), [StringComparison]::Ordinal)) { throw 'review unit must contain only the exact origin-specific receipt identity prefix' }
   $fields = [ordered]@{}
   for ($i = 0; $i -lt $names.Count; $i++) {
     $value = Read-CrgPairField -Line $lines[$i + 1] -Name $names[$i]
@@ -141,9 +151,9 @@ function Read-CrgReviewUnitCore {
 function New-CrgReviewUnitCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $names = @(Get-CrgPairPrefixNames -Origin $Origin)
   $values = Get-CrgPairInputValues -Fields $Fields -Names $names
   $lines = @((Get-CrgPairOriginHeader -Origin $Origin))
@@ -157,11 +167,11 @@ function New-CrgReviewUnitCore {
 function Read-CrgPairReceiptCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $lines = Read-CrgPairRecords -Bytes $Bytes -Maximum 65536
-  if ($lines[0] -cne (Get-CrgPairOriginHeader -Origin $Origin)) { throw 'paired receipt has an unsupported origin header' }
+  if (-not [string]::Equals($lines[0], (Get-CrgPairOriginHeader -Origin $Origin), [StringComparison]::Ordinal)) { throw 'paired receipt has an unsupported origin header' }
   $prefixNames = @(Get-CrgPairPrefixNames -Origin $Origin)
   $names = $prefixNames + @('review-unit-sha256', 'public-result', 'private-result')
   if ($lines.Count -lt $names.Count + 5) { throw 'paired receipt is missing required records' }
@@ -174,7 +184,7 @@ function Read-CrgPairReceiptCore {
   $utf8 = New-Object Text.UTF8Encoding($false, $true)
   $unit = Get-CrgPairDigest -Bytes $utf8.GetBytes(($lines[0..$prefixNames.Count] -join "`n") + "`n")
   if ($fields['review-unit-sha256'] -cne $unit) { throw 'paired receipt review-unit digest does not match the exact prefix' }
-  if ($Origin -ceq 'paired-v1' -and $fields['public-parent'] -ceq $fields['public-result'] -and $fields['private-parent'] -ceq $fields['private-result']) { throw 'a both-unchanged pair cannot create a receipt' }
+  if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal) -and [string]::Equals($fields['public-parent'], $fields['public-result'], [StringComparison]::Ordinal) -and [string]::Equals($fields['private-parent'], $fields['private-result'], [StringComparison]::Ordinal)) { throw 'a both-unchanged pair cannot create a receipt' }
   $position = $names.Count + 1
   $legCount = Read-CrgPairField -Line $lines[$position++] -Name 'review-leg-count'
   if ($legCount -cnotmatch '\A[12]\z') { throw 'paired receipt requires one or two review legs' }
@@ -216,9 +226,9 @@ function New-CrgPairReceiptCore {
   param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary[]]$ReviewLegs,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary[]]$ReviewAttempts,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   if ($ReviewLegs.Count -lt 1 -or $ReviewLegs.Count -gt 2 -or $ReviewAttempts.Count -lt 1 -or $ReviewAttempts.Count -gt 6) { throw 'paired constructor has an unsupported review group count' }
   $prefixNames = @(Get-CrgPairPrefixNames -Origin $Origin)
   $names = $prefixNames + @('public-result', 'private-result')
@@ -246,7 +256,7 @@ function New-CrgPairReceiptCore {
 }
 
 function Get-CrgHandoffFields {
-  param($Receipt, [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1')
+  param($Receipt, [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1')
   $fields = [ordered]@{}
   foreach ($name in @(Get-CrgHandoffNames -Origin $Origin)) {
     if ($name -ceq 'receipt-sha256') { $value = $Receipt.ReceiptSha256 }
@@ -260,17 +270,17 @@ function Read-CrgPairHandoffCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $receipt = Read-CrgPairReceiptCore -Bytes $ReceiptBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -Origin $Origin
   $expected = Get-CrgHandoffFields -Receipt $receipt -Origin $Origin
   $lines = Read-CrgPairRecords -Bytes $Bytes -Maximum 16384
   $names = @(Get-CrgHandoffNames -Origin $Origin)
-  if ($lines.Count -ne $names.Count + 1 -or $lines[0] -cne (Get-CrgPairOriginHeader -Origin $Origin -Handoff)) { throw 'paired handoff must contain the exact origin-specific v1 records' }
+  if ($lines.Count -ne $names.Count + 1 -or -not [string]::Equals($lines[0], (Get-CrgPairOriginHeader -Origin $Origin -Handoff), [StringComparison]::Ordinal)) { throw 'paired handoff must contain the exact origin-specific v1 records' }
   for ($i = 0; $i -lt $names.Count; $i++) {
     $value = Read-CrgPairField -Line $lines[$i + 1] -Name $names[$i]
-    if ($value -cne $expected[$names[$i]]) { throw "paired handoff field '$($names[$i])' differs from the immutable receipt" }
+    if (-not [string]::Equals($value, $expected[$names[$i]], [StringComparison]::Ordinal)) { throw "paired handoff field '$($names[$i])' differs from the immutable receipt" }
   }
   return [pscustomobject]@{ Schema = 1; HandoffSha256 = (Get-CrgPairDigest -Bytes $Bytes); Fields = $expected }
 }
@@ -278,9 +288,9 @@ function Read-CrgPairHandoffCore {
 function New-CrgPairHandoffCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $receipt = Read-CrgPairReceiptCore -Bytes $ReceiptBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -Origin $Origin
   $fields = Get-CrgHandoffFields -Receipt $receipt -Origin $Origin
   $lines = @((Get-CrgPairOriginHeader -Origin $Origin -Handoff)) + @($fields.Keys | ForEach-Object { $_ + ' ' + $fields[$_] })
@@ -294,8 +304,8 @@ function Read-CrgReviewUnitBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Read-CrgReviewUnitCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -303,8 +313,8 @@ function New-CrgReviewUnitBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return ,(New-CrgReviewUnitCore @PSBoundParameters -Origin 'paired-v1')
 }
 
@@ -312,8 +322,8 @@ function Read-CrgPairReceiptBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Read-CrgPairReceiptCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -323,8 +333,8 @@ function New-CrgPairReceiptBytes {
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary[]]$ReviewLegs,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary[]]$ReviewAttempts,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return ,(New-CrgPairReceiptCore @PSBoundParameters -Origin 'paired-v1')
 }
 
@@ -333,8 +343,8 @@ function Read-CrgPairHandoffBytes {
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Read-CrgPairHandoffCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -342,8 +352,8 @@ function New-CrgPairHandoffBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return ,(New-CrgPairHandoffCore @PSBoundParameters -Origin 'paired-v1')
 }
 
@@ -351,8 +361,8 @@ function Read-CrgFirstAttachmentUnitBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   $unit = Read-CrgReviewUnitCore @PSBoundParameters -Origin 'first-attachment-v1'
   $unit | Add-Member -NotePropertyName RequiresReview -NotePropertyValue $true
   return $unit
@@ -362,8 +372,8 @@ function New-CrgFirstAttachmentUnitBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return ,(New-CrgReviewUnitCore @PSBoundParameters -Origin 'first-attachment-v1')
 }
 
@@ -371,8 +381,8 @@ function Read-CrgFirstAttachmentReceiptBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Read-CrgPairReceiptCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 
@@ -382,8 +392,8 @@ function New-CrgFirstAttachmentReceiptBytes {
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary[]]$ReviewLegs,
     [Parameter(Mandatory = $true)][System.Collections.IDictionary[]]$ReviewAttempts,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return ,(New-CrgPairReceiptCore @PSBoundParameters -Origin 'first-attachment-v1')
 }
 
@@ -392,8 +402,8 @@ function Read-CrgFirstAttachmentHandoffBytes {
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return Read-CrgPairHandoffCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 
@@ -401,8 +411,8 @@ function New-CrgFirstAttachmentHandoffBytes {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   return ,(New-CrgPairHandoffCore @PSBoundParameters -Origin 'first-attachment-v1')
 }
 
@@ -410,18 +420,18 @@ function Read-CrgCompletedPairPointerBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes)
   $lines = Read-CrgPairRecords -Bytes $Bytes -Maximum 256
-  if ($lines.Count -ne 3 -or $lines[0] -cne 'crg-completed-pair v1') { throw 'completed-pair pointer has an unsupported record shape' }
+  if ($lines.Count -ne 3 -or -not [string]::Equals($lines[0], 'crg-completed-pair v1', [StringComparison]::Ordinal)) { throw 'completed-pair pointer has an unsupported record shape' }
   $origin = Read-CrgPairField -Line $lines[1] -Name 'origin'
   $receipt = Read-CrgPairField -Line $lines[2] -Name 'receipt-sha256'
-  if ($origin -cnotin @('paired-v1', 'first-attachment-v1') -or $receipt -cnotmatch '\A[0-9a-f]{64}\z') { throw 'completed-pair pointer has an unsupported origin or receipt digest' }
+  if (-not ([string]::Equals($origin, 'paired-v1', [StringComparison]::Ordinal) -or [string]::Equals($origin, 'first-attachment-v1', [StringComparison]::Ordinal)) -or $receipt -cnotmatch '\A[0-9a-f]{64}\z') { throw 'completed-pair pointer has an unsupported origin or receipt digest' }
   return [pscustomobject]@{ Schema = 1; Origin = $origin; ReceiptSha256 = $receipt; PointerSha256 = (Get-CrgPairDigest -Bytes $Bytes) }
 }
 
 function New-CrgCompletedPairPointerBytes {
   [CmdletBinding()]
-  param([Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin,
+  param([Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
     [Parameter(Mandatory = $true)][string]$ReceiptSha256)
-  if ($Origin -cnotin @('paired-v1', 'first-attachment-v1') -or $ReceiptSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'completed-pair pointer requires exact origin and lowercase receipt digest' }
+  if (-not ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal) -or [string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) -or $ReceiptSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'completed-pair pointer requires exact origin and lowercase receipt digest' }
   $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes("crg-completed-pair v1`norigin $Origin`nreceipt-sha256 $ReceiptSha256`n")
   $null = Read-CrgCompletedPairPointerBytes -Bytes $bytes
   return ,$bytes
@@ -431,8 +441,8 @@ function Read-CrgCompletedPairReceiptBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$PointerBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat)
   $pointer = Read-CrgCompletedPairPointerBytes -Bytes $PointerBytes
   $receipt = Read-CrgPairReceiptCore -Bytes $Bytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -Origin $pointer.Origin
   if ($receipt.ReceiptSha256 -cne $pointer.ReceiptSha256) { throw 'completed-pair receipt differs from the retained pointer' }
@@ -443,11 +453,17 @@ function Read-CrgCompletedPairReceiptBytes {
 function Get-CrgPairArtifactHeader {
   param([byte[]]$ReviewUnitBytes, [string]$PublicObjectFormat, [string]$PrivateObjectFormat,
     [string]$DescriptorSha256, [string]$DisplayDiffSha256, [string]$Backend, [string]$Effort, [string]$DurationSecs,
-    [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1')
+    [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1', [string]$RequestedModel = '-')
   if ($DescriptorSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $DisplayDiffSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
-      $Backend -cnotin @('codex', 'claude', 'grok') -or $DurationSecs -cnotmatch '\A(?:0|[1-9][0-9]*)\z') { throw 'paired artifact has invalid caller identity or provider metadata' }
-  $effortOk = if ($Backend -ceq 'codex') { $Effort -cmatch '\A(?:unknown|minimal|low|medium|high|xhigh|max)\z' }
-    elseif ($Backend -ceq 'grok') { $Effort -ceq 'xhigh' } else { $Effort -ceq 'n/a' }
+      -not [System.Linq.Enumerable]::Contains([string[]]@('codex', 'claude', 'grok'), [string]$Backend, [StringComparer]::Ordinal) -or $DurationSecs -cnotmatch '\A(?:0|[1-9][0-9]*)\z') { throw 'paired artifact has invalid caller identity or provider metadata' }
+  # Byte grammar only. The Grok model and effort come from the central profile
+  # table of the release that ran the review, which may differ from the
+  # current one; callers bind them exactly (live acceptance) or to the known
+  # model set (historical validation).
+  $modelOk = if ([string]::Equals($Backend, 'grok', [StringComparison]::Ordinal)) { $RequestedModel -cmatch '\Agrok-[0-9a-z.-]+\z' } else { [string]::Equals($RequestedModel, '-', [StringComparison]::Ordinal) }
+  if (-not $modelOk) { throw 'paired artifact requested model differs from the existing provider grammar' }
+  $effortOk = if ([string]::Equals($Backend, 'codex', [StringComparison]::Ordinal)) { $Effort -cmatch '\A(?:unknown|minimal|low|medium|high|xhigh|max)\z' }
+    elseif ([string]::Equals($Backend, 'grok', [StringComparison]::Ordinal)) { [System.Linq.Enumerable]::Contains([string[]]@('low', 'medium', 'high', 'xhigh'), [string]$Effort, [StringComparer]::Ordinal) } else { [string]::Equals($Effort, 'n/a', [StringComparison]::Ordinal) }
   if (-not $effortOk) { throw 'paired artifact effort differs from the existing provider grammar' }
   $unit = Read-CrgReviewUnitCore -Bytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -Origin $Origin
   $header = @("REVIEW-INPUT: $Origin", "PREPARED-PAIR-SHA256: $DescriptorSha256",
@@ -457,7 +473,7 @@ function Get-CrgPairArtifactHeader {
     "REVIEW-DURATION-SECS: $DurationSecs")
   # Requested effort is not proof of the provider's internal work. Each Grok
   # pass retains the response JSON, including reported reasoning metadata.
-  if ($Backend -ceq 'grok') { $header += @('REVIEW-REQUESTED-MODEL: grok-4.6', 'REVIEW-PROVIDER-METADATA: per-pass-response-json') }
+  if ($Backend -ceq 'grok') { $header += @("REVIEW-REQUESTED-MODEL: $RequestedModel", 'REVIEW-PROVIDER-METADATA: per-pass-response-json') }
   return $header
 }
 
@@ -465,25 +481,30 @@ function Read-CrgPairArtifactCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$ExpectedBackend,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   if ($null -eq $Bytes -or $Bytes.Length -eq 0 -or $Bytes.Length -gt 16777216) { throw 'paired artifact has an invalid complete byte length' }
   $utf8 = New-Object Text.UTF8Encoding($false, $true)
   try { $text = $utf8.GetString($Bytes) } catch { throw 'paired artifact is not strict UTF-8' }
   $separator = $text.IndexOf("`n`n", [StringComparison]::Ordinal)
   if ($separator -lt 0 -or $separator -gt 16384) { throw 'paired artifact lacks a bounded complete header' }
   [string[]]$rows = $text.Substring(0, $separator) -split "`n", 0
-  $headerCount = if ($ExpectedBackend -ceq 'grok') { 12 } else { 10 }
+  $headerCount = if ([string]::Equals($ExpectedBackend, 'grok', [StringComparison]::Ordinal)) { 12 } else { 10 }
   if ($rows.Count -ne $headerCount -or -not $rows[7].StartsWith('REVIEW-EFFORT: ', [StringComparison]::Ordinal) -or
       -not $rows[9].StartsWith('REVIEW-DURATION-SECS: ', [StringComparison]::Ordinal)) { throw 'paired artifact must contain the exact ordered header' }
   $effort = $rows[7].Substring('REVIEW-EFFORT: '.Length)
   $duration = $rows[9].Substring('REVIEW-DURATION-SECS: '.Length)
-  $expected = Get-CrgPairArtifactHeader -ReviewUnitBytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -DescriptorSha256 $DescriptorSha256 -DisplayDiffSha256 $DisplayDiffSha256 -Backend $ExpectedBackend -Effort $effort -DurationSecs $duration -Origin $Origin
-  for ($i = 0; $i -lt $expected.Count; $i++) { if ($rows[$i] -cne $expected[$i]) { throw 'paired artifact header differs from current caller identity' } }
+  $requestedModel = '-'
+  if ([string]::Equals($ExpectedBackend, 'grok', [StringComparison]::Ordinal)) {
+    if (-not $rows[10].StartsWith('REVIEW-REQUESTED-MODEL: ', [StringComparison]::Ordinal)) { throw 'paired artifact must contain the exact ordered header' }
+    $requestedModel = $rows[10].Substring('REVIEW-REQUESTED-MODEL: '.Length)
+  }
+  $expected = Get-CrgPairArtifactHeader -ReviewUnitBytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -DescriptorSha256 $DescriptorSha256 -DisplayDiffSha256 $DisplayDiffSha256 -Backend $ExpectedBackend -Effort $effort -DurationSecs $duration -Origin $Origin -RequestedModel $requestedModel
+  for ($i = 0; $i -lt $expected.Count; $i++) { if (-not [string]::Equals($rows[$i], $expected[$i], [StringComparison]::Ordinal)) { throw 'paired artifact header differs from current caller identity' } }
   $body = $text.Substring($separator + 2)
   if ([string]::IsNullOrWhiteSpace($body)) { throw 'paired artifact has no verdict body' }
   # Only the exact outer header supplies identity. The body is model prose;
@@ -492,131 +513,9 @@ function Read-CrgPairArtifactCore {
   # the existing host/coordinator checks, never a conclusion of this byte reader.
   return [pscustomobject]@{
     Schema = 1; ArtifactSha256 = (Get-CrgPairDigest -Bytes $Bytes); Backend = $ExpectedBackend
-    Effort = $effort; DurationSecs = $duration; VerdictText = $body
+    Effort = $effort; RequestedModel = $requestedModel; DurationSecs = $duration; VerdictText = $body
     ValidationState = 'paired-artifact-metadata-only'; ReadyForPublication = $false
   }
-}
-
-# Private semantic classifier retained verbatim from auto-merge.ps1. Importing
-# this data module never loads a review wrapper or gives a verdict authority.
-function Get-VerdictExitCode {
-  param([string]$Verdict)
-
-  $base = @{
-    ExitCode      = 3
-    VerdictText   = ''
-    Diagnostic    = ''
-    BlockerCount  = 0
-    QualityCount  = 0
-    LegacyNbCount = 0
-    NoteCount     = 0
-  }
-
-  if ([string]::IsNullOrWhiteSpace($Verdict)) {
-    $base.Diagnostic = 'verdict is empty'
-    return $base
-  }
-
-  $base.BlockerCount  = ([regex]::Matches($Verdict, '(?m)^BLOCKER:')).Count
-  $base.QualityCount  = ([regex]::Matches($Verdict, '(?m)^QUALITY:')).Count
-  $base.LegacyNbCount = ([regex]::Matches($Verdict, '(?m)^NON-BLOCKER:')).Count
-  $base.NoteCount     = ([regex]::Matches($Verdict, '(?m)^NOTE:')).Count
-
-  # Reject duplicate VERDICT lines as malformed; capture the single (or zero)
-  # VERDICT line VERBATIM into VerdictText. This MIRRORS the authoritative
-  # scripts/codex/auto-review.ps1 Get-VerdictExitCode EXACTLY: it does NOT
-  # validate the verdict WORD up front -- a malformed word (e.g. `VERDICT: FOO`)
-  # is captured as-is and only rejected later by each per-severity branch's
-  # literal `-eq` comparison, so BLOCKER precedence (below) wins over a PRESENT-but-
-  # wrong/malformed verdict word (exit 2). A MISSING verdict line (zero `VERDICT:`
-  # lines -> VerdictText empty) is the exception: the BLOCKER branch fails closed
-  # (exit 3) there, since a verdict with no VERDICT: line is malformed output, not a
-  # trustworthy blocker signal. (A prior copy validated the word against
-  # `(CLEAN|NON-BLOCKING|BLOCKED)` BEFORE category + BLOCKER and capped category
-  # counts at 4096; both diverged from the wrapper.)
-  $verdictLines = @($Verdict -split "`n" | Where-Object { $_ -match '^VERDICT:' })
-  if ($verdictLines.Count -gt 1) {
-    $base.VerdictText = $verdictLines[0].Trim()
-    $base.Diagnostic = "verdict contains $($verdictLines.Count) VERDICT: lines (expected exactly 1)"
-    return $base
-  }
-  $base.VerdictText = if ($verdictLines.Count -eq 1) { $verdictLines[0].Trim() } else { '' }
-
-  # Per-category enumeration: each of the 8 named categories exactly once,
-  # count bounded at 10000 (same bound as the wrapper), per-category sum ==
-  # per-severity sum. Category validation runs BEFORE BLOCKER precedence so a
-  # malformed category block fails closed rather than being read as a blocker.
-  $requiredCategories = @(
-    'PLAN-DRIFT', 'SILENT-FAILURE', 'TOMBSTONE-OR-SHIM',
-    'CROSS-CRATE-CONTRACT', 'LOADER-OR-ASSET-EDGE',
-    'CONVENTION-ADHERENCE', 'TEST-QUALITY', 'DOC-VS-CODE-DRIFT'
-  )
-  $categoryTotal = 0
-  foreach ($cat in $requiredCategories) {
-    $rx = [regex]("(?m)^" + [regex]::Escape($cat) + ":\s*(?<v>none|\d+)\s*$")
-    $matches = $rx.Matches($Verdict)
-    if ($matches.Count -ne 1) {
-      $base.Diagnostic = "category '$cat' appears $($matches.Count) times (expected exactly 1)"
-      return $base
-    }
-    $v = $matches[0].Groups['v'].Value
-    if ($v -ne 'none') {
-      $parsed = 0
-      if (-not [int]::TryParse($v, [ref]$parsed) -or $parsed -gt 10000) {
-        $base.Diagnostic = "category '$cat' has count '$v' that is non-numeric or exceeds 10000"
-        return $base
-      }
-      $categoryTotal += $parsed
-    }
-  }
-  $severityTotal = $base.BlockerCount + $base.QualityCount + $base.LegacyNbCount + $base.NoteCount
-  if ($categoryTotal -ne $severityTotal) {
-    $base.Diagnostic = "per-category sum ($categoryTotal) does not match per-severity sum ($severityTotal); verdict is malformed"
-    return $base
-  }
-
-  # BLOCKER precedence -- but a MISSING VERDICT: line is malformed output, not a
-  # blocker verdict. Distinguish the two cases per the prompt's precedence note
-  # and the AGENTS.md verdict contract:
-  #   * ZERO VERDICT: lines (VerdictText == '') -> malformed output -> exit 3
-  #     (fail closed; the reviewer never emitted a verdict line at all).
-  #   * a VERDICT: line is PRESENT but inconsistent/malformed-word + BLOCKER
-  #     -> exit 2 (BLOCKER precedence over a wrong line; the more conservative
-  #     signal wins -- a blocker WAS reported).
-  if ($base.BlockerCount -gt 0) {
-    if ($base.VerdictText -eq '') {
-      $base.ExitCode = 3
-      $base.Diagnostic = 'BLOCKER findings but no VERDICT: line (missing verdict is malformed output)'
-      return $base
-    }
-    $base.ExitCode = 2
-    return $base
-  }
-  # QUALITY (or legacy NON-BLOCKER) without BLOCKER -> exit 0 (PASS, non-blocking)
-  # under the 2026-07 severity contract, in parity with the auto-review.ps1
-  # classifiers. A wrong/missing verdict line is still malformed -> exit 3 (default).
-  if ($base.QualityCount -gt 0 -or $base.LegacyNbCount -gt 0) {
-    if ($base.VerdictText -ne 'VERDICT: NON-BLOCKING') {
-      $base.Diagnostic = "QUALITY/legacy findings but verdict is '$($base.VerdictText)' (expected 'VERDICT: NON-BLOCKING')"
-      return $base
-    }
-    $base.ExitCode = 0
-    return $base
-  }
-  if ($base.NoteCount -gt 0) {
-    if ($base.VerdictText -ne 'VERDICT: NON-BLOCKING') {
-      $base.Diagnostic = "NOTE-only findings but verdict is '$($base.VerdictText)' (expected 'VERDICT: NON-BLOCKING')"
-      return $base
-    }
-    $base.ExitCode = 0
-    return $base
-  }
-  if ($base.VerdictText -ne 'VERDICT: CLEAN') {
-    $base.Diagnostic = "verdict has zero findings but is not 'VERDICT: CLEAN'"
-    return $base
-  }
-  $base.ExitCode = 0
-  return $base
 }
 
 function Get-CrgPairSemanticVerdict {
@@ -629,20 +528,20 @@ function Read-CrgSuccessfulPairArtifactCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$ExpectedBackend,
     [Parameter(Mandatory = $true)][ValidateRange(1, 10)][int]$ScheduledPassCount,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $metadata = Read-CrgPairArtifactCore -Bytes $Bytes -ReviewUnitBytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -DescriptorSha256 $DescriptorSha256 -DisplayDiffSha256 $DisplayDiffSha256 -ExpectedBackend $ExpectedBackend -Origin $Origin
   $body = $metadata.VerdictText
   $results = New-Object 'System.Collections.Generic.List[object]'
   # The broad separator candidate detects malformed, unknown and indented
   # spellings before exact producer framing can exempt any part of the body.
   $separators = [regex]::Matches($body, '(?m)^[ \t]*=+[^\r\n]*(?:\r\n|\n|\r|\z)')
-  if ($ExpectedBackend -ceq 'claude') {
+  if ([string]::Equals($ExpectedBackend, 'claude', [StringComparison]::Ordinal)) {
     if ($ScheduledPassCount -ne 1 -or $separators.Count -ne 0) { throw 'successful Claude paired evidence requires one unframed verdict' }
     $classification = Get-VerdictExitCode -Verdict $body
     if ($classification.ExitCode -ne 0) { throw "paired Claude verdict is not successful: $($classification.Diagnostic)" }
@@ -652,7 +551,7 @@ function Read-CrgSuccessfulPairArtifactCore {
     for ($i = 0; $i -lt $ScheduledPassCount; $i++) {
       $marker = $separators[$i]
       $expected = "===== REVIEW PASS $($i + 1)/$ScheduledPassCount =====`n"
-      if ($marker.Value -cne $expected) { throw 'paired multi-pass markers must be exact, ordered and contiguous' }
+      if (-not [string]::Equals($marker.Value, $expected, [StringComparison]::Ordinal)) { throw 'paired multi-pass markers must be exact, ordered and contiguous' }
       $start = $marker.Index + $marker.Length
       $end = if ($i + 1 -lt $ScheduledPassCount) { $separators[$i + 1].Index } else { $body.Length }
       $segment = $body.Substring($start, $end - $start)
@@ -661,7 +560,7 @@ function Read-CrgSuccessfulPairArtifactCore {
       $suffix = if ($i + 1 -lt $ScheduledPassCount) { "`n`n" } else { "`n" }
       if (-not $segment.EndsWith($suffix, [StringComparison]::Ordinal)) { throw 'paired multi-pass terminator differs from the producer' }
       $verdict = $segment.Substring(0, $segment.Length - $suffix.Length)
-      if ([string]::IsNullOrWhiteSpace($verdict) -or $verdict -cne $verdict.TrimEnd()) { throw 'paired review pass has an empty or noncanonical terminal body' }
+      if ([string]::IsNullOrWhiteSpace($verdict) -or -not [string]::Equals($verdict, $verdict.TrimEnd(), [StringComparison]::Ordinal)) { throw 'paired review pass has an empty or noncanonical terminal body' }
       $classification = Get-VerdictExitCode -Verdict $verdict
       if ($classification.ExitCode -ne 0) { throw "paired review pass $($i + 1) is not successful: $($classification.Diagnostic)" }
       $results.Add([pscustomobject]@{ Pass = ($i + 1); Verdict = $verdict; Cls = $classification })
@@ -669,7 +568,7 @@ function Read-CrgSuccessfulPairArtifactCore {
   }
   return [pscustomobject]@{
     Schema = 1; ArtifactSha256 = $metadata.ArtifactSha256; Backend = $metadata.Backend
-    Effort = $metadata.Effort; DurationSecs = $metadata.DurationSecs; VerdictText = $body
+    Effort = $metadata.Effort; RequestedModel = $metadata.RequestedModel; DurationSecs = $metadata.DurationSecs; VerdictText = $body
     ScheduledPassCount = $ScheduledPassCount; PassResults = $results.ToArray()
     ValidationState = 'paired-artifact-success-body-only'; ReadyForPublication = $false
   }
@@ -679,16 +578,16 @@ function Read-CrgPairExhaustionCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$ExpectedBackend,
     [Parameter(Mandatory = $true)][ValidateRange(1, 10)][int]$ScheduledPassCount,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   if ($null -eq $Bytes -or $Bytes.Length -eq 0 -or $Bytes.Length -gt 16777216) { throw 'paired exhaustion has an invalid complete byte length' }
   if ($DescriptorSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $DisplayDiffSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
-      $ExpectedBackend -cnotin @('codex', 'claude')) { throw 'paired exhaustion has invalid caller identity' }
+      -not ([string]::Equals($ExpectedBackend, 'codex', [StringComparison]::Ordinal) -or [string]::Equals($ExpectedBackend, 'claude', [StringComparison]::Ordinal))) { throw 'paired exhaustion has invalid caller identity' }
   $unit = Read-CrgReviewUnitCore -Bytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -Origin $Origin
   $utf8 = New-Object Text.UTF8Encoding($false, $true)
   try { $text = $utf8.GetString($Bytes) } catch { throw 'paired exhaustion is not strict UTF-8' }
@@ -705,14 +604,14 @@ function Read-CrgPairExhaustionCore {
     if ($name -cnotin $names -or $fields.ContainsKey($name)) { throw 'paired exhaustion contains an unknown, duplicate or legacy field' }
     $fields.Add($name, $json.Groups['value'].Captures[$i].Value)
   }
-  $scopePrefix = if ($Origin -ceq 'paired-v1') { 'paired-' } else { 'first-attachment-' }
+  $scopePrefix = if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) { 'paired-' } else { 'first-attachment-' }
   $expected = [ordered]@{
     reviewInput = $Origin; preparedPairSha256 = $DescriptorSha256; reviewUnitSha256 = $unit.ReviewUnitSha256
     publicTreeOid = $unit.Fields['public-tree']; privateTreeOid = $unit.Fields['private-tree']; diffSha256 = $DisplayDiffSha256
     backend = $ExpectedBackend; kind = 'token-exhaustion'; scope = ($scopePrefix + $unit.ReviewUnitSha256.Substring(0, 12))
   }
   foreach ($name in $expected.Keys) {
-    if ($fields[$name] -cne $expected[$name]) { throw "paired exhaustion field '$name' differs from the current caller identity" }
+    if (-not [string]::Equals($fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "paired exhaustion field '$name' differs from the current caller identity" }
   }
   if ($ExpectedBackend -ceq 'codex') {
     $outcome = [regex]::Match($fields['processOutcome'], '\Aerrored-passes-(?<errors>[1-9]|10)-of-(?<passes>[1-9]|10)\z')
@@ -743,16 +642,17 @@ function Read-CrgPairExhaustionCore {
 function New-CrgPairArtifactCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$Backend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$Backend,
     [Parameter(Mandatory = $true)][string]$Effort,
     [Parameter(Mandatory = $true)][string]$DurationSecs,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$VerdictText,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
-  $header = Get-CrgPairArtifactHeader -ReviewUnitBytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -DescriptorSha256 $DescriptorSha256 -DisplayDiffSha256 $DisplayDiffSha256 -Backend $Backend -Effort $Effort -DurationSecs $DurationSecs -Origin $Origin
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
+    [string]$RequestedModel = '-')
+  $header = Get-CrgPairArtifactHeader -ReviewUnitBytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -DescriptorSha256 $DescriptorSha256 -DisplayDiffSha256 $DisplayDiffSha256 -Backend $Backend -Effort $Effort -DurationSecs $DurationSecs -Origin $Origin -RequestedModel $RequestedModel
   $utf8 = New-Object Text.UTF8Encoding($false, $true)
   $bytes = $utf8.GetBytes(($header -join "`n") + "`n`n" + $VerdictText)
   $null = Read-CrgPairArtifactCore -Bytes $bytes -ReviewUnitBytes $ReviewUnitBytes -PublicObjectFormat $PublicObjectFormat -PrivateObjectFormat $PrivateObjectFormat -DescriptorSha256 $DescriptorSha256 -DisplayDiffSha256 $DisplayDiffSha256 -ExpectedBackend $Backend -Origin $Origin
@@ -766,11 +666,11 @@ function Read-CrgPairArtifactBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$ExpectedBackend)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$ExpectedBackend)
   return Read-CrgPairArtifactCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -778,39 +678,41 @@ function Read-CrgFirstAttachmentArtifactBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$ExpectedBackend)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$ExpectedBackend)
   return Read-CrgPairArtifactCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 
 function New-CrgPairArtifactBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$Backend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$Backend,
     [Parameter(Mandatory = $true)][string]$Effort,
     [Parameter(Mandatory = $true)][string]$DurationSecs,
-    [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$VerdictText)
+    [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$VerdictText,
+    [string]$RequestedModel = '-')
   return ,(New-CrgPairArtifactCore @PSBoundParameters -Origin 'paired-v1')
 }
 
 function New-CrgFirstAttachmentArtifactBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$Backend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$Backend,
     [Parameter(Mandatory = $true)][string]$Effort,
     [Parameter(Mandatory = $true)][string]$DurationSecs,
-    [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$VerdictText)
+    [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$VerdictText,
+    [string]$RequestedModel = '-')
   return ,(New-CrgPairArtifactCore @PSBoundParameters -Origin 'first-attachment-v1')
 }
 
@@ -818,11 +720,11 @@ function Read-CrgSuccessfulPairArtifactBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$ExpectedBackend,
     [Parameter(Mandatory = $true)][ValidateRange(1, 10)][int]$ScheduledPassCount)
   return Read-CrgSuccessfulPairArtifactCore @PSBoundParameters -Origin 'paired-v1'
 }
@@ -831,11 +733,11 @@ function Read-CrgSuccessfulFirstAttachmentArtifactBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$ExpectedBackend,
     [Parameter(Mandatory = $true)][ValidateRange(1, 10)][int]$ScheduledPassCount)
   return Read-CrgSuccessfulPairArtifactCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
@@ -844,11 +746,11 @@ function Read-CrgPairExhaustionBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$ExpectedBackend,
     [Parameter(Mandatory = $true)][ValidateRange(1, 10)][int]$ScheduledPassCount)
   return Read-CrgPairExhaustionCore @PSBoundParameters -Origin 'paired-v1'
 }
@@ -857,11 +759,11 @@ function Read-CrgFirstAttachmentExhaustionBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReviewUnitBytes,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PublicObjectFormat,
-    [Parameter(Mandatory = $true)][ValidateSet('sha1', 'sha256')][string]$PrivateObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PublicObjectFormat,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:sha1|sha256)\z', Options = 'None')][string]$PrivateObjectFormat,
     [Parameter(Mandatory = $true)][string]$DescriptorSha256,
     [Parameter(Mandatory = $true)][string]$DisplayDiffSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$ExpectedBackend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$ExpectedBackend,
     [Parameter(Mandatory = $true)][ValidateRange(1, 10)][int]$ScheduledPassCount)
   return Read-CrgPairExhaustionCore @PSBoundParameters -Origin 'first-attachment-v1'
 }

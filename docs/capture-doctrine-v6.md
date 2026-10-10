@@ -21,10 +21,10 @@ design.
 Operator ruling, 2026-09-07, clarified 2026-09-08: code unit tests are banned
 and existing code unit tests and unit-test-only assets must be removed. No code
 unit-test authoring or execution is required or permitted by this doctrine.
-Integration, end-to-end, smoke, performance, manual, live, and other functional
-testing are not prohibited merely by category. The production contracts below
-remain mandatory; verification uses normal gated review, static parsing,
-read-only source inspection, and applicable functional testing. Historical
+Live testing, manual checks, ordinary program runs, and functional validation
+remain permitted. The production contracts below remain mandatory; verification
+uses normal gated review, static parsing, read-only source inspection, and
+functional validation. Historical
 observations remain evidence, not instructions to recreate or run code unit tests.
 
 ## 1. The defect being closed
@@ -385,10 +385,11 @@ policy legacy frames already get.
 
 Everything else in the frame carries over verbatim from v5. The batch-pass
 instruction (frame step 1's "CANONICAL numbered declaration audit") remains
-unchanged. The exact v6 frame bytes are
-pinned by SHA-256 in every writer, replacing the v5
-pin; this document is normative for the WORDING above, the implementation
-for the bytes.
+unchanged. Every writer emits the exact v6 frame bytes
+(`Get-FollowupCaptureDoctrine` in `scripts/review-common.ps1` and the
+pre-commit hook's mirrored copy), and readers compare a frame with those
+bytes directly; no SHA-256 of the frame is pinned anywhere. This document
+is normative for the WORDING above, the implementation for the bytes.
 
 ## 4. Writer-side checks
 
@@ -638,7 +639,7 @@ title are byte-pinned, so partial updates violate the cross-writer
 identity contract. Preserve these production duties through source review:
 
 - Across the writer set (the commit-review wrappers, the merge gate, the sh
-  pre-commit hook): v6 frame bytes + new pin SHA; the first-creation title
+  pre-commit hook): identical v6 frame bytes in every writer; the first-creation title
   bytes reworded and pinned per §3(d), preserving the same cross-writer
   byte identity as the frame; the doctrine version
   constant bumped to 6; the final-interval completeness check at the append

@@ -15,15 +15,16 @@ activating ABI 2; fresh stores install ABI 2 directly.
 
 ## Prerequisites and input approval
 
-Use Windows PowerShell 5.1 (`powershell.exe`), Git for Windows, and the
-configured reviewer CLIs. The Claude route requires Claude Code 2.1.248 or later.
+Use Windows PowerShell 5.1 (included with Windows), Git for Windows, and the
+configured reviewer CLIs. The Claude route requires Claude Code 2.1.248 or later;
+its `opus` alias selects Opus 5.5 only from Claude Code 2.1.280.
 Mandatory review and automatic positive-exhaustion fallback remain active; no
 manual reviewer-suppression flag is part of this procedure. Installing or
 attaching a project supplies no new provider or data-transmission authorization.
 An attachment using `reviewer-policy default` does not enable xAI.
-Code unit tests remain banned. Live, manual, integration, end-to-end, smoke,
-performance, and other functional testing remain allowed and important alongside
-normal operation, builds, and review.
+Code unit tests remain banned. Live testing, manual checks, ordinary program
+runs, and functional validation remain permitted and important alongside builds
+and review.
 
 Choose an ordinary absolute machine-local store outside source repositories,
 project Git metadata and extracted release input. The store's parent must exist.
@@ -39,6 +40,136 @@ $CrgStore = Read-Host 'Absolute machine-local central runtime store'
 Run either source publication or package import, not both for the same input.
 Publication/import does not activate a release or change a consumer.
 
+## Prepare the operator session
+
+Trust boundary: the operator account and session, SYSTEM and the Administrators
+group are trusted. The procedure defends its inputs against substitution by
+every other account and against accidental replacement. Code already running as
+a trusted principal could equally rewrite the runtime store or launcher after
+installation; no installation procedure prevents that.
+
+Within that boundary, the object a check approves is the object later used:
+
+- All work happens in a private directory directly under the system drive
+  root, which cannot be renamed. One operating-system call creates the
+  directory new (refusing any existing occupant), applies an access list
+  granting only the trusted principals, and returns a handle held without delete
+  sharing until `Close-CrgPrivateWork`. No other account can therefore open,
+  write or map anything in the directory, or rename or replace it at any point,
+  whatever rights that account holds on the drive root, and a later command
+  naming its path reaches the same directory. A user-profile location is not
+  used: its folders can be renamed by sandbox groups that hold rights across a
+  user profile.
+- A file the procedure did not create can still change through a writable
+  memory mapping opened before any check. Every such input (the transferred
+  archive, or a source bootstrap) is therefore copied into the private
+  directory, and only the copy is hashed and used, including the bootstrap that
+  runs.
+- `bootstrap.ps1` refuses inherited Git selector variables, so they are cleared
+  before the first bootstrap command.
+- Before approval, the only resource consumed is the bounded input copy: the
+  archive up to the runtime manifest's 256 MiB payload limit plus 32 MiB for
+  operator documents and archive structure, a source bootstrap up to 16 MiB.
+- Every error stops the procedure. Run `Close-CrgPrivateWork` after the last
+  bootstrap command or after a failure; ending the PowerShell session also
+  releases the directories. Private directories remain afterwards; send them to
+  the Recycle Bin when no longer needed.
+
+Run this block once per Windows PowerShell 5.1 session, before publication or
+import:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+# The named set is what bootstrap.ps1 refuses. The numbered pairs are inert once
+# GIT_CONFIG_COUNT is cleared; removing them keeps later native Git commands in
+# this session on the operator's ordinary configuration.
+$CrgGitSelectors = @('GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+  'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
+  'GIT_REFERENCE_BACKEND', 'GIT_ATTR_SOURCE', 'GIT_ATTR_NOSYSTEM', 'GIT_REPLACE_REF_BASE',
+  'GIT_GRAFT_FILE', 'GIT_SHALLOW_FILE')
+$CrgIsGitSelector = { param($Name) $Name -in $CrgGitSelectors -or $Name -match '\AGIT_CONFIG_(KEY|VALUE)_[0-9]+\z' }
+foreach ($CrgName in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+  if (& $CrgIsGitSelector $CrgName) { [Environment]::SetEnvironmentVariable($CrgName, $null, 'Process') }
+}
+$CrgLeft = @(@([Environment]::GetEnvironmentVariables('Process').Keys) | Where-Object { & $CrgIsGitSelector $_ })
+if ($CrgLeft.Count -gt 0) { throw "Git selector environment variables remain set: $($CrgLeft -join ', ')" }
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+if (-not ('CrgPrivateDirectory' -as [type])) {
+Add-Type -TypeDefinition @'
+using System; using System.IO; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+public static class CrgPrivateDirectory {
+  [StructLayout(LayoutKind.Sequential)] struct UnicodeString { public ushort Length, MaximumLength; public IntPtr Buffer; }
+  [StructLayout(LayoutKind.Sequential)] struct ObjectAttributes { public int Length; public IntPtr Root, Name; public uint Attributes; public IntPtr Descriptor, Qos; }
+  [StructLayout(LayoutKind.Sequential)] struct IoStatus { public IntPtr Status, Information; }
+  [DllImport("ntdll.dll")] static extern int NtCreateFile(out IntPtr handle, uint access, ref ObjectAttributes attributes, out IoStatus status, IntPtr allocation, uint fileAttributes, uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+  [DllImport("ntdll.dll")] static extern int RtlNtStatusToDosError(int status);
+  // Creating, protecting and holding must be one call: separate steps leave a
+  // gap in which another directory can take the name. Create-new refuses any
+  // existing occupant, link or not. List access makes the share mode binding
+  // (attribute-only opens skip share checks); read and write sharing without
+  // delete sharing blocks rename and delete while the handle is held.
+  public static SafeFileHandle Create(string path, byte[] descriptor) {
+    string name = @"\??\" + path;
+    IntPtr text = Marshal.StringToHGlobalUni(name), unicode = IntPtr.Zero, security = IntPtr.Zero;
+    try {
+      UnicodeString value = new UnicodeString(); value.Length = (ushort)(name.Length * 2); value.MaximumLength = value.Length; value.Buffer = text;
+      unicode = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString))); Marshal.StructureToPtr(value, unicode, false);
+      security = Marshal.AllocHGlobal(descriptor.Length); Marshal.Copy(descriptor, 0, security, descriptor.Length);
+      ObjectAttributes attributes = new ObjectAttributes(); attributes.Length = Marshal.SizeOf(typeof(ObjectAttributes));
+      attributes.Name = unicode; attributes.Attributes = 0x40; attributes.Descriptor = security;
+      IntPtr raw; IoStatus io;
+      int status = NtCreateFile(out raw, 0x001000A1, ref attributes, out io, IntPtr.Zero, 0, 3, 2, 0x21, IntPtr.Zero, 0);
+      if (status < 0) throw new IOException("cannot create private directory " + path + " (Windows error " + RtlNtStatusToDosError(status) + ")");
+      return new SafeFileHandle(raw, true);
+    } finally {
+      Marshal.FreeHGlobal(text);
+      if (unicode != IntPtr.Zero) Marshal.FreeHGlobal(unicode);
+      if (security != IntPtr.Zero) Marshal.FreeHGlobal(security);
+    }
+  }
+}
+'@
+}
+$CrgTrusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+$CrgDriveRoot = [IO.Path]::GetPathRoot([Environment]::SystemDirectory)
+$CrgHolds = New-Object 'System.Collections.Generic.List[Microsoft.Win32.SafeHandles.SafeFileHandle]'
+function Close-CrgPrivateWork { foreach ($CrgHold in $CrgHolds) { $CrgHold.Dispose() }; $CrgHolds.Clear() }
+function New-CrgPrivateWork {
+  param([string]$Purpose)
+  $CrgPath = Join-Path $CrgDriveRoot ('crg-' + $Purpose + '-' + [Guid]::NewGuid().ToString('N'))
+  $CrgSecurity = New-Object Security.AccessControl.DirectorySecurity
+  $CrgSecurity.SetSecurityDescriptorSddlForm('D:P' + (($CrgTrusted | ForEach-Object { "(A;OICI;FA;;;$_)" }) -join ''))
+  $CrgHolds.Add([CrgPrivateDirectory]::Create($CrgPath, $CrgSecurity.GetSecurityDescriptorBinaryForm()))
+  Write-Host "Private $Purpose directory: $CrgPath"
+  return $CrgPath
+}
+# Copies exactly the length observed at open, so an input that grows or shrinks
+# during the copy is refused rather than captured partially.
+function Copy-CrgIntoPrivate {
+  param([string]$Source, [string]$Destination, [long]$Limit)
+  if ($Source -cnotmatch '\A([A-Za-z]:\\|\\\\[^\\])') { throw "Not an absolute path: $Source" }
+  $CrgInput = [IO.File]::Open($Source, 'Open', 'Read', 'ReadWrite')
+  try {
+    $CrgRemaining = $CrgInput.Length
+    if ($CrgRemaining -le 0 -or $CrgRemaining -gt $Limit) { throw "$Source is empty or larger than $Limit bytes" }
+    $CrgCopy = [IO.File]::Open($Destination, 'CreateNew', 'Write', 'None')
+    try {
+      $CrgBuffer = New-Object byte[] 1048576
+      while ($CrgRemaining -gt 0) {
+        $CrgRead = $CrgInput.Read($CrgBuffer, 0, [int][Math]::Min($CrgBuffer.Length, $CrgRemaining))
+        if ($CrgRead -le 0) { throw "$Source shrank while being copied" }
+        $CrgCopy.Write($CrgBuffer, 0, $CrgRead)
+        $CrgRemaining -= $CrgRead
+      }
+      if ($CrgInput.Read($CrgBuffer, 0, 1) -ne 0) { throw "$Source grew while being copied" }
+    } finally { $CrgCopy.Dispose() }
+  } finally { $CrgInput.Dispose() }
+}
+function Get-CrgFileSha256 { param([string]$Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+```
+
 ## Publish a normally reviewed source revision
 
 The source must be an actual Git worktree rooted at `CrgSource`, with HEAD equal
@@ -47,12 +178,14 @@ Every shipped payload must match that revision; uncommitted or untracked payload
 cannot be published as reviewed content.
 
 ```powershell
-$CrgBootstrap = Read-Host 'Absolute path to the approved source bootstrap.ps1'
+$CrgBootstrapSource = Read-Host 'Absolute path to the approved source bootstrap.ps1'
 $CrgApprovedBootstrapSha256 = Read-Host 'Approved bootstrap SHA256 from the release record'
-$CrgBootstrapSha256 = (Get-FileHash -LiteralPath $CrgBootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($CrgApprovedBootstrapSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $CrgBootstrapSha256 -cne $CrgApprovedBootstrapSha256) { throw 'Bootstrap approval/hash mismatch' }
 $CrgSource = Read-Host 'Absolute root of the reviewed cross-review-gate source worktree'
 $CrgApprovedSource = Read-Host 'Full approved source commit OID'
+if ($CrgApprovedBootstrapSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Approved bootstrap SHA256 must be 64 lowercase hexadecimal digits' }
+$CrgBootstrap = Join-Path (New-CrgPrivateWork 'publish') 'bootstrap.ps1'
+Copy-CrgIntoPrivate $CrgBootstrapSource $CrgBootstrap 16777216
+if ((Get-CrgFileSha256 $CrgBootstrap) -cne $CrgApprovedBootstrapSha256) { throw 'Bootstrap approval/hash mismatch' }
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -PublishRuntime -RuntimeStore $CrgStore -SourceRoot $CrgSource -ApprovedSourceCommit $CrgApprovedSource
 if ($LASTEXITCODE -ne 0) { throw 'Central source publication failed; no activation requested' }
 $CrgReleaseId = Read-Host 'Exact 64-character release ID reported by successful publication'
@@ -71,6 +204,7 @@ The portable archive separates executable bootstrap approval from release data:
 extracted-package/
   bootstrap.ps1                separately approved operator bootstrap
   INSTALL.md                   operator documentation, outside release data
+  docs/...                     the operator documents listed below
   release/
     runtime-manifest
     VERSION
@@ -84,37 +218,75 @@ encoding or inventory. `release/` contains no extra bootstrap, archive, source
 Operator documentation remains outside `release/`. A legacy ZIP without the
 approved runtime manifest is not a central package.
 
+Outside `release/` the archive carries exactly `bootstrap.ps1`, `INSTALL.md`
+and these operator documents from the source commit's `docs/`:
+`AGENTS.md.template`, `audit-protocol.md`, `capture-doctrine-v6.md`,
+`central-deployment-v1.md`, `central-guards-v1.md`,
+`central-instructions-v1.md`, `central-launcher-v1.md`,
+`central-publication-v1.md`, `central-runtime-v1.md`,
+`first-attachment-v1.md`, `install-values-v1.md`, `local-install-v1.md`,
+`paired-git-capture-v1.md`, `paired-git-operation-v1.md`,
+`paired-retention-v1.md`, `paired-review-input-v1.md`,
+`private-governance-v1.md`, `project-mode-doctrine-v1.md`,
+`project-preparation-v1.md`, `review-feedback-v1.md`,
+`reviewer-liveness-design.md` and `v2.2-grok-reviewer-design.md`. The list is explicit because following links
+cannot tell operator documents from development records: the contracts cite
+plans, registers and audits by path. The gate source's own `AGENTS.md` and
+`CLAUDE.md`, earlier release records under `deploy/`, and the development
+records in `docs/` (plans, audits, investigations, the debt and scope
+registers, migration contracts, incident notes and session guidance) are not
+packaged. A new operator document ships only once it is added to this list.
+
 Obtain archive, bootstrap and manifest hashes from the approved release record
 through the established distribution channel. A digest read only from the
-untrusted archive does not establish approval. Verify the archive before
-extraction, then independently verify the extracted bootstrap before execution:
+untrusted archive does not establish approval. Supply the values:
 
 ```powershell
-$CrgArchive = Read-Host 'Absolute path to the portable archive'
+$CrgArchive = Read-Host 'Absolute path to the transferred portable archive'
 $CrgApprovedArchiveSha256 = Read-Host 'Approved archive SHA256 from the release record'
-$CrgArchiveSha256 = (Get-FileHash -LiteralPath $CrgArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($CrgApprovedArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $CrgArchiveSha256 -cne $CrgApprovedArchiveSha256) { throw 'Archive approval/hash mismatch' }
-$CrgExtractRoot = Read-Host 'New absolute extraction directory outside the runtime store'
-Expand-Archive -LiteralPath $CrgArchive -DestinationPath $CrgExtractRoot
-$CrgBootstrap = Join-Path $CrgExtractRoot 'bootstrap.ps1'
 $CrgApprovedBootstrapSha256 = Read-Host 'Approved bootstrap SHA256 from the release record'
-$CrgBootstrapSha256 = (Get-FileHash -LiteralPath $CrgBootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($CrgApprovedBootstrapSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $CrgBootstrapSha256 -cne $CrgApprovedBootstrapSha256) { throw 'Bootstrap approval/hash mismatch' }
-$CrgReleasePackage = Join-Path $CrgExtractRoot 'release'
 $CrgApprovedManifestSha256 = Read-Host 'Approved runtime-manifest SHA256 from the release record'
+```
+
+Then copy, verify, extract and import. Release deployment guides carry this
+block unchanged, with the values above given as literals:
+
+```powershell
+foreach ($CrgApproved in @($CrgApprovedArchiveSha256, $CrgApprovedBootstrapSha256, $CrgApprovedManifestSha256)) {
+  if ($CrgApproved -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Each approved SHA256 must be 64 lowercase hexadecimal digits' }
+}
+$CrgImport = New-CrgPrivateWork 'import'
+$CrgArchiveCopy = Join-Path $CrgImport 'package.zip'
+Copy-CrgIntoPrivate $CrgArchive $CrgArchiveCopy 301989888
+if ((Get-CrgFileSha256 $CrgArchiveCopy) -cne $CrgApprovedArchiveSha256) { throw 'Archive approval/hash mismatch' }
+$CrgPackage = Join-Path $CrgImport 'package'
+[IO.Compression.ZipFile]::ExtractToDirectory($CrgArchiveCopy, $CrgPackage)
+$CrgBootstrap = Join-Path $CrgPackage 'bootstrap.ps1'
+if ((Get-CrgFileSha256 $CrgBootstrap) -cne $CrgApprovedBootstrapSha256) { throw 'Bootstrap approval/hash mismatch' }
+$CrgReleasePackage = Join-Path $CrgPackage 'release'
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -PublishRuntime -RuntimeStore $CrgStore -ReleasePackage $CrgReleasePackage -ApprovedManifestSha256 $CrgApprovedManifestSha256
 if ($LASTEXITCODE -ne 0) { throw 'Central package import failed; no activation requested' }
 $CrgReleaseId = $CrgApprovedManifestSha256
 ```
 
-The exact parameter is `-ReleasePackage`, naming the extracted `release/`
+Extraction uses .NET `ZipFile.ExtractToDirectory`, which refuses any entry that
+would land outside the package directory or on a file already extracted, so
+escaping entries and duplicate or case-colliding file entries stop
+extraction; repeated or differently cased directory entries reuse the
+directory already created. ZIP link
+metadata is not interpreted: every file entry becomes an ordinary file. The
+exact parameter is `-ReleasePackage`, naming the extracted `release/`
 directory, not a ZIP or the outer package directory. Import verifies every
-manifest-owned byte and retains the approved source provenance without requiring
-a source clone. No release payload is executed to establish package approval.
+manifest-owned byte and retains the approved source provenance without
+requiring a source clone. No release payload is executed to establish package
+approval.
 
 ## Install the stable launcher once, then activate
 
-For a new store, install from the successfully published/imported release:
+Run these commands in the same session, after the publication or import block
+and before `Close-CrgPrivateWork`, so `$CrgBootstrap` names its verified
+private copy in a still-held directory. For a new store, install from the
+successfully published/imported release:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -InstallRuntimeLauncher -RuntimeStore $CrgStore -ReleaseId $CrgReleaseId
@@ -138,6 +310,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -UpgradeRuntim
 if ($LASTEXITCODE -ne 0) { throw 'Launcher ABI migration incomplete; preserve the recorded transition' }
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -ActivateRuntime -RuntimeStore $CrgStore -ReleaseId $CrgReleaseId
 if ($LASTEXITCODE -ne 0) { throw 'ABI 2 activation failed' }
+```
+
+After the last bootstrap command, release the private directories:
+
+```powershell
+Close-CrgPrivateWork
 ```
 
 Migration preserves the predecessor release/hash in `launcher-install` and the
@@ -177,7 +355,8 @@ agent editing workflow. Existing project content must be preserved and reviewed:
   using the existing three-block [values contract](install-values-v1.md).
 - `AGENTS.md` and `CLAUDE.md`: existing project instructions, the same canonical
   central discovery section below, and the persistent code-unit-tests-banned
-  directive that leaves other testing categories available.
+  directive that keeps live testing, manual checks, ordinary program runs, and
+  functional validation permitted.
 - Private `PLAN.md` and `History.md`: actual project requirements/work history,
   with roles in configuration. Different private paths require matching roles
   and discovery records, not duplicate placeholder documents.
@@ -312,17 +491,34 @@ all preserved private entries must remain private under that validated configura
 The operation does not review or activate the association. After correction, repeat
 the same Attach command to perform full migration and mandatory first review.
 
+If a first attachment published both result refs but did not activate, and a
+later review requires a root-instruction correction, an approved runtime with
+published instruction correction support can accept the same explicit
+`Stage -Paths @('AGENTS.md', 'CLAUDE.md')` form followed by Attach. Select only
+instruction files that need correction. The gate requires the exact pending
+proposal and first-origin handoff, absent active attachment/completed pointer,
+unchanged public content and unchanged other private entries. No mode, reviewer
+configuration, values, software, deletion or general directory edit is admitted.
+Failed correction review preserves the original handoff and published refs;
+restaging a further root-instruction correction remains supported. Fresh review
+and new immutable retention precede handoff replacement and activation. Ordinary
+Resume remains the route for finishing an unchanged recorded transaction and
+continues to reject indexes that differ from that transaction.
+
 ## Upgrade and rollback
 
 Publish/import the next approved compatible release, then run the same
 `-ActivateRuntime` command once. Unchanged project configuration and hooks require
 no individual upgrade. Rollback selects an explicitly approved retained compatible
-release through that same operation:
+release through that same operation. Run it in a session where the publication
+or import block left `$CrgBootstrap` naming a verified private bootstrap copy
+whose directory is still held:
 
 ```powershell
 $CrgRollbackReleaseId = Read-Host 'Approved retained compatible rollback release ID'
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -ActivateRuntime -RuntimeStore $CrgStore -ReleaseId $CrgRollbackReleaseId
 if ($LASTEXITCODE -ne 0) { throw 'Central rollback activation failed' }
+Close-CrgPrivateWork
 ```
 
 Rollback changes the next invocation's runtime, not project commits, private
@@ -368,7 +564,7 @@ Record actual approved source/bootstrap/archive/manifest identities, successful
 publication/import and activation, stable launcher provenance, first paired review
 and completed attachment, and the consumer's subsequent Open/mode and ordinary
 operation results. Source parsing, native compilation and package publication
-alone do not establish a deployed working consumer. Applicable functional-test
+alone do not establish a deployed working consumer. Functional-validation
 evidence may contribute but does not replace the required installed-consumer
 evidence. The owning contracts are [runtime](central-runtime-v1.md),
 [launcher](central-launcher-v1.md), [first attachment](first-attachment-v1.md),

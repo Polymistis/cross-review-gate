@@ -5,20 +5,21 @@ function Get-CrgPairStateNative {
   param([object]$ProjectContext, [object]$OperationLock)
   $commands = @(Get-Command Assert-CrgPairedOperationLock -Module paired-diff -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   $relative = 'scripts/paired-diff.psm1'
+  # Ordinal: -cne compares by culture and ignores characters such as U+00AD.
   if ($null -eq $ProjectContext -or $null -eq $ProjectContext.Runtime -or
       $ProjectContext.Runtime.Payloads -isnot [System.Collections.IDictionary] -or
       $relative -cnotin @($ProjectContext.Runtime.Payloads.Keys) -or $commands.Count -ne 1 -or
-      $commands[0].Module.Path -cne $ProjectContext.Runtime.Payloads[$relative].Path -or
-      $OperationLock.PublicGitDirectory -cne $ProjectContext.Domains.public.GitDir) { throw 'pair state requires the retained native module and actual project operation lock' }
+      -not [string]::Equals($commands[0].Module.Path, $ProjectContext.Runtime.Payloads[$relative].Path, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($OperationLock.PublicGitDirectory, $ProjectContext.Domains.public.GitDir, [StringComparison]::Ordinal)) { throw 'pair state requires the retained native module and actual project operation lock' }
   & $commands[0] -Lock $OperationLock
   return $commands[0].Module
 }
 
 function Invoke-CrgPairStateChange {
   param([object]$ProjectContext, [object]$OperationLock,
-    [ValidateSet('crg-handoff', 'crg-pair', 'crg-attachment', 'crg-materialized', 'AGENTS.md', 'CLAUDE.md')][string]$Leaf,
+    [ValidatePattern('\A(?:crg-handoff|crg-pair|crg-attachment|crg-materialized|AGENTS\.md|CLAUDE\.md)\z', Options = 'None')][string]$Leaf,
     [AllowNull()][byte[]]$ExpectedBytes, [AllowNull()][byte[]]$Bytes, [switch]$Remove, [switch]$RootInstruction)
-  if (($Leaf -cin @('AGENTS.md', 'CLAUDE.md')) -ne [bool]$RootInstruction -or ($RootInstruction -and $Remove)) { throw 'root instruction publication requires one fixed instruction file and cannot delete' }
+  if (([string]::Equals($Leaf, 'AGENTS.md', [StringComparison]::Ordinal) -or [string]::Equals($Leaf, 'CLAUDE.md', [StringComparison]::Ordinal)) -ne [bool]$RootInstruction -or ($RootInstruction -and $Remove)) { throw 'root instruction publication requires one fixed instruction file and cannot delete' }
   if ($null -eq $ExpectedBytes -and $Remove) { throw 'pair state deletion requires exact preceding bytes' }
   $maximum = if ($RootInstruction) { 16777216 } else { 65536 }
   if ((-not $Remove -and $null -eq $Bytes) -or $Bytes.Length -gt $maximum -or $ExpectedBytes.Length -gt $maximum) { throw 'pair state bytes are absent or exceed the record bound' }
@@ -111,7 +112,7 @@ function Invoke-CrgPairStateChange {
 function Write-CrgPairState {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('crg-handoff', 'crg-pair', 'crg-attachment', 'crg-materialized')][string]$Leaf,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:crg-handoff|crg-pair|crg-attachment|crg-materialized)\z', Options = 'None')][string]$Leaf,
     [AllowNull()][byte[]]$ExpectedBytes, [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes)
   Invoke-CrgPairStateChange @PSBoundParameters
 }
@@ -126,7 +127,7 @@ function Remove-CrgPairHandoff {
 function Write-CrgRootInstruction {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext, [Parameter(Mandatory = $true)][object]$OperationLock,
-    [Parameter(Mandatory = $true)][ValidateSet('AGENTS.md', 'CLAUDE.md')][string]$Name,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:AGENTS\.md|CLAUDE\.md)\z', Options = 'None')][string]$Name,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$ExpectedBytes,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes)
   # Unlike initial metadata, instructions require a known existing baseline.

@@ -1,7 +1,47 @@
 # cross-review-gate
 
-**Version 2.2.0** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.0** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
+
+Version 2.4 moves the Grok model choice into the central runtime: a project
+enables Grok fallback and names at most a profile (`recommended`, `strong` or
+`fast`), and one central release plus activation changes what every profile
+runs, with no per-project edits. Once any project's retained history holds a
+Grok review run under 2.4 or a 2.4 configuration shape, rollback below 2.4 is
+unsupported (see `docs/private-governance-v1.md`). A reviewed `grok-fallback`
+enablement is itself the authorization for Grok to receive review material.
+Version 2.4.1 fixes pushes from attached projects under Git for Windows.
+Version 2.4.2 states the code unit-test ban to reviewers in the operator's
+global wording. Version 2.4.3 fixes Stage, Open and Commit refusals when the
+gate starts from a project subfolder. Version 2.4.4 runs Grok reviews like
+Codex and Claude reviews: no turn cap or one-hour deadline, and the same
+warn-only stall heartbeat, now one shared `scripts/review-liveness.psm1`
+module that trusted review copies carry beside the wrappers. Per-project
+installs gain that module; a LOCAL install must ignore it like the other gate
+files. Portable archives now ship an explicit operator document list.
+
+Version 2.5 keeps the code unit-test ban as the default and lets a centrally
+attached project loosen it through reviewed `unit-tests` records in
+`.crg-project/project.conf`: while the project is in prototype mode, or under
+named folders. Reviews apply the scope the preceding approved configuration
+selects. Once any project's retained history holds such a record, rollback
+below 2.5 is unsupported (see `docs/private-governance-v1.md`).
+
+Version 2.6 keeps review findings: a passing ordinary (not paired) Codex
+or Claude review adds its QUALITY and NOTE findings as tasks in the
+per-user `TASKS.md` and shows them to the next review of the same files,
+and a blocked commit's retry needs a remediation record first (both
+described below and in `docs/review-feedback-v1.md`). Reviews also show a
+fix-on-fix advisory when a change rewrites recently added lines, and
+identity decisions over outside data (verdict and record fields, Git
+output, paths, internal parameters) compare ordinally rather than by
+culture. The bootstrap changed; take its hash from the release record.
+
+Version 2.3 made `grok-4.7` the Grok provider record for new and updated
+project configuration (in 2.3, unmigrated `grok-4.6` records kept running
+`grok-4.6`; from 2.4 they run the central `recommended` profile on their own
+transport), and the legacy review-log prune never deletes files without an
+operator-configured safe-delete tool.
 
 Version 2.2 adds a shared machine-local runtime with project configuration and
 separate private governance history. One central activation upgrades all attached
@@ -20,9 +60,21 @@ strict fail-closed semantics. Only BLOCKER findings block (2026-07
 severity contract): QUALITY findings pass the gate as non-blocking
 follow-ups, printed prominently and recorded (best-effort) to an
 append-only `logs/review-followups.md` index for batch triage; NOTE
-is informational.
+is informational. A passing ordinary (not paired) Codex or Claude review also adds tasks for its QUALITY and
+NOTE findings (one per severity and citation) to the main checkout's
+per-user `TASKS.md` (QUALITY first,
+never committed) and shows its findings to the next review of the same
+files; PASS lines state that a review covers the source diff only, not
+target execution or deployment readiness. A retry of a blocked commit is
+refused before review until a remediation record names, for each earlier
+BLOCKER it is asked to cover (from the blocked rounds of the last 14 days,
+the newest 20 rounds, up to 256 findings newest first), the invariant
+broken, the sweep made and the sites fixed, and the
+reviewer is shown those findings and the record
+(`docs/review-feedback-v1.md`).
 
-This package contains the two backend wrappers, the shared review
+This package contains the Codex and Claude backend wrappers, the optional
+central Grok fallback reviewer adapter, the shared review
 prompt template, the pre-commit hook with backend routing, commit
 wrappers that handle the cross-review env-var convention, a backend-neutral
 project-value renderer, a trend analyzer, an author-side mechanical pre-pass
@@ -42,9 +94,13 @@ can be slotted in as a backend.
 
 ## Concepts
 
-- **Two backends**: `codex` (Codex CLI / GPT-5.5) and `claude`
-  (Claude Code CLI / Claude Opus). Either can act as IMPLEMENTER
-  (the committer) or REVIEWER (the gate).
+- **Backends**: `codex` (Codex CLI / the model set in
+  `~/.codex/config.toml`, e.g. GPT-6 Sol) and `claude`
+  (Claude Code CLI / the `opus` alias). Either can act as IMPLEMENTER
+  (the committer) or REVIEWER (the gate). Attached central projects may
+  also enable the optional `grok` fallback REVIEWER (the model and effort
+  of the central profile the project names, `recommended` by default),
+  which reviews only after two positively identified exhaustions.
 - **`REVIEW_BACKEND` names the preferred REVIEWER** (not the committer). The
   pre-commit hook reads `REVIEW_BACKEND` and starts with THAT backend's
   wrapper. To get cross-review, the committer sets it to the OTHER
@@ -52,8 +108,9 @@ can be slotted in as a backend.
   reviews; Codex commits set `REVIEW_BACKEND=claude` so Claude
   reviews. The commit-wrapper scripts
   (`scripts/codex/commit.ps1`, `scripts/claude/commit.ps1`) handle
-  this convention for you (each wrapper sets the env var to the
-  OPPOSITE of its own identity, saved/restored around the call) so
+  this convention for you (each sets the env var to the OPPOSITE of
+  its own identity, saved/restored around the call; the Codex entry
+  runs the one implementation in `scripts/claude/commit.ps1`) so
   you don't forget. Both direct wrappers and `scripts/run-gate.sh` bind the
   current worktree by refusing ambient Git
   repository/history/attribute/config selectors before the first Git command;
@@ -110,16 +167,18 @@ can be slotted in as a backend.
   `prototype`, and optional declared invariant surfaces — grammar in the
   prompt template's `## Project mode` section; full doctrine in
   `docs/project-mode-doctrine-v1.md`).
-  The declared mode governs behavior-preservation duties only. Code quality
+  The declared mode governs behavior-preservation duties only, plus the code
+  unit-test scope when a project configures a prototype allowance. Code quality
   is mode-invariant and the gate reviews at full strength in every mode.
-  Code unit tests are banned, including on declared invariant surfaces; agent
-  and reviewer instructions prohibit authoring, restoring, maintaining, or
-  running code unit tests. Existing code unit tests and unit-test-only assets
-  are removed through the applicable reviewed workflow. Integration, end-to-end,
-  smoke, performance, manual, live, and other functional testing remain
-  permitted and important. Preserve production validation and verify through
-  source inspection, builds, ordinary program operation, and applicable
-  functional testing.
+  Code unit tests are banned by default, including on declared invariant
+  surfaces; agent and reviewer instructions prohibit authoring, restoring,
+  maintaining, or running code unit tests. Existing code unit tests and
+  unit-test-only assets are removed through the applicable reviewed workflow.
+  A centrally attached project's reviewed configuration can loosen the ban
+  for prototype mode or named folders (`docs/private-governance-v1.md`). Live testing, manual
+  checks, ordinary program runs, and functional validation remain permitted
+  and important. Preserve production validation and verify through source
+  inspection, builds, ordinary program operation, and functional validation.
   The campaign is review
   context and priority, never a work allowlist: unrelated work is judged
   against its own stated intent and cannot fail merely for not advancing
@@ -137,7 +196,7 @@ can be slotted in as a backend.
   Completion is argued with
   the evidence contract (date + command + observed output + named
   revision per citation; build output, captured ordinary operation, and
-  applicable functional-test execution), not with test volume or banned code
+  functional validation), not with test volume or banned code
   unit-test execution.
 - **Trust boundary**: the wrappers materialize a read-only snapshot
   of the reviewed source into `REVIEW_SRC/` under a fresh per-run scratch
@@ -334,8 +393,8 @@ setup differs.
   (the wrappers exit 3 / the merge aborts) rather than silently disabling the
   gate — only an UNSET variable means "off". See INSTALL.md for details.
 - **Prune tool** — set `$env:CROSS_REVIEW_PRUNE_TOOL` to a delete tool
-  (e.g. a Recycle-Bin script) for log housekeeping; defaults to
-  `Remove-Item -Force`. See INSTALL.md.
+  (e.g. a Recycle-Bin script) to enable log housekeeping; unset means
+  review logs are never deleted. See INSTALL.md.
 - **Legacy-index seal (capture doctrine v6)** — on an install whose
   follow-up index carries pre-v6 content (content no reader can verify),
   the review-log auto-prune stays QUARANTINED until the operator
@@ -358,7 +417,7 @@ cross-review-gate/
 │   ├── codex/
 │   │   ├── auto-review.ps1            (Codex backend review wrapper)
 │   │   ├── auto-merge.ps1             (legacy launcher entrypoint; forwards to shared)
-│   │   ├── commit.ps1                 (cross-review commit wrapper, Codex implementer)
+│   │   ├── commit.ps1                 (Codex-implementer entry; runs the claude/ wrapper)
 │   │   └── review-prompt-template.md  (shared prompt with rendered project values)
 │   ├── shared/
 │   │   ├── auto-merge.ps1             (shared ff-merge gate; Codex or Claude review)
@@ -373,7 +432,7 @@ cross-review-gate/
 │   │                                   review-log dirs do not resolve)
 │   ├── claude/
 │   │   ├── auto-review.ps1            (Claude backend review wrapper)
-│   │   └── commit.ps1                 (cross-review commit wrapper, Claude implementer)
+│   │   └── commit.ps1                 (the one commit wrapper; Claude implementer when run directly)
 │   ├── git-hooks/
 │   │   └── pre-commit                 (REVIEW_BACKEND-routed pre-commit hook)
 │   ├── render-project-values.ps1      (backend-neutral values renderer/checker)

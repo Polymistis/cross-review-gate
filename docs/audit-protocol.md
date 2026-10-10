@@ -6,11 +6,11 @@ edits the review surface; the audit is small enough that it does not
 warrant its own automation layer.
 
 Code unit tests are banned. This audit uses source inspection, mandatory code
-review, builds, records from ordinary program operation, and applicable
-functional testing. Do not create or run code unit tests under another name.
-Integration, end-to-end, smoke, performance, manual, live, and other functional
-testing are not prohibited merely by category. Preserve production validation,
-runtime assertions, and safety checks.
+review, builds, records from ordinary program operation, and functional
+validation. Do not create or run code unit tests under another name. Live
+testing, manual checks, ordinary program runs, and functional validation remain
+permitted. Preserve production input validation, error handling, runtime
+assertions, and safety checks.
 
 > **Package scope note.** This document ships inside the
 > `cross-review-gate/` package and describes the behavior of the
@@ -43,6 +43,21 @@ Claude backend:
 - `scripts/claude/auto-review.ps1` (Claude wrapper; reuses the prompt template above)
 
 Shared:
+- `scripts/review-liveness.psm1` (the one reviewer heartbeat, stall threshold
+  and duration stamp both wrappers and the Grok adapter import; review
+  infrastructure, so trusted review copies carry it beside the wrappers)
+- `scripts/review-common.ps1` (the shared follow-up index, capture-locator,
+  review-log prune, legacy-seal, verdict-classifier, consistency-document,
+  project-mode, prompt-assembly, diff-identity, git, exhaustion-sidecar,
+  commit-baseline, tree-path, commit-log evidence, codex-effort,
+  argument-quoting, PATH, replacement-suppression, attribute-neutral Git and
+  fix-on-fix advisory implementation; the deliberate local copies outside it are listed under the
+  shared production contracts in criterion 4; both wrappers and the merge
+  gate dot-source it so it runs in
+  their own script scope, and `scripts/paired-governance.psm1`,
+  `scripts/review-preparation.psm1` and `scripts/paired-diff.psm1` dot-source
+  it for the functions they use; review infrastructure like the
+  liveness module)
 - `scripts/shared/auto-merge.ps1` (shared ff-merge gate; required `-Backend`
   names the preferred initial provider, and the gate owns any automatic
   whole-panel substitution)
@@ -153,8 +168,9 @@ Each audit run consumes:
 4. **`scripts/claude/auto-review.ps1`** — Claude wrapper (parallel
    shape; verdict-format contract must match the Codex wrapper exactly
    since the shared prompt and hook routing assume identical exit
-   codes). Specifically check: `Get-VerdictExitCode` classifier
-   behaviour stays in sync with the Codex copy, the consistency-doc
+   codes). Specifically check: the wrapper still classifies through the
+   shared `Get-VerdictExitCode` in `scripts/review-common.ps1` rather than
+   a local copy, the consistency-doc
    fail-closed gate is still in place (gated on
    `CROSS_REVIEW_CONSISTENCY_DOC`; the precompute is not ported to this
    wrapper), the same attribute-neutral evidence-extraction contract as the
@@ -198,8 +214,10 @@ Each audit run consumes:
 5a. **`scripts/codex/commit.ps1`** AND **`scripts/claude/commit.ps1`** —
    cross-review routing wrappers. These run BEFORE the pre-commit hook
    and set `REVIEW_BACKEND` to the OTHER backend (Codex implementer →
-   Claude reviewer, and vice versa). Check the bypass-flag parser
-   (`Test-Bypass-Args`) for parity between the Codex and Claude wrapper copies.
+   Claude reviewer, and vice versa). `scripts/claude/commit.ps1` is the one
+   implementation; the Codex entry invokes it with `-CrgImplementer codex`, and
+   the relaunched worker takes the implementer only from the authenticated
+   argument transport. Check the bypass-flag parser (`Test-Bypass-Args`).
    Check the direct-entry Git-selector boundary before the first Git command: raw,
    case-insensitive environment-name discovery must refuse history and
    attribute selectors, repository/object/ref/index selectors (including
@@ -208,17 +226,17 @@ Each audit run consumes:
    `GIT_CONFIG_VALUE_n` carriers, including empty values. Ordinary
    `HOME` / `XDG_CONFIG_HOME` remain admissible. Also check the
    `core.hooksPath` config-redirect guard (`Resolve-HooksPathGuard`
-   classifier) for parity across every hand-kept copy -- both commit
-   wrappers AND `bootstrap.ps1` (the installer classifies `core.hooksPath`
-   the same way so it never reports success under a state the wrappers
-   abort on). After that unset proof, each wrapper must resolve and attest
+   classifier) for parity across every hand-kept copy -- the commit
+   wrapper AND `bootstrap.ps1` (the installer classifies `core.hooksPath`
+   the same way so it never reports success under a state the wrapper
+   aborts on). After that unset proof, the wrapper must resolve and attest
    the default dispatcher before `git commit`: ordinary non-reparse bytes,
    leading shebang, the gate-untracking capability marker, and the exact
    adjacent bootstrap-written v1 digest record matching those bytes. Inspect
    refusal of NON-empty and empty `core.hooksPath=` values and missing, foreign,
-   or digest-mismatched default dispatchers. Verify `REVIEW_BACKEND`,
-   `GIT_NO_REPLACE_OBJECTS`, and PATH save/restore error handling are not
-   regressed, and confirm the `core.hooksPath` guard still runs INSIDE the
+   or digest-mismatched default dispatchers. Verify `REVIEW_BACKEND` and PATH
+   save/restore error handling and the worker environment's single
+   `GIT_NO_REPLACE_OBJECTS=1` entry are not regressed, and confirm the `core.hooksPath` guard still runs INSIDE the
    commit `try/finally` so an abort restores the controlled environment. The pre-
    commit hook forces `REVIEW_BACKEND=both` when a staged change
    touches either commit wrapper, defending against a malicious
@@ -401,7 +419,12 @@ Each audit run consumes:
    captured in a same-process, per-invocation transcript; a successful direct
    review and a successful automatic alternate-provider review print the same
    generic start/PASS pair; provider, exhaustion, and substitution text remains
-   absent from successful caller output. The transcript slots must be cleaned,
+   absent from successful caller output. The success projection carries only
+   the project-mode lines and findings; review-feedback status lines are
+   collected apart from it, from every launched invocation, and can never
+   fail a passed gate (`docs/review-feedback-v1.md` section 4). Their text
+   must never name a provider, a findings file or a verdict, and the
+   collectors remove the wrapper tag. The transcript slots must be cleaned,
    `REVIEW_BACKEND` must remain unchanged by routing, and no skip-provider
    argument or persistent fallback state may exist. Durable verdict headers and
    exhaustion sidecars remain the forensic authority.
@@ -422,7 +445,7 @@ Each audit run consumes:
    a fixed `/bin/sh` subshell — not the working-tree candidate or an
    executable temp file. So a staged hook edit is executed under
    HEAD's last-good logic AND adversarially
-   reviewed against HEAD's wrapper + prompt (the hook is in each
+   reviewed against HEAD's wrapper, prompt and shared review module (the hook is in each
    backend's `REVIEW_INFRA`). The dispatcher itself lives per-clone
    outside the working tree; a commit cannot edit or remove it
    through the review flow. Candidate hook logic must receive source inspection
@@ -531,8 +554,56 @@ guard line.
 that contract with the prompt:
 
 - `DIFF.patch`, `STAT.txt`, `NAME-STATUS.txt`, `COMMIT-LOG.txt`,
-  `PLAN-CONSISTENCY.txt` — Codex is instructed by the prompt's
-  scope-doc and/or hazards section to **read** these files.
+  `PLAN-CONSISTENCY.txt`, `FIX-ON-FIX.txt`, `CARRIED-FINDINGS.txt`,
+  `PRIOR-BLOCKERS.txt` — Codex is instructed by the
+  prompt's scope-doc and/or hazards section to **read** these files.
+  `FIX-ON-FIX.txt` (both wrappers, ordinary path) is advisory git-history
+  evidence written by `Write-FixOnFixEvidence` in `scripts/review-common.ps1`:
+  lines a recent commit added that the change rewrites, removes or inserts
+  code directly below (reported separately), and files changed by several commits
+  in a row, plus the escaped messages of the commits that added the lines,
+  quoted only within the commit-log byte caps (a message can be missing).
+  Its rules are in the comment above `Get-FixOnFixAdvisory`: attribution is
+  limited to a fixed window of recent commits by commit identity, never by
+  date, and only commits blame actually walks are credited; a shallow clone
+  reports `unavailable`, and every later Git read, message capture included,
+  pins the shallow file to the empty device; a file name is used only when Git can be given exactly that name
+  (otherwise it is reported as not checked), and every name in an entry is
+  escaped onto one line; every Git call, message capture included, goes
+  through `Read-CrgGitBytes` (byte-limited, command line budgeted); the
+  repository settings overridden are path quoting, signature display and
+  pathspec magic for every history query (message capture keeps
+  `Build-CommitLogEvidence`'s own options), text conversion,
+  ignored revisions and the diff algorithm for blame, and rename,
+  submodule and relative-path handling for the per-commit path checks. When it finds entries, the
+  same function returns them for a `FIX-ON-FIX ADVISORY` section at the end
+  of the scope text, because a reviewer that opens only `DIFF.patch` would
+  otherwise never see them. The prompt's change-propagation duty 4 says how
+  to use it; an entry, an `unavailable`
+  state, a `not-applicable` state and a missing `FIX-ON-FIX.txt` are never
+  findings by themselves, and a Git failure while producing it must never
+  abort the review.
+  `CARRIED-FINDINGS.txt` (both wrappers, ordinary path) is written by
+  `Write-CarriedFindingsEvidence`: open QUALITY and NOTE findings that
+  earlier passing reviews raised against a path in this change, taken from
+  their findings files, which store the text already quoted in the
+  `COMMIT-LOG.txt` escaping, within 8 KiB per finding and 64 KiB in total (a finding over
+  either limit is named on a `NOT CARRIED` line, never cut). The same
+  function returns a `CARRIED FINDINGS` section for the scope text. The
+  prompt's change-propagation duty 5 says how to use it; the rules
+  (findings files, retirement, TASKS.md tasks and the PASS-line coverage
+  wording) are in `docs/review-feedback-v1.md`. A carried finding, a
+  `NOT CARRIED` line and a missing file are never findings by themselves.
+  `PRIOR-BLOCKERS.txt` (both wrappers, staged reviews only) is written by
+  `Write-ReviewRetryEvidence` on a retry of a change that earlier staged
+  reviews blocked: those reviews' BLOCKER findings and the author's
+  remediation record, quoted the same way, with a `PRIOR BLOCKERS` section
+  for the scope text. A retry whose record does not cover each prior
+  BLOCKER it is asked to cover (bounded as section 5 states) is refused
+  before any reviewer runs. The prompt's
+  change-propagation duty 6 says how to use it; the rules are in section 5
+  of `docs/review-feedback-v1.md`. A prior BLOCKER, the record, a
+  `NOT SHOWN` line and a missing file are never findings by themselves.
 - `SCOPE.txt` — wrapper-produced, but the wrapper also **injects** the
   same scope text directly into the prompt sent to Codex. Codex reads
   the injected text in its prompt, not the file. This is the
@@ -568,25 +639,61 @@ Independent planning defects retain any BLOCKER severity assigned elsewhere.
 
 The prompt requires a specific output structure: per-category
 enumeration (8 categories, exactly once each), `VERDICT:` line (one of
-three values), per-severity entries. The wrapper's `Get-VerdictExitCode`
-parses this structure and fails closed on mismatches.
+three values), per-severity entries. The shared `Get-VerdictExitCode` in
+`scripts/review-common.ps1` (used by both wrappers and
+`scripts/paired-governance.psm1`) parses this structure and fails closed on
+mismatches.
 
-**Audit:** confirm the prompt and the wrapper agree on the contract.
-Inspect both wrapper classifiers and compare existing actual verdicts with the
+**Audit:** confirm the prompt and the classifier agree on the contract.
+Inspect the shared classifier and compare existing actual verdicts with the
 prompt contract. Code unit-test authoring and execution are prohibited;
-synthetic inputs are not prohibited merely by category, and applicable
-non-unit functional testing remains allowed.
+synthetic inputs are not prohibited merely by category, and live testing,
+manual checks, ordinary program runs, and functional validation remain
+permitted.
 Preserve the following shared production contracts:
 
 - `Resolve-ConsistencyDocConfig`, `Test-ConsistencyDocKind`, `Get-GitObjectKind`,
-  and `Remove-TreeNoRecurse` retain equivalent behavior across applicable copies.
-  Runtime consistency-doc routing remains opt-in through
+  and `Remove-TreeNoRecurse` have one implementation, in
+  `scripts/review-common.ps1`, for both wrappers and the merge gate;
+  `author-lint.ps1` keeps its own mode-based `Get-GitObjectKind` because it runs
+  as a standalone single-file copy. Runtime consistency-doc routing remains opt-in through
   `CROSS_REVIEW_CONSISTENCY_DOC`.
-- PATH helpers retain equivalent behavior across the review, merge, author-lint,
-  and commit entrypoints. The effective case-insensitive lookup value leads the
+- PATH helpers have one implementation in `scripts/review-common.ps1` for the
+  review wrappers and the merge gate; `scripts/claude/commit.ps1` (a routing
+  driver whose executed bytes the hook guards) and `author-lint.ps1` (a
+  standalone single-file copy) keep deliberate local copies that must retain
+  equivalent behavior. The effective case-insensitive lookup value leads the
   search order; deterministic raw-block-only values follow. Normalization must
   remove every case-variant spelling, set exactly one canonical `Path`, and
   verify the raw key count, spelling, and value or fail closed.
+- Child-process argument quoting: `Convert-ToProcArgString` in
+  `scripts/review-common.ps1` serves both wrappers, the merge gate and the
+  shared attribute-neutral Git child. These other implementations of the same
+  CommandLineToArgvW rule must change with it: `scripts/claude/commit.ps1`
+  (`ConvertTo-CrgCommitProcessArgumentLine`, for the routing-driver reason
+  above); `scripts/paired-process.psm1` (the C# `QuoteArgument` that builds the
+  review-process command line); `scripts/central-context.psm1`
+  (`Invoke-CrgStatusGit`, `Read-CrgCentralObjectBatch`) and
+  `scripts/paired-retention.psm1` (`Invoke-CrgRetentionGit`), which quote
+  every argument and refuse NUL; and `Convert-CrgWindowsProcessArgument` in
+  the standalone `bootstrap.ps1` and `scripts/render-project-values.ps1`.
+  `author-lint.ps1` keeps a narrower quoter that quotes only arguments holding
+  whitespace and relies on refusing any path that contains a double quote.
+- Raw-environment replacement suppression (`Set-CrgNoReplaceObjects` for the
+  live process, `Set-CrgNoReplaceObjectsInChildEnvironment` for a child map)
+  and the attribute-neutral Git helpers (the `CrgAttributeNeutral.NativeV1`
+  handle-custody type, the owned-context functions,
+  `Invoke-CrgAttributeNeutralGitChild` and
+  `Get-CrgAttributeNeutralDiffEvidence`) have one implementation in
+  `scripts/review-common.ps1` for both wrappers, the merge gate and
+  `scripts/paired-diff.psm1`. One shared definition means the custody type
+  that loads first in a process is always the complete one. Replacement
+  suppression must remove every case-variant spelling from the raw native
+  environment block, set exactly one canonical `GIT_NO_REPLACE_OBJECTS=1`, and
+  fail closed on a malformed raw entry. Local copies remain only where the
+  shared file cannot be loaded: `bootstrap.ps1` and
+  `scripts/render-project-values.ps1` run standalone, and the merge gate's
+  generated `child-runner.ps1` runs as its own process.
 - Inspect keyword-list changes against actual findings and classification logic;
   changed classifications must not silently mislabel existing artifact evidence.
 
@@ -603,11 +710,16 @@ package) adds a resolution layer both wrappers run on every
 prompt-producing scope, machine-injected data-bounded review context, and
 a labeled evidence channel. Audit that the pieces still agree:
 
-- **Resolution parity.** The project-mode module (declaration grammar
+- **Resolution parity.** The project-mode functions (declaration grammar
   parser, governing-ref resolution, safe fallback, and candidate
-  authority boundary) is mirrored across
-  `scripts/codex/auto-review.ps1` and `scripts/claude/auto-review.ps1`.
-  Compare the implementations directly; divergence is drift → re-mirror.
+  authority boundary) have one implementation in
+  `scripts/review-common.ps1`, which both wrappers dot-source. On the
+  ordinary (non-PreparedPair) review path, audit that neither wrapper
+  redefines one of them or bypasses `Resolve-ProjectModeRun`; a
+  wrapper-local copy is drift. A PreparedPair review instead consumes the
+  `PROJECT-MODE.txt` that `scripts/paired-review-input.psm1` prepares through
+  `scripts/project-preparation.psm1`; audit that producer for the same
+  governing-state and fallback rules.
 - **Configuration, never authorization.** The governing declaration is
   always read from the trusted state preceding the change. A candidate
   declaration never governs that same run, but remains ordinary diff
@@ -624,16 +736,29 @@ a labeled evidence channel. Audit that the pieces still agree:
   authority header both declare their free text DATA, never
   reviewer-facing instruction. The template's `## Project mode` and
   `## Verification evidence` sections must keep matching what the
-  wrappers inject (mode semantics, the code unit-test ban, evidence tiers,
-  citation metadata). The block must also say that campaign text is
+  wrappers inject (mode semantics, the code unit-test policy, evidence tiers,
+  citation metadata); a paired review's configured unit-test scope replaces
+  the template's marked ban body and the `pm-authority` sentence together. The block must also say that campaign text is
   context, not a work allowlist. Exactly one governing-state visibility line
   prints per invocation that reaches project-mode resolution; a scope
   preflight failure before that boundary may exit without one.
-- **Commit-log channel framing.** Both wrappers frame commit-message
-  content by injective escaping (backslash first, then `\xNN`) plus
-  the `> ` quote prefix, with the per-message and aggregate byte caps
-  refusing (never truncating) on overflow. Inspect both copies when caps or
-  framing change; mismatched boundaries are drift.
+- **Commit-log channel framing.** The shared `Build-CommitLogEvidence` in
+  `scripts/review-common.ps1` frames commit-message content by injective
+  escaping (backslash first, then `\xNN`) plus the `> ` quote prefix, with
+  the per-message and aggregate byte caps refusing (never truncating) on
+  overflow. Each message is read through `Read-CrgGitBytes`, which keeps at
+  most the per-message cap of output (anything past it is read through a
+  fixed buffer and discarded) and a bounded prefix of Git's error output,
+  and never stops Git early. A read that drains completely returns only
+  after both output pipes close and Git exits; a read that fails part-way
+  closes the pipes, waits 10 seconds and names a Git still running in its
+  failure reason. On the ordinary review path, confirm both wrappers still write
+  its result unmodified as `COMMIT-LOG.txt`; a wrapper-local copy or
+  post-processing is drift. A PreparedPair review's `COMMIT-LOG.txt` comes
+  from `scripts/paired-review-input.psm1` instead, which applies the same
+  escaping and quote framing per domain under its own authority header and
+  prepared history bounds. When caps or framing change, inspect both
+  producers; mismatched escaping or framing between them is drift.
 - **Ordinary landing paths.** A `PROJECT-MODE.md` edit uses the normal
   reviewed path or the normal audited `CROSS_REVIEW_SKIP=1` path. The
   audit must flag any declaration-specific sanction, isolation, or skip
@@ -816,22 +941,25 @@ The gate's trusted-copy bootstrap is specifically narrow and applied
 **per physical wrapper invocation**: every initial or automatic fallback
 invocation uses its effective provider's `REVIEW_INFRA` set — that provider's
 wrapper plus the shared
-prompt template plus this hook (Codex backend: `scripts/codex/auto-review.ps1`
-+ `scripts/codex/review-prompt-template.md` + `scripts/git-hooks/pre-commit`;
-Claude backend: `scripts/claude/auto-review.ps1` + the same shared
-prompt + the same hook). When any file in the effective provider's
-`REVIEW_INFRA` is staged, trusted sourcing is decided per component: each
+prompt template plus the shared `scripts/review-liveness.psm1` and
+`scripts/review-common.ps1` plus this hook
+(Codex backend: `scripts/codex/auto-review.ps1`
++ `scripts/codex/review-prompt-template.md` + the shared files +
+`scripts/git-hooks/pre-commit`; Claude backend: `scripts/claude/auto-review.ps1`
++ the same shared prompt, shared files and hook). Whether or not any of these files
+is staged, the wrapper, prompt and the modules the captured wrapper names run
+from one captured directory, with trusted sourcing decided per component: each
 component present in HEAD is extracted from HEAD, while a component positively
 absent from HEAD is admitted only as a manifest-verified LOCAL snapshot. This
 preserves supported hybrid layouts while ensuring that a staged wrapper,
-prompt, or hook edit cannot supply the bytes that review itself.
+prompt, module, or hook edit cannot supply the bytes that review itself.
 
 **`AGENTS.md`, `scripts/shared/auto-merge.ps1`,
 `scripts/shared/analyze-blocker-trends.ps1`, `scripts/shared/dispatch-checklist.ps1`,
 `scripts/shared/worker-audit.ps1`, and `scripts/shared/author-lint.ps1`** are reviewed by the normal gate path
 (no trusted-copy bootstrap, since no backend's `REVIEW_INFRA` list includes
 them). Every invoked provider follows the same trusted-source decision in this
-case; because neither wrapper was staged, normal review applies.
+case; because no review component was staged, normal review applies.
 
 **`scripts/git-hooks/pre-commit` edits run under HEAD's logic, not
 the candidate's.** Pre-commit is in `REVIEW_INFRA`, and the dispatcher

@@ -1,362 +1,13 @@
-# Explicit-domain raw diff and owned index-copy capture. Existing native ownership
-# operations are retained; a read-only open supports the binary copy handoff.
-# Wrapper-only test hooks are omitted. No executable host is imported or run.
-# Raw bytes are retained before the legacy display decoding, and lazy fetch is disabled.
-
-function Set-CrgNoReplaceObjectsChildEnvironment {
-  param([Parameter(Mandatory=$true)]$Environment)
-  if ($null -eq $Environment -or $null -eq $Environment.Keys) {
-    throw [System.InvalidOperationException]::new('Git child environment dictionary is unavailable')
-  }
-  foreach ($key in @($Environment.Keys)) {
-    if ([string]::Equals([string]$key, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::OrdinalIgnoreCase)) {
-      [void]$Environment.Remove($key)
-    }
-  }
-  $Environment['GIT_NO_REPLACE_OBJECTS'] = '1'
-  $finalKeys = @($Environment.Keys | Where-Object {
-    [string]::Equals([string]$_, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::OrdinalIgnoreCase)
-  })
-  if ($finalKeys.Count -ne 1 -or [string]$finalKeys[0] -cne 'GIT_NO_REPLACE_OBJECTS' -or
-      [string]$Environment[$finalKeys[0]] -cne '1') {
-    throw [System.InvalidOperationException]::new("Git child GIT_NO_REPLACE_OBJECTS postcondition failed (spelling count=$($finalKeys.Count))")
-  }
-}
-
-function Initialize-CrgAttributeNeutralNative {
-  if ('CrgAttributeNeutral.NativeV1' -as [type]) { return }
-  Add-Type -TypeDefinition @'
-namespace CrgAttributeNeutral {
-  using System;
-  using System.IO;
-  using System.Runtime.InteropServices;
-  using Microsoft.Win32.SafeHandles;
-
-  public static class NativeV1 {
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, out FILE_ID_INFO info, uint size);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, IntPtr info, uint size);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetFilePointerEx(SafeFileHandle handle, long distance, out long position, uint method);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetEndOfFile(SafeFileHandle handle);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool WriteFile(SafeFileHandle handle, IntPtr buffer, uint count, out uint written, IntPtr overlapped);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool ReadFile(SafeFileHandle handle, IntPtr buffer, uint count, out uint read, IntPtr overlapped);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileSizeEx(SafeFileHandle handle, out long size);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool FlushFileBuffers(SafeFileHandle handle);
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool CreateHardLinkW(string newName, string existingName, IntPtr security);
-
-    // Callers supply validated canonical absolute paths. The handle-relative
-    // create can exceed MAX_PATH, so preserve that exact name when reopening it.
-    private static string ExtendedPath(string path) {
-      if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { return path; }
-      if (path.StartsWith(@"\\", StringComparison.Ordinal)) { return @"\\?\UNC\" + path.Substring(2); }
-      return @"\\?\" + path;
-    }
-    [DllImport("ntdll.dll")]
-    private static extern int NtCreateFile(out IntPtr handle, uint access, ref OBJECT_ATTRIBUTES attributes, out IO_STATUS_BLOCK status, IntPtr allocationSize, uint fileAttributes, uint share, uint disposition, uint options, IntPtr eaBuffer, uint eaLength);
-    [DllImport("ntdll.dll")]
-    private static extern uint RtlNtStatusToDosError(int status);
-    [DllImport("ntdll.dll")]
-    private static extern int NtSetInformationFile(SafeFileHandle handle, out IO_STATUS_BLOCK status, IntPtr information, uint length, int informationClass);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct OBJECT_ATTRIBUTES {
-      public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes;
-      public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BY_HANDLE_FILE_INFORMATION {
-      public uint FileAttributes;
-      public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-      public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-      public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-      public uint VolumeSerialNumber; public uint FileSizeHigh; public uint FileSizeLow;
-      public uint NumberOfLinks; public uint FileIndexHigh; public uint FileIndexLow;
-    }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FILE_ID_INFO {
-      public ulong VolumeSerialNumber;
-      [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)] public byte[] FileId;
-    }
-
-    private static SafeFileHandle InvalidHandle() { return new SafeFileHandle(new IntPtr(-1), true); }
-    private static bool ValidLeaf(string leaf) {
-      if (String.IsNullOrEmpty(leaf) || leaf == "." || leaf == ".." || leaf.IndexOfAny(new char[] {'\\', '/', ':', '\0'}) >= 0 || leaf.EndsWith(".", StringComparison.Ordinal) || leaf.EndsWith(" ", StringComparison.Ordinal)) { return false; }
-      string stem = leaf.Split('.')[0].ToUpperInvariant();
-      if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || stem == "CLOCK$") { return false; }
-      return !(stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) && stem[3] >= '1' && stem[3] <= '9');
-    }
-    private static SafeFileHandle CreateRelative(SafeFileHandle parent, string leaf, uint access, uint share, uint disposition, uint options, out int error) {
-      error = 87;
-      if (parent == null || parent.IsInvalid || !ValidLeaf(leaf)) { return InvalidHandle(); }
-      IntPtr text = IntPtr.Zero; IntPtr name = IntPtr.Zero; IntPtr raw = IntPtr.Zero; bool added = false;
-      try {
-        parent.DangerousAddRef(ref added);
-        text = Marshal.StringToHGlobalUni(leaf);
-        UNICODE_STRING value = new UNICODE_STRING();
-        value.Length = checked((ushort)(leaf.Length * 2)); value.MaximumLength = value.Length; value.Buffer = text;
-        name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING)));
-        Marshal.StructureToPtr(value, name, false);
-        OBJECT_ATTRIBUTES attributes = new OBJECT_ATTRIBUTES();
-        attributes.Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES)); attributes.RootDirectory = parent.DangerousGetHandle();
-        attributes.ObjectName = name; attributes.Attributes = 0x40u;
-        IO_STATUS_BLOCK status;
-        int ntStatus = NtCreateFile(out raw, access | 0x00100000u, ref attributes, out status, IntPtr.Zero, 0x80u, share, disposition, options | 0x00200020u, IntPtr.Zero, 0u);
-        error = ntStatus < 0 ? unchecked((int)RtlNtStatusToDosError(ntStatus)) : 0;
-        GC.KeepAlive(parent);
-        if (ntStatus < 0 || raw == IntPtr.Zero || raw == new IntPtr(-1)) { return InvalidHandle(); }
-        SafeFileHandle result = new SafeFileHandle(raw, true); raw = IntPtr.Zero; return result;
-      } finally {
-        if (raw != IntPtr.Zero && raw != new IntPtr(-1)) { new SafeFileHandle(raw, true).Dispose(); }
-        if (name != IntPtr.Zero) { Marshal.FreeHGlobal(name); }
-        if (text != IntPtr.Zero) { Marshal.FreeHGlobal(text); }
-        if (added) { parent.DangerousRelease(); }
-      }
-    }
-    public static SafeFileHandle OpenPinnedDirectoryNoFollow(string path, out int error) {
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x00100080u, 0x3u, IntPtr.Zero, 3u, 0x02200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static SafeFileHandle OpenPinnedDirectoryNoFollowDenyRename(string path, out int error) {
-      // FILE_LIST_DIRECTORY is load-bearing: a metadata-only directory open does not enforce omitted delete sharing.
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x00100081u, 0x3u, IntPtr.Zero, 3u, 0x02200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static SafeFileHandle CreateOwnedDirectoryRelative(SafeFileHandle parent, string leaf, out int error) {
-      return CreateRelative(parent, leaf, 0x000100A3u, 0x3u, 2u, 0x1u, out error);
-    }
-    public static SafeFileHandle CreatePersistentDirectoryRelative(SafeFileHandle parent, string leaf, out int error) {
-      return CreateRelative(parent, leaf, 0x000000A3u, 0x3u, 2u, 0x1u, out error);
-    }
-    public static SafeFileHandle CreateOwnedFileRelative(SafeFileHandle parent, string leaf, out int error) {
-      return CreateRelative(parent, leaf, 0xC0000000u, 0x1u, 2u, 0x40u, out error);
-    }
-    public static SafeFileHandle OpenReadFileRelative(SafeFileHandle parent, string leaf, out int error) {
-      return CreateRelative(parent, leaf, 0x80000000u, 0x1u, 1u, 0x40u, out error);
-    }
-    public static SafeFileHandle OpenOperationLockRelative(SafeFileHandle parent, out int error) {
-      return CreateRelative(parent, "crg-operation.lock", 0xC0000000u, 0u, 3u, 0x40u, out error);
-    }
-    public static SafeFileHandle CreatePublicationFileRelative(SafeFileHandle parent, string leaf, out int error) {
-      return CreateRelative(parent, leaf, 0xC0010000u, 0x1u, 2u, 0x40u, out error);
-    }
-    public static SafeFileHandle OpenPublicationFileRelative(SafeFileHandle parent, string leaf, out int error) {
-      return CreateRelative(parent, leaf, 0x80010000u, 0x1u, 1u, 0x40u, out error);
-    }
-    public static bool RenamePublicationFileRelative(SafeFileHandle source, SafeFileHandle parent, string leaf, out int error) {
-      error = 87;
-      if (!ValidLeaf(leaf) || !IsOrdinarySingleLinkFile(source) || !IsOrdinaryDirectory(parent)) { return false; }
-      byte[] name = System.Text.Encoding.Unicode.GetBytes(leaf);
-      int rootOffset = IntPtr.Size == 8 ? 8 : 4;
-      int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
-      int nameOffset = IntPtr.Size == 8 ? 20 : 12;
-      int size = checked(nameOffset + name.Length + 2);
-      IntPtr buffer = IntPtr.Zero; bool added = false;
-      try {
-        parent.DangerousAddRef(ref added);
-        buffer = Marshal.AllocHGlobal(size);
-        for (int i = 0; i < size; i++) { Marshal.WriteByte(buffer, i, 0); }
-        // No replace is deliberate: an unexpected destination must survive.
-        // The existing exact record moves aside under the operation lock first.
-        Marshal.WriteIntPtr(buffer, rootOffset, parent.DangerousGetHandle());
-        Marshal.WriteInt32(buffer, lengthOffset, name.Length);
-        Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
-        IO_STATUS_BLOCK status;
-        int result = NtSetInformationFile(source, out status, buffer, (uint)size, 10);
-        error = result < 0 ? unchecked((int)RtlNtStatusToDosError(result)) : 0;
-        return result >= 0;
-      } finally {
-        if (buffer != IntPtr.Zero) { Marshal.FreeHGlobal(buffer); }
-        if (added) { parent.DangerousRelease(); }
-      }
-    }
-    public static SafeFileHandle OpenReadDirectoryRelative(SafeFileHandle parent, string leaf, out int error) {
-      // Coexist with the coordinator's DELETE-capable directory ownership.
-      // The coordinator retains namespace custody until readers are quiescent.
-      return CreateRelative(parent, leaf, 0x81u, 0x7u, 1u, 0x1u, out error);
-    }
-    public static SafeFileHandle OpenReadDirectoryShareAllNoFollow(string path, out int error) {
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x81u, 0x7u, IntPtr.Zero, 3u, 0x02200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static bool IsOrdinaryDirectory(SafeFileHandle handle) {
-      BY_HANDLE_FILE_INFORMATION info;
-      return handle != null && !handle.IsInvalid && GetFileInformationByHandle(handle, out info) && (info.FileAttributes & 0x10u) != 0 && (info.FileAttributes & 0x400u) == 0;
-    }
-    public static bool IsOrdinarySingleLinkFile(SafeFileHandle handle) {
-      BY_HANDLE_FILE_INFORMATION info;
-      return handle != null && !handle.IsInvalid && GetFileInformationByHandle(handle, out info) && (info.FileAttributes & 0x410u) == 0 && info.NumberOfLinks == 1u;
-    }
-    public static bool IsOrdinaryFile(SafeFileHandle handle) {
-      BY_HANDLE_FILE_INFORMATION info;
-      return handle != null && !handle.IsInvalid && GetFileInformationByHandle(handle, out info) && (info.FileAttributes & 0x410u) == 0;
-    }
-    public static int GetLinkCount(SafeFileHandle handle) {
-      BY_HANDLE_FILE_INFORMATION info;
-      return handle != null && !handle.IsInvalid && GetFileInformationByHandle(handle, out info) ? checked((int)info.NumberOfLinks) : -1;
-    }
-    public static bool SameIdentity(SafeFileHandle left, SafeFileHandle right) {
-      FILE_ID_INFO a; FILE_ID_INFO b; uint size = (uint)Marshal.SizeOf(typeof(FILE_ID_INFO));
-      if (left == null || left.IsInvalid || right == null || right.IsInvalid || !GetFileInformationByHandleEx(left, 18, out a, size) || !GetFileInformationByHandleEx(right, 18, out b, size) || a.FileId == null || b.FileId == null || a.FileId.Length != 16 || b.FileId.Length != 16 || a.VolumeSerialNumber != b.VolumeSerialNumber) { return false; }
-      for (int i = 0; i < 16; i++) { if (a.FileId[i] != b.FileId[i]) { return false; } }
-      return true;
-    }
-    public static SafeFileHandle OpenReadShareAllNoFollow(string path, out int error) {
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80000000u, 0x7u, IntPtr.Zero, 3u, 0x00200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static SafeFileHandle OpenPinnedReadNoFollow(string path, out int error) {
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80000000u, 0x1u, IntPtr.Zero, 3u, 0x00200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static SafeFileHandle OpenCleanupOwnerNoFollow(string path, out int error) {
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80010000u, 0x3u, IntPtr.Zero, 3u, 0x00200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static SafeFileHandle OpenCleanupDirectoryOwnerNoFollow(string path, out int error) {
-      SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80010000u, 0x3u, IntPtr.Zero, 3u, 0x02200080u, IntPtr.Zero);
-      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0; return handle;
-    }
-    public static bool PathNamesExactHandle(string path, SafeFileHandle held, bool directory, out int error) {
-      uint flags = directory ? 0x02200080u : 0x00200080u;
-      using (SafeFileHandle reopened = CreateFileW(ExtendedPath(path), 0x80u, 0x7u, IntPtr.Zero, 3u, flags, IntPtr.Zero)) {
-        error = reopened.IsInvalid ? Marshal.GetLastWin32Error() : 0;
-        if (reopened.IsInvalid) { return false; }
-        bool shape = directory ? IsOrdinaryDirectory(reopened) : IsOrdinarySingleLinkFile(reopened);
-        return shape && SameIdentity(held, reopened);
-      }
-    }
-    public static bool WriteUtf8Exact(SafeFileHandle handle, string text, out int error) {
-      error = 0; long position;
-      if (handle == null || handle.IsInvalid || !SetFilePointerEx(handle, 0L, out position, 0u) || !SetEndOfFile(handle)) { error = Marshal.GetLastWin32Error(); return false; }
-      byte[] bytes = new System.Text.UTF8Encoding(false).GetBytes(text ?? String.Empty);
-      IntPtr buffer = IntPtr.Zero;
-      try {
-        if (bytes.Length > 0) {
-          buffer = Marshal.AllocHGlobal(bytes.Length); Marshal.Copy(bytes, 0, buffer, bytes.Length);
-          uint offset = 0;
-          while (offset < bytes.Length) {
-            uint written;
-            if (!WriteFile(handle, IntPtr.Add(buffer, checked((int)offset)), checked((uint)(bytes.Length - offset)), out written, IntPtr.Zero) || written == 0u) { error = Marshal.GetLastWin32Error(); return false; }
-            offset += written;
-          }
-        }
-        if (!FlushFileBuffers(handle)) { error = Marshal.GetLastWin32Error(); return false; }
-        return true;
-      } finally { if (buffer != IntPtr.Zero) { Marshal.FreeHGlobal(buffer); } }
-    }
-    public static string ReadUtf8Exact(SafeFileHandle handle, out int error) {
-      error = 0; long length; long position;
-      if (handle == null || handle.IsInvalid || !GetFileSizeEx(handle, out length)) { error = Marshal.GetLastWin32Error(); return null; }
-      if (length < 0L || length > 1048576L) { error = 223; return null; }
-      if (!SetFilePointerEx(handle, 0L, out position, 0u)) { error = Marshal.GetLastWin32Error(); return null; }
-      byte[] bytes = new byte[checked((int)length)];
-      IntPtr buffer = IntPtr.Zero;
-      try {
-        if (bytes.Length > 0) {
-          buffer = Marshal.AllocHGlobal(bytes.Length); uint offset = 0;
-          while (offset < bytes.Length) {
-            uint read;
-            if (!ReadFile(handle, IntPtr.Add(buffer, checked((int)offset)), checked((uint)(bytes.Length - offset)), out read, IntPtr.Zero) || read == 0u) { error = Marshal.GetLastWin32Error(); return null; }
-            offset += read;
-          }
-          Marshal.Copy(buffer, bytes, 0, bytes.Length);
-        }
-        try { return new System.Text.UTF8Encoding(false, true).GetString(bytes); }
-        catch (System.Text.DecoderFallbackException) { error = 1113; return null; }
-      } finally { if (buffer != IntPtr.Zero) { Marshal.FreeHGlobal(buffer); } }
-    }
-    public static bool DeleteHeldExact(SafeFileHandle handle, bool directory, out int error) {
-      error = 0;
-      if (directory ? !IsOrdinaryDirectory(handle) : !IsOrdinarySingleLinkFile(handle)) { error = 4390; return false; }
-      IntPtr disposition = Marshal.AllocHGlobal(1);
-      try {
-        Marshal.WriteByte(disposition, 0, 1);
-        if (!SetFileInformationByHandle(handle, 4, disposition, 1u)) { error = Marshal.GetLastWin32Error(); return false; }
-        return true;
-      } finally { Marshal.FreeHGlobal(disposition); }
-    }
-    public static bool TryCreateHardLink(string newName, string existingName, out int error) {
-      bool ok = CreateHardLinkW(newName, existingName, IntPtr.Zero); error = ok ? 0 : Marshal.GetLastWin32Error(); return ok;
-    }
-  }
-}
-'@
-}
-
-function Enter-CrgAttributeNeutralDirectoryChain {
-  param([string]$Path, [System.Collections.Generic.List[object]]$Pins, [switch]$DenyLeafRename)
-  $full = [System.IO.Path]::GetFullPath($Path)
-  if ($full.StartsWith('\\.\', [System.StringComparison]::Ordinal) -or $full.StartsWith('\\?\GLOBALROOT', [System.StringComparison]::OrdinalIgnoreCase)) { throw "unsupported device directory path '$full'" }
-  $root = [System.IO.Path]::GetPathRoot($full)
-  if ([string]::IsNullOrWhiteSpace($root)) { throw "directory path '$full' has no filesystem root" }
-  $paths = [System.Collections.Generic.List[string]]::new()
-  [void]$paths.Add($root)
-  $remainder = $full.Substring($root.Length)
-  $current = $root
-  foreach ($component in @($remainder -split '[\\/]' | Where-Object { $_ -ne '' })) {
-    $current = Join-Path $current $component
-    [void]$paths.Add($current)
-  }
-  $lastRecord = $null
-  for ($pathIndex = 0; $pathIndex -lt $paths.Count; $pathIndex++) {
-    $candidate = [System.IO.Path]::GetFullPath($paths[$pathIndex])
-    $denyRename = $DenyLeafRename -and ($pathIndex -eq ($paths.Count - 1))
-    $existing = $null
-    foreach ($pin in $Pins) {
-      if ([string]::Equals($pin.Path, $candidate, [System.StringComparison]::OrdinalIgnoreCase)) { $existing = $pin; break }
-    }
-    if ($null -ne $existing) {
-      if ($denyRename -and -not $existing.DeniesRename) { throw "directory custody cannot upgrade '$candidate' to rename denial" }
-      $lastRecord = $existing
-      continue
-    }
-    $errorCode = 0
-    $handle = if ($denyRename) {
-      [CrgAttributeNeutral.NativeV1]::OpenPinnedDirectoryNoFollowDenyRename($candidate, [ref]$errorCode)
-    } else {
-      [CrgAttributeNeutral.NativeV1]::OpenPinnedDirectoryNoFollow($candidate, [ref]$errorCode)
-    }
-    if ($null -eq $handle -or $handle.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinaryDirectory($handle)) {
-      if ($null -ne $handle) { $handle.Dispose() }
-      throw "directory custody refused '$candidate' (Win32 error $errorCode)"
-    }
-    $record = [pscustomobject]@{ Path = $candidate; Handle = $handle; Label = "directory pin '$candidate'"; DeniesRename = $denyRename }
-    [void]$Pins.Add($record)
-    $lastRecord = $record
-  }
-  return $lastRecord
-}
-
-function New-CrgAttributeNeutralOwnedDirectory {
-  param([hashtable]$Custody, [object]$Parent, [string]$Leaf, [string]$Path, [string]$Label)
-  $errorCode = 0
-  $handle = [CrgAttributeNeutral.NativeV1]::CreateOwnedDirectoryRelative($Parent.Handle, $Leaf, [ref]$errorCode)
-  if ($null -eq $handle -or $handle.IsInvalid) {
-    if ($null -ne $handle) { $handle.Dispose() }
-    if ($errorCode -eq 80 -or $errorCode -eq 183) { throw 'owned temporary Git path was already occupied' }
-    throw "$Label creation failed (Win32 error $errorCode)"
-  }
-  if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinaryDirectory($handle)) { $handle.Dispose(); throw "$Label is not one ordinary non-reparse directory" }
-  $record = [pscustomobject]@{ Path = [System.IO.Path]::GetFullPath($Path); Handle = $handle; Label = $Label }
-  [void]$Custody.OwnedDirectories.Add($record)
-  return $record
-}
+# Explicit-domain raw diff and owned index-copy capture. No executable host is
+# imported or run.
+#
+# The native handle-custody type, the attribute-neutral Git child and the
+# replacement-suppression helpers come from the shared review functions, the
+# same implementation the review hosts run. The explicit export list keeps
+# every dot-sourced function private to this module. A load failure aborts the
+# import: without them no capture can hold custody.
+try { . (Join-Path $PSScriptRoot 'review-common.ps1') }
+catch { throw "paired diff could not load the shared review functions: $($_.Exception.Message)" }
 
 function New-CrgPairedSnapshotOwnedDirectory {
   param([hashtable]$Custody, [object]$Parent, [string]$Leaf, [string]$Path, [string]$Label)
@@ -378,230 +29,10 @@ function New-CrgPairedSnapshotOwnedDirectory {
   return $record
 }
 
-function New-CrgAttributeNeutralControlFile {
-  param([hashtable]$Custody, [object]$Parent, [string]$Leaf, [string]$Path, [string]$Text, [string]$Label)
-  $errorCode = 0
-  $handle = [CrgAttributeNeutral.NativeV1]::CreateOwnedFileRelative($Parent.Handle, $Leaf, [ref]$errorCode)
-  if ($null -eq $handle -or $handle.IsInvalid) {
-    if ($null -ne $handle) { $handle.Dispose() }
-    throw "$Label create-new failed (Win32 error $errorCode)"
-  }
-  $record = [pscustomobject]@{ Path = [System.IO.Path]::GetFullPath($Path); Handle = $handle; Label = $Label }
-  [void]$Custody.ControlFiles.Add($record)
-  $writeError = 0
-  if (-not [CrgAttributeNeutral.NativeV1]::WriteUtf8Exact($handle, $Text, [ref]$writeError) -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) {
-    throw "$Label could not be established as one flushed ordinary single-link file (Win32 error $writeError)"
-  }
-  $postHookError = 0
-  $postHookText = [CrgAttributeNeutral.NativeV1]::ReadUtf8Exact($handle, [ref]$postHookError)
-  if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle) -or
-      -not [CrgAttributeNeutral.NativeV1]::PathNamesExactHandle($record.Path, $handle, $false, [ref]$postHookError) -or
-      $null -eq $postHookText -or $postHookText -cne $Text) {
-    throw "$Label lost exact ordinary single-link identity at its creation boundary (Win32 error $postHookError)"
-  }
-  return $record
-}
-
-function Assert-CrgAttributeNeutralContextStable {
-  param([hashtable]$Context, [string]$Boundary)
-  foreach ($record in @($Context.Custody.DirectoryPins) + @($Context.Custody.OwnedDirectories)) {
-    $errorCode = 0
-    if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinaryDirectory($record.Handle) -or
-        -not [CrgAttributeNeutral.NativeV1]::PathNamesExactHandle($record.Path, $record.Handle, $true, [ref]$errorCode)) {
-      throw "$Boundary refused: $($record.Label) lost exact ordinary directory identity (Win32 error $errorCode)"
-    }
-  }
-  foreach ($record in $Context.Custody.ControlFiles) {
-    $errorCode = 0
-    $links = [CrgAttributeNeutral.NativeV1]::GetLinkCount($record.Handle)
-    if ($links -ne 1 -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($record.Handle) -or
-        -not [CrgAttributeNeutral.NativeV1]::PathNamesExactHandle($record.Path, $record.Handle, $false, [ref]$errorCode)) {
-      throw "$Boundary refused: $($record.Label) lost exact ordinary single-link identity (links=$links, Win32 error $errorCode)"
-    }
-  }
-}
-
-function Close-CrgAttributeNeutralContext {
-  param([hashtable]$Custody)
-  $failures = [System.Collections.Generic.List[string]]::new()
-  if ($null -eq $Custody) { return @{ Ok = $true; Reason = '' } }
-  for ($i = $Custody.ControlFiles.Count - 1; $i -ge 0; $i--) {
-    $record = $Custody.ControlFiles[$i]; $errorCode = 0
-    $handoff = $null; $cleanupOwner = $null
-    try {
-      $handoff = [CrgAttributeNeutral.NativeV1]::OpenReadShareAllNoFollow($record.Path, [ref]$errorCode)
-      if ($null -eq $handoff -or $handoff.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::SameIdentity($record.Handle, $handoff)) { throw "identity handoff failed (Win32 error $errorCode)" }
-      $record.Handle.Dispose()
-      $record.Handle = $null
-      $cleanupOwner = [CrgAttributeNeutral.NativeV1]::OpenCleanupOwnerNoFollow($record.Path, [ref]$errorCode)
-      if ($null -eq $cleanupOwner -or $cleanupOwner.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::SameIdentity($handoff, $cleanupOwner)) { throw "cleanup-owner acquisition failed (Win32 error $errorCode)" }
-      if (-not [CrgAttributeNeutral.NativeV1]::DeleteHeldExact($cleanupOwner, $false, [ref]$errorCode)) { [void]$failures.Add("$($record.Label) exact deletion failed (Win32 error $errorCode)") }
-    } catch { [void]$failures.Add("$($record.Label) exact deletion threw: $($_.Exception.Message)") }
-    finally {
-      if ($null -ne $cleanupOwner) { try { $cleanupOwner.Dispose() } catch { } }
-      if ($null -ne $handoff) { try { $handoff.Dispose() } catch { } }
-      if ($null -ne $record.Handle) { try { $record.Handle.Dispose() } catch { } }
-    }
-  }
-  $retainDeferredCustody = $false
-  for ($i = $Custody.OwnedDirectories.Count - 1; $i -ge 0; $i--) {
-    $record = $Custody.OwnedDirectories[$i]; $errorCode = 0
-    $deferredCleanup = $null -ne $record.PSObject.Properties['DeferredCleanup'] -and $record.DeferredCleanup
-    if ($deferredCleanup) {
-      if ($retainDeferredCustody) { continue }
-      $bridge = $null; $cleanupOwner = $null; $bridgeValidated = $false; $cleanupOwnerValidated = $false
-      try {
-        # The original handle denies rename until a share-all handle has proven
-        # the same identity. Only then can DELETE access be acquired by path.
-        $bridge = [CrgAttributeNeutral.NativeV1]::OpenReadDirectoryShareAllNoFollow($record.Path, [ref]$errorCode)
-        if ($null -eq $bridge -or $bridge.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinaryDirectory($bridge) -or
-            -not [CrgAttributeNeutral.NativeV1]::SameIdentity($record.Handle, $bridge)) { throw "identity handoff failed (Win32 error $errorCode)" }
-        $bridgeValidated = $true
-        $record.Handle.Dispose()
-        $record.Handle = $null
-        $cleanupOwner = [CrgAttributeNeutral.NativeV1]::OpenCleanupDirectoryOwnerNoFollow($record.Path, [ref]$errorCode)
-        if ($null -eq $cleanupOwner -or $cleanupOwner.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinaryDirectory($cleanupOwner) -or
-            -not [CrgAttributeNeutral.NativeV1]::SameIdentity($bridge, $cleanupOwner)) { throw "cleanup-owner acquisition failed (Win32 error $errorCode)" }
-        $cleanupOwnerValidated = $true
-        if (-not [CrgAttributeNeutral.NativeV1]::DeleteHeldExact($cleanupOwner, $true, [ref]$errorCode)) { throw "exact deletion failed (Win32 error $errorCode)" }
-        $cleanupOwner.Dispose(); $cleanupOwner = $null
-        $bridge.Dispose(); $bridge = $null
-      } catch {
-        [void]$failures.Add("$($record.Label) exact deletion threw: $($_.Exception.Message)")
-        $retainDeferredCustody = $true
-        if ($bridgeValidated) { $record.CleanupIdentityBridge = $bridge; $bridge = $null }
-        if ($cleanupOwnerValidated) { $record.CleanupOwner = $cleanupOwner; $cleanupOwner = $null }
-      } finally {
-        if ($null -ne $cleanupOwner) { try { $cleanupOwner.Dispose() } catch { } }
-        if ($null -ne $bridge) { try { $bridge.Dispose() } catch { } }
-      }
-      continue
-    }
-    try {
-      if (-not [CrgAttributeNeutral.NativeV1]::DeleteHeldExact($record.Handle, $true, [ref]$errorCode)) { [void]$failures.Add("$($record.Label) exact deletion failed (Win32 error $errorCode)") }
-    } catch { [void]$failures.Add("$($record.Label) exact deletion threw: $($_.Exception.Message)") }
-    finally { try { $record.Handle.Dispose() } catch { } }
-  }
-  if (-not $retainDeferredCustody) {
-    for ($i = $Custody.DirectoryPins.Count - 1; $i -ge 0; $i--) { try { $Custody.DirectoryPins[$i].Handle.Dispose() } catch { } }
-  }
-  return @{ Ok = ($failures.Count -eq 0); Reason = ($failures -join '; ') }
-}
-
-function ConvertTo-CrgGitArgumentLine {
-  param([string[]]$ArgList)
-  if ($null -eq $ArgList) { return '' }
-  $quoted = foreach ($a in $ArgList) {
-    if ($null -eq $a) { $a = '' }
-    if ($a.Length -gt 0 -and ($a.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0)) {
-      $a
-    } else {
-      $sb = [System.Text.StringBuilder]::new()
-      [void]$sb.Append('"')
-      $slashes = 0
-      foreach ($ch in $a.ToCharArray()) {
-        if ($ch -eq '\') {
-          $slashes++
-        } elseif ($ch -eq '"') {
-          [void]$sb.Append('\' * ($slashes * 2 + 1))
-          [void]$sb.Append('"')
-          $slashes = 0
-        } else {
-          if ($slashes -gt 0) { [void]$sb.Append('\' * $slashes); $slashes = 0 }
-          [void]$sb.Append($ch)
-        }
-      }
-      if ($slashes -gt 0) { [void]$sb.Append('\' * ($slashes * 2)) }
-      [void]$sb.Append('"')
-      $sb.ToString()
-    }
-  }
-  return ($quoted -join ' ')
-}
-
-function Invoke-CrgAttributeNeutralGitChild {
-  param(
-    [hashtable]$Context,
-    [string[]]$GitArgs
-  )
-  Assert-CrgAttributeNeutralContextStable -Context $Context -Boundary 'pre-child custody check'
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Context.GitExe
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-  $psi.RedirectStandardInput = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  # Older Git-for-Windows misclassifies check-attr when its cwd carries a
-  # retained DELETE directory handle. The already pinned volume/share root is
-  # non-renamable and all repository selectors below remain absolute.
-  $psi.WorkingDirectory = $Context.WorkingDirectory
-  $psi.Arguments = ConvertTo-CrgGitArgumentLine -ArgList (@('-c', 'core.bare=true') + $GitArgs)
-  # .NET Framework exposes EnvironmentVariables; modern .NET exposes
-  # Environment and leaves the compatibility property null. Windows PowerShell
-  # 5.1 materializes a casing-preserving StringDictionaryWithComparer here; a
-  # map that cannot preserve canonical spelling is intentionally refused by the
-  # postcondition below. Resolve once so powershell.exe 5.1 and pwsh execute the
-  # same allowlist boundary.
-  $environmentProperty = $psi.PSObject.Properties['Environment']
-  $childEnvironment = $null
-  if ($null -ne $environmentProperty) { $childEnvironment = $environmentProperty.Value }
-  if ($null -eq $childEnvironment) { $childEnvironment = $psi.EnvironmentVariables }
-  if ($null -eq $childEnvironment) { throw 'Git child environment dictionary is unavailable' }
-  $childEnvironment.Clear()
-  foreach ($name in @('SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'PATH')) {
-    $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
-    if ($null -ne $value) { $childEnvironment[$name] = $value }
-  }
-  $childEnvironment['TEMP'] = $Context.Root
-  $childEnvironment['TMP'] = $Context.Root
-  $childEnvironment['HOME'] = $Context.NoHome
-  $childEnvironment['XDG_CONFIG_HOME'] = $Context.NoXdg
-  $childEnvironment['GIT_DIR'] = $Context.GitDir
-  $childEnvironment['GIT_COMMON_DIR'] = $Context.GitDir
-  $childEnvironment['GIT_OBJECT_DIRECTORY'] = $Context.ObjectDir
-  $childEnvironment['GIT_CONFIG_NOSYSTEM'] = '1'
-  $childEnvironment['GIT_CONFIG_GLOBAL'] = $Context.NoGlobalConfig
-  $childEnvironment['GIT_ATTR_NOSYSTEM'] = '1'
-  $childEnvironment['GIT_OPTIONAL_LOCKS'] = '0'
-  $childEnvironment['GIT_NO_LAZY_FETCH'] = '1'
-  $childEnvironment['LC_ALL'] = 'C'
-  $childEnvironment['LANG'] = 'C'
-  Set-CrgNoReplaceObjectsChildEnvironment -Environment $childEnvironment
-  try {
-    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-  } catch { }
-
-  $proc = New-Object System.Diagnostics.Process
-  $proc.StartInfo = $psi
-  $output = New-Object IO.MemoryStream
-  try {
-    if (-not $proc.Start()) { throw 'Git process did not start' }
-    $proc.StandardInput.Close()
-    $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($output)
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    $proc.WaitForExit()
-    $null = $stdoutTask.GetAwaiter().GetResult()
-    [byte[]]$stdoutBytes = $output.ToArray()
-    $result = @{
-      ExitCode = $proc.ExitCode
-      Stdout = [Text.UTF8Encoding]::new($false).GetString($stdoutBytes)
-      StdoutBytes = $stdoutBytes
-      Stderr = $stderrTask.Result
-    }
-  } finally {
-    $output.Dispose()
-    $proc.Dispose()
-  }
-  Assert-CrgAttributeNeutralContextStable -Context $Context -Boundary 'post-child custody check'
-  return $result
-}
-
 function Get-CrgPairedGitDiffEvidence {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][string]$ParentTree,
     [Parameter(Mandatory = $true)][string]$CandidateTree,
     [Parameter(Mandatory = $true)][string]$TempParent)
@@ -612,10 +43,11 @@ function Get-CrgPairedGitDiffEvidence {
     ControlFiles = [System.Collections.Generic.List[object]]::new()
   }
   $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = 'attribute-neutral evidence did not run' }
-  $phase = 'input validation'
+  $state = @{ Phase = 'input validation' }
   try {
     Initialize-CrgAttributeNeutralNative
-    if ($Domain -cnotin @('public', 'private') -or [string]::IsNullOrWhiteSpace($TempParent)) { throw 'paired diff requires an explicit domain and private scratch parent' }
+    # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
+    if (-not ([string]::Equals($Domain, 'public', [StringComparison]::Ordinal) -or [string]::Equals($Domain, 'private', [StringComparison]::Ordinal)) -or [string]::IsNullOrWhiteSpace($TempParent)) { throw 'paired diff requires an explicit domain and private scratch parent' }
     $readers = @(Get-Command -Name Read-CrgCentralTreeBytes -Module central-context -CommandType Function -ListImported -ErrorAction SilentlyContinue)
     if ($readers.Count -ne 1) { throw 'paired diff requires the already imported retained central-context reader' }
     foreach ($tree in $CompareArgs) { $null = & $readers[0] -ProjectContext $ProjectContext -Domain $Domain -TreeOid $tree }
@@ -624,116 +56,21 @@ function Get-CrgPairedGitDiffEvidence {
     if (-not [string]::Equals($sourceObjects, $expectedObjects, [StringComparison]::OrdinalIgnoreCase)) { throw 'paired source object path differs from the captured domain' }
     $null = Enter-CrgAttributeNeutralDirectoryChain -Path $sourceObjects -Pins $custody.DirectoryPins -DenyLeafRename
     $objectFormat = $ProjectContext.Domains[$Domain].ObjectFormat
-    $phase = 'temporary context creation'
-    $parent = [System.IO.Path]::GetFullPath($TempParent)
-    if (-not [System.IO.Directory]::Exists($parent)) { throw "temporary parent '$parent' does not exist" }
-    $TempLeaf = 'crg-attribute-neutral-' + [guid]::NewGuid().ToString('N')
-    $ownedRoot = [System.IO.Path]::GetFullPath((Join-Path $parent $TempLeaf))
-    $parentPrefix = $parent.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $ownedRoot.StartsWith($parentPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'owned temporary Git path escaped its parent' }
-    $parentRecord = Enter-CrgAttributeNeutralDirectoryChain -Path $parent -Pins $custody.DirectoryPins
-    $rootRecord = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $parentRecord -Leaf $TempLeaf -Path $ownedRoot -Label 'owned attribute-neutral root'
-    $gitDir = Join-Path $ownedRoot 'gitdir'
-    $objectDir = Join-Path $gitDir 'objects'
-    $infoDir = Join-Path $gitDir 'info'
-    $refsDir = Join-Path $gitDir 'refs'
-    $objectInfoDir = Join-Path $objectDir 'info'
-    $noHome = Join-Path $ownedRoot 'no-home'
-    $noXdg = Join-Path $ownedRoot 'no-xdg'
-    $gitDirRecord = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $rootRecord -Leaf 'gitdir' -Path $gitDir -Label 'private Git directory'
-    $objectDirRecord = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $gitDirRecord -Leaf 'objects' -Path $objectDir -Label 'private object directory'
-    $infoDirRecord = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $gitDirRecord -Leaf 'info' -Path $infoDir -Label 'private info directory'
-    $null = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $gitDirRecord -Leaf 'refs' -Path $refsDir -Label 'private refs directory'
-    $objectInfoRecord = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $objectDirRecord -Leaf 'info' -Path $objectInfoDir -Label 'private object-info directory'
-    $null = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $rootRecord -Leaf 'no-home' -Path $noHome -Label 'empty HOME directory'
-    $null = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $rootRecord -Leaf 'no-xdg' -Path $noXdg -Label 'empty XDG directory'
-    $configText = if ($objectFormat -ceq 'sha256') {
-      "[core]`n`trepositoryformatversion = 1`n`tbare = true`n`tcommitGraph = false`n`tmultiPackIndex = false`n[extensions]`n`tobjectFormat = sha256`n"
-    } else {
-      "[core]`n`trepositoryformatversion = 0`n`tbare = true`n`tcommitGraph = false`n`tmultiPackIndex = false`n"
-    }
-    $headPath = Join-Path $gitDir 'HEAD'
-    $configPath = Join-Path $gitDir 'config'
-    $attributesPath = Join-Path $infoDir 'attributes'
-    $shallowPath = Join-Path $gitDir 'shallow'
-    $graftsPath = Join-Path $infoDir 'grafts'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $gitDirRecord -Leaf 'HEAD' -Path $headPath -Text "ref: refs/heads/crg-attribute-neutral`n" -Label 'private HEAD'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $gitDirRecord -Leaf 'config' -Path $configPath -Text $configText -Label 'private config'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $infoDirRecord -Leaf 'attributes' -Path $attributesPath -Text "* !diff`n" -Label 'private info/attributes'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $gitDirRecord -Leaf 'shallow' -Path $shallowPath -Text '' -Label 'private shallow boundary'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $infoDirRecord -Leaf 'grafts' -Path $graftsPath -Text '' -Label 'private graft boundary'
-    $alternateLine = ($sourceObjects -replace '\\', '/')
-    if ($alternateLine.IndexOfAny([char[]]@("`r", "`n")) -ge 0) { throw 'source object directory cannot be represented in an alternates file' }
-    $alternatesPath = Join-Path $objectInfoDir 'alternates'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $objectInfoRecord -Leaf 'alternates' -Path $alternatesPath -Text "$alternateLine`n" -Label 'private object alternates'
-
-    $noGlobalConfig = Join-Path $ownedRoot 'no-global-config'
-    $attributeCanary = Join-Path $ownedRoot 'hostile-global-attributes'
-    $commonDirPointer = Join-Path $gitDir 'commondir'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $gitDirRecord -Leaf 'commondir' -Path $commonDirPointer -Text ".`n" -Label 'private fixed common-directory indirection'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $rootRecord -Leaf 'no-global-config' -Path $noGlobalConfig -Text '' -Label 'empty global config'
-    $null = New-CrgAttributeNeutralControlFile -Custody $custody -Parent $rootRecord -Leaf 'hostile-global-attributes' -Path $attributeCanary -Text "* -diff`n" -Label 'attribute reset canary'
-    $ctx = @{
-      GitExe = $ProjectContext.GitExe
-      Root = $ownedRoot
-      WorkingDirectory = [System.IO.Path]::GetPathRoot($ownedRoot)
-      GitDir = $gitDir
-      ObjectDir = $objectDir
-      NoHome = $noHome
-      NoXdg = $noXdg
-      NoGlobalConfig = $noGlobalConfig
-      AttributeCanary = $attributeCanary
-      Config = $configPath
-      InfoAttributes = $attributesPath
-      Alternates = $alternatesPath
-      CommonDirPointer = $commonDirPointer
-      SourceObjects = $sourceObjects
-      Custody = $custody
-    }
-    $phase = 'attribute reset readback'
-    $attributeProbePath = 'nested/crg-attribute-neutral-probe.txt'
-    $attributeProbe = Invoke-CrgAttributeNeutralGitChild -Context $ctx -GitArgs @('-c', "core.attributesFile=$($ctx.AttributeCanary)", 'check-attr', '--cached', 'diff', '--', $attributeProbePath)
-    if ($attributeProbe.ExitCode -ne 0 -or $attributeProbe.Stdout.Trim() -cne "$attributeProbePath`: diff: unspecified") {
-      $probeOut = $attributeProbe.Stdout.Trim(); $probeErr = $attributeProbe.Stderr.Trim()
-      if ($probeOut.Length -gt 500) { $probeOut = $probeOut.Substring(0, 500) + '...' }
-      if ($probeErr.Length -gt 500) { $probeErr = $probeErr.Substring(0, 500) + '...' }
-      throw "highest-precedence diff-attribute reset did not verify (git exit $($attributeProbe.ExitCode), stdout='$probeOut', stderr='$probeErr')"
-    }
-
-    $common = @(
-      '-c', "core.attributesFile=$($ctx.AttributeCanary)",
-      '-c', 'core.quotePath=false',
-      'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative',
-      '--ignore-submodules=none'
-    )
-    $phase = 'patch, stat, and name-status extraction'
-    $patchRun = Invoke-CrgAttributeNeutralGitChild -Context $ctx -GitArgs ($common + @('--src-prefix=a/', '--dst-prefix=b/') + $CompareArgs)
-    $statRun = Invoke-CrgAttributeNeutralGitChild -Context $ctx -GitArgs ($common + @('--stat') + $CompareArgs)
-    $nameRun = Invoke-CrgAttributeNeutralGitChild -Context $ctx -GitArgs ($common + @('--name-status') + $CompareArgs)
-    foreach ($run in @(
-        @{ Name = 'patch'; Result = $patchRun },
-        @{ Name = 'stat'; Result = $statRun },
-        @{ Name = 'name-status'; Result = $nameRun }
-      )) {
-      if ($run.Result.ExitCode -ne 0) {
-        $detail = $run.Result.Stderr.Trim()
-        if ($detail.Length -gt 1000) { $detail = $detail.Substring(0, 1000) + '...' }
-        throw "attribute-neutral $($run.Name) extraction failed (git exit $($run.Result.ExitCode)): $detail"
-      }
-    }
+    $runs = Invoke-CrgAttributeNeutralDiffRuns -Custody $custody -GitExe $ProjectContext.GitExe -SourceObjects $sourceObjects -ObjectFormat $objectFormat `
+      -TempParent $TempParent -CompareArgs $CompareArgs -State $state
     $result = @{
       Ok = $true
-      Patch = $patchRun.Stdout
-      Stat = $statRun.Stdout
-      NameStatus = $nameRun.Stdout
-      PatchBytes = $patchRun.StdoutBytes
-      StatBytes = $statRun.StdoutBytes
-      NameStatusBytes = $nameRun.StdoutBytes
+      Patch = $runs.Patch.Stdout
+      Stat = $runs.Stat.Stdout
+      NameStatus = $runs.NameStatus.Stdout
+      PatchBytes = $runs.Patch.StdoutBytes
+      StatBytes = $runs.Stat.StdoutBytes
+      NameStatusBytes = $runs.NameStatus.StdoutBytes
       Domain = $Domain; ParentTree = $ParentTree; CandidateTree = $CandidateTree
       Reason = ''
     }
   } catch {
-    $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = "$phase failed: $($_.Exception.Message)" }
+    $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = "$($state.Phase) failed: $($_.Exception.Message)" }
   } finally {
     $cleanup = Close-CrgAttributeNeutralContext -Custody $custody
     if (-not $cleanup.Ok) {
@@ -828,7 +165,7 @@ function New-CrgOwnedHookDirectory {
   $names = @(Get-CrgOwnedHookNames)
   if ($null -eq $HookBytes) { throw 'hook projection requires an explicit admitted byte map' }
   foreach ($name in $HookBytes.Keys) {
-    if ($name -isnot [string] -or $name -cnotin $names -or $HookBytes[$name] -isnot [byte[]]) { throw 'hook projection contains an unsupported hook or byte value' }
+    if ($name -isnot [string] -or -not [System.Linq.Enumerable]::Contains([string[]]$names, [string]$name, [StringComparer]::Ordinal) -or $HookBytes[$name] -isnot [byte[]]) { throw 'hook projection contains an unsupported hook or byte value' }
   }
   $directory = New-CrgAttributeNeutralOwnedDirectory -Custody $Custody -Parent $Parent -Leaf $Leaf -Path (Join-Path $Parent.Path $Leaf) -Label 'owned hook execution directory'
   # A retained directory cannot prevent insertion at an absent hook name.
@@ -900,7 +237,7 @@ function Close-CrgPairedIndexCopy {
 function Get-CrgPairedSnapshotDirectory {
   param([hashtable]$Custody, [System.Collections.Generic.Dictionary[string,object]]$Directories, [string]$Relative)
   if ($Directories.ContainsKey($Relative)) { return $Directories[$Relative] }
-  $separator = $Relative.LastIndexOf('/')
+  $separator = $Relative.LastIndexOf([char]'/')
   $parentName = if ($separator -lt 0) { '' } else { $Relative.Substring(0, $separator) }
   $leaf = $Relative.Substring($separator + 1)
   $parent = Get-CrgPairedSnapshotDirectory -Custody $Custody -Directories $Directories -Relative $parentName
@@ -922,7 +259,7 @@ function Assert-CrgPairedInputSnapshot {
     if (-not $expected.Add($record.Path)) { throw 'snapshot contains duplicate file records' }
   }
   foreach ($directory in $Snapshot.Custody.OwnedDirectories) {
-    if ($directory.Path -cne $Snapshot.Root -and -not $expected.Add($directory.Path)) { throw 'snapshot contains a duplicate directory record' }
+    if (-not [string]::Equals($directory.Path, $Snapshot.Root, [StringComparison]::Ordinal) -and -not $expected.Add($directory.Path)) { throw 'snapshot contains a duplicate directory record' }
   }
   foreach ($directory in $Snapshot.Custody.OwnedDirectories) {
     foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory.Path)) {
@@ -1010,7 +347,7 @@ function New-CrgPairedInputSnapshot {
       }
     }
     foreach ($entry in $metadata.ContextEntries) {
-      $separator = $entry.Path.LastIndexOf('/')
+      $separator = $entry.Path.LastIndexOf([char]'/')
       $parentName = if ($separator -lt 0) { '' } else { $entry.Path.Substring(0, $separator) }
       $leafName = $entry.Path.Substring($separator + 1)
       $directory = Get-CrgPairedSnapshotDirectory -Custody $custody -Directories $directories -Relative $parentName
@@ -1038,9 +375,9 @@ function New-CrgPairedProviderSnapshot {
   param([Parameter(Mandatory = $true)][object]$InputBundle,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$RuntimeTemplateBytes,
     [Parameter(Mandatory = $true)][string]$TempParent,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude', 'grok')][string]$Backend,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$Backend,
     [ValidatePattern('(?-i)\A(?:paired-v1|first-attachment-v1)\z')][string]$PreparedOrigin = 'paired-v1')
-  if ($null -eq $InputBundle -or $InputBundle.Schema -ne 1 -or $Backend -cnotin @('codex', 'claude', 'grok')) { throw 'provider snapshot requires validated paired input and a canonical provider' }
+  if ($null -eq $InputBundle -or $InputBundle.Schema -ne 1 -or -not [System.Linq.Enumerable]::Contains([string[]]@('codex', 'claude', 'grok'), [string]$Backend, [StringComparer]::Ordinal)) { throw 'provider snapshot requires validated paired input and a canonical provider' }
   # Transfer already captured bytes; no Git objects or preceding approval are
   # synthesized. The shared materializer revalidates the complete bundle.
   $transfer = [pscustomobject]@{
@@ -1058,7 +395,7 @@ function New-CrgPairedProviderSnapshot {
     $root = $snapshot.Custody.OwnedDirectories[0]
     $evidence = New-CrgPairedSnapshotOwnedDirectory -Custody $snapshot.Custody -Parent $root -Leaf 'CODEX_REVIEW_EVIDENCE' -Path (Join-Path $root.Path 'CODEX_REVIEW_EVIDENCE') -Label 'paired canonical consistency evidence'
     $null = New-CrgOwnedBinaryFile -Custody $snapshot.Custody -Parent $evidence -Leaf 'PLAN-CONSISTENCY.txt' -Bytes $InputBundle.Buffers['PLAN-CONSISTENCY-REPORT.md'] -ExpectedSha256 $InputBundle.Metadata.BufferDigests['PLAN-CONSISTENCY-REPORT.md']
-    if ($Backend -cin @('codex', 'grok')) {
+    if ([string]::Equals($Backend, 'codex', [StringComparison]::Ordinal) -or [string]::Equals($Backend, 'grok', [StringComparison]::Ordinal)) {
       $frame = @(
         '# Reviewer working root (trusted - wrapper-generated)', '',
         'Role: adversarial code reviewer only. Authoritative instructions are the delivered review prompt and this runtime-owned file.',
@@ -1152,7 +489,7 @@ function Close-CrgPairedReadContext {
 function Open-CrgPairedReadContext {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$Root)
-  if ($Root -cnotmatch '\A[A-Za-z]:\\' -or $Root.Contains('/') -or [IO.Path]::GetFullPath($Root) -cne $Root -or
+  if ($Root -cnotmatch '\A[A-Za-z]:\\' -or $Root.Contains('/') -or -not [string]::Equals([IO.Path]::GetFullPath($Root), $Root, [StringComparison]::Ordinal) -or
       [IO.Path]::GetFileName($Root) -cnotmatch '\Acrg-paired-input-[0-9a-f]{32}\z') { throw 'paired read context requires a canonical owned input-root path' }
   $context = [pscustomobject]@{
     Kind = 'crg-paired-read-context-v1'; Root = $Root; Closed = $false; ReadFile = $null
@@ -1182,7 +519,7 @@ function Assert-CrgPairedReadContext {
   param([Parameter(Mandatory = $true)][object]$Context,
     [Parameter(Mandatory = $true)][object]$InputBundle)
   if ($null -eq $Context -or $Context.Kind -cne 'crg-paired-read-context-v1' -or $Context.Closed -or
-      $null -eq $InputBundle -or $InputBundle.Root -cne $Context.Root) { throw 'paired read context does not own the supplied input root' }
+      $null -eq $InputBundle -or -not [string]::Equals($InputBundle.Root, $Context.Root, [StringComparison]::Ordinal)) { throw 'paired read context does not own the supplied input root' }
   $readTrees = @(Get-Command Read-CrgGitTreeBytes -Module paired-tree -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($readTrees.Count -ne 1) { throw 'paired read custody requires one retained tree reader' }
   $filePaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -1199,9 +536,9 @@ function Assert-CrgPairedReadContext {
   }
   foreach ($path in @($filePaths) + @($directoryPaths)) {
     $parent = [IO.Path]::GetDirectoryName($path)
-    while ($parent -ceq $Context.Root -or $parent.StartsWith($Context.Root + '\', [StringComparison]::Ordinal)) {
+    while ([string]::Equals($parent, $Context.Root, [StringComparison]::Ordinal) -or $parent.StartsWith($Context.Root + '\', [StringComparison]::Ordinal)) {
       $null = $directoryPaths.Add($parent)
-      if ($parent -ceq $Context.Root) { break }
+      if ([string]::Equals($parent, $Context.Root, [StringComparison]::Ordinal)) { break }
       $parent = [IO.Path]::GetDirectoryName($parent)
     }
   }
@@ -1215,9 +552,9 @@ function Assert-CrgPairedReadContext {
     if ($actual.Length -ne $record.ExpectedLength -or $actual.Sha256 -cne $record.ExpectedSha256) { throw 'paired input bytes changed under the retained reader' }
     $null = $expected.Add($record.Path)
   }
-  $directories = @($Context.Directories.Values | Where-Object { $_.Path -ceq $Context.Root -or $_.Path.StartsWith($Context.Root + '\', [StringComparison]::Ordinal) })
+  $directories = @($Context.Directories.Values | Where-Object { [string]::Equals($_.Path, $Context.Root, [StringComparison]::Ordinal) -or $_.Path.StartsWith($Context.Root + '\', [StringComparison]::Ordinal) })
   if (-not $directoryPaths.SetEquals([string[]]@($directories | ForEach-Object { $_.Path }))) { throw 'paired read context directory set differs from the validated bundle' }
-  foreach ($directory in $directories) { if ($directory.Path -cne $Context.Root) { $null = $expected.Add($directory.Path) } }
+  foreach ($directory in $directories) { if (-not [string]::Equals($directory.Path, $Context.Root, [StringComparison]::Ordinal)) { $null = $expected.Add($directory.Path) } }
   foreach ($directory in $directories) {
     foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory.Path)) { if (-not $expected.Remove($path)) { throw 'paired input namespace contains an undeclared path' } }
   }
@@ -1229,7 +566,7 @@ function Open-CrgPairedOperationLock {
   param([Parameter(Mandatory = $true)][string]$PublicGitDirectory)
   if ($PublicGitDirectory -cnotmatch '\A[A-Za-z]:\\' -or $PublicGitDirectory.Contains('/') -or
       $PublicGitDirectory.Length -le 3 -or $PublicGitDirectory.Length -gt 32767 -or
-      $PublicGitDirectory -match '[\x00-\x1f\x7f]' -or [IO.Path]::GetFullPath($PublicGitDirectory) -cne $PublicGitDirectory) { throw 'paired operation lock requires the captured canonical worktree Git directory' }
+      $PublicGitDirectory -match '[\x00-\x1f\x7f]' -or -not [string]::Equals([IO.Path]::GetFullPath($PublicGitDirectory), $PublicGitDirectory, [StringComparison]::Ordinal)) { throw 'paired operation lock requires the captured canonical worktree Git directory' }
   $pins = New-Object 'System.Collections.Generic.List[object]'
   $handle = $null; $stream = $null; $complete = $false
   try {

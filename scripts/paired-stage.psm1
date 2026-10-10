@@ -104,7 +104,8 @@ function Invoke-CrgPairedStage {
     if ($before.public.State -cne 'present' -or $before.private.State -cne 'present') { throw 'staging requires both existing fixed indexes before classification' }
     $privateInventory = @((& $commands['Get-CrgPairedGitStageInventory'] @common -Domain private -Kind Tracked).Value)
     if ($pendingStage) {
-      $governingConfigEntry = @($privateInventory | Where-Object { $_.Path -ceq '.crg-project/project.conf' })
+      # Ordinal: -ceq, Select-Object -Unique and @{} keys compare by culture and ignore characters such as U+00AD.
+      $governingConfigEntry = @($privateInventory | Where-Object { [string]::Equals($_.Path, '.crg-project/project.conf', [StringComparison]::Ordinal) })
       if ($governingConfigEntry.Count -gt 1 -or ($governingConfigEntry.Count -eq 1 -and $governingConfigEntry[0].Mode -cnotin @('100644', '100755'))) { throw 'pending attachment staged project configuration is malformed' }
       if ($governingConfigEntry.Count -eq 1) {
         $governingConfigBytes = & $commands['Read-CrgCentralBlobBytes'] -ProjectContext $project -Domain private -BlobOid $governingConfigEntry[0].Oid -Maximum 65536
@@ -118,10 +119,10 @@ function Invoke-CrgPairedStage {
     if (-not $All) { $selection = [string[]]$Paths.Clone() }
     $configPath = '.crg-project/project.conf'; $configSelected = [bool]$All
     foreach ($path in $selection) {
-      if ($configPath -ceq $path -or $configPath.StartsWith($path + '/', [StringComparison]::Ordinal)) { $configSelected = $true }
+      if ([string]::Equals($configPath, $path, [StringComparison]::Ordinal) -or $configPath.StartsWith($path + '/', [StringComparison]::Ordinal)) { $configSelected = $true }
     }
     if ($pendingStage -and $null -eq $source -and -not $configSelected) { throw 'pending attachment staging requires explicit selection of the missing project configuration' }
-    $roots = @($project.Root, $project.Domains.public.GitDir, $project.Domains.public.CommonDir, $project.Domains.private.GitDir) | Select-Object -Unique
+    $roots = @([System.Linq.Enumerable]::Distinct([string[]]@($project.Root, $project.Domains.public.GitDir, $project.Domains.public.CommonDir, $project.Domains.private.GitDir), [StringComparer]::Ordinal))
     # Working files use a separate owner: releasing mutable index-read leases
     # must not release the captured config or selected public/private file pins.
     $workingReads = & $commands['Open-CrgPairedOperationReads'] -Runtime $runtime -OperationLock $Operation.OperationLock -ProjectRoots $roots -ExecutableReads @($Operation.GitExecutableOwner)
@@ -131,7 +132,7 @@ function Invoke-CrgPairedStage {
       $candidate = & $workingReads.Runtime.ReadFile -Path (Join-Path $project.Root $configPath) -Maximum 65536
       $candidateBytes = [byte[]]$candidate.Bytes.Clone()
     } else {
-      $entry = @($privateInventory | Where-Object { $_.Path -ceq $configPath })
+      $entry = @($privateInventory | Where-Object { [string]::Equals($_.Path, $configPath, [StringComparison]::Ordinal) })
       if ($entry.Count -ne 1 -or $entry[0].Mode -cnotin @('100644', '100755')) { throw 'unselected project configuration must be an existing regular private index entry' }
       $candidateBytes = & $commands['Read-CrgCentralBlobBytes'] -ProjectContext $project -Domain private -BlobOid $entry[0].Oid -Maximum 65536
     }
@@ -154,7 +155,7 @@ function Invoke-CrgPairedStage {
       ignored = (& $commands['Get-CrgPairedGitStageInventory'] @common -Domain public -Kind Ignored -Paths @($privateSelectors | ForEach-Object { $_ })).Value
     }
     $allPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $tracked = @{ public = @{}; private = @{} }
+    $tracked = @{ public = [System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase); private = [System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase) }
     $publicUntracked = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($name in @('public', 'private', 'untracked', 'ignored')) {
       foreach ($entry in $inventories[$name]) {
@@ -167,7 +168,7 @@ function Invoke-CrgPairedStage {
       else { & $commands['Read-CrgGitTreeBytes'] -Bytes $source.PrivateTreeBytes -ObjectFormat $project.Domains.private.ObjectFormat }
     foreach ($entry in $oldPrivate) { if ($entry.Mode -cne '040000') { $null = $allPaths.Add($entry.Path) } }
     $ownership = & $commands['Get-CrgPathOwnership'] -GoverningConfigBytes $source.ConfigBytes -CandidateConfigBytes $candidateBytes -Paths @($allPaths | ForEach-Object { $_ })
-    $owners = @{}; foreach ($entry in $ownership) { $owners.Add($entry.Path, $entry.Ownership) }
+    $owners = [System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase); foreach ($entry in $ownership) { $owners.Add($entry.Path, $entry.Ownership) }
     foreach ($entry in @($oldPrivate) + @($inventories.private)) {
       if ($entry.Mode -cne '040000' -and $owners[$entry.Path] -cne 'private') { throw "existing private tracked path '$($entry.Path)' requires explicit configuration mapping" }
     }
@@ -179,7 +180,7 @@ function Invoke-CrgPairedStage {
       # Such public children still require ordinary public ignore eligibility.
       if ($entry.Ownership -ceq 'public' -and -not $tracked.public.ContainsKey($entry.Path) -and -not $publicUntracked.Contains($entry.Path)) { continue }
       $include = [bool]$All
-      foreach ($path in $selection) { if ($entry.Path -ceq $path -or $entry.Path.StartsWith($path + '/', [StringComparison]::Ordinal)) { $include = $true; $null = $selected.Add($path) } }
+      foreach ($path in $selection) { if ([string]::Equals($entry.Path, $path, [StringComparison]::Ordinal) -or $entry.Path.StartsWith($path + '/', [StringComparison]::Ordinal)) { $include = $true; $null = $selected.Add($path) } }
       if (-not $include) { continue }
       if ($pendingStage -and $entry.Ownership -cne 'private') { throw "pending attachment staging requires private ownership for selected path '$($entry.Path)'" }
       $hidden = $false

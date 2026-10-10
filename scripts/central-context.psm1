@@ -3,7 +3,7 @@ function Invoke-CrgStatusGit {
   param([string[]]$Arguments, [int]$Maximum = 65536, [string]$GitExe, [string]$IndexPath, [string]$HistoryControlPath,
     [AllowNull()][AllowEmptyCollection()][byte[]]$InputBytes)
   $git = $GitExe
-  if ([string]::IsNullOrEmpty($git)) { $git = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source }
+  if ([string]::IsNullOrEmpty($git)) { $git = Get-CrgCentralGitExecutable }
   $quoted = foreach ($argument in $Arguments) {
     if ($null -eq $argument -or $argument.Contains([char]0)) { throw 'status Git argument is invalid' }
     $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
@@ -95,7 +95,7 @@ function Get-CrgStatusBlob {
     $header = [Text.Encoding]::ASCII.GetBytes("blob $($bytes.Length)" + [char]0)
     $null = $hash.TransformBlock($header, 0, $header.Length, $header, 0)
     $null = $hash.TransformFinalBlock($bytes, 0, $bytes.Length)
-    if (([BitConverter]::ToString($hash.Hash) -replace '-', '').ToLowerInvariant() -cne $oid) { throw 'status blob failed independent Git object verification' }
+    if (-not [string]::Equals(([BitConverter]::ToString($hash.Hash) -replace '-', '').ToLowerInvariant(), $oid, [StringComparison]::Ordinal)) { throw 'status blob failed independent Git object verification' }
   } finally { $hash.Dispose() }
   return ,([byte[]]$bytes)
 }
@@ -122,7 +122,8 @@ function Get-CrgCentralProjectStatus {
   Assert-CrgPrivateStorageLocation -PublicRoot $root -PublicGitDir $gitDir -PublicCommonDir $commonDir -PrivateGitDir $attachment.PrivateGitDir
   if (-not [string]::Equals($attachment.RuntimeStore, $Context.Store, [StringComparison]::OrdinalIgnoreCase)) { throw 'attachment selects another central store' }
   $publicRef = Get-CrgStatusGitLine -Arguments ($publicGit + @('symbolic-ref', '-q', 'HEAD')) -GitExe $GitExe
-  if ($publicRef -cne $attachment.PublicRef) { throw 'public branch differs from the recorded private association' }
+  # Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
+  if (-not [string]::Equals($publicRef, $attachment.PublicRef, [StringComparison]::Ordinal)) { throw 'public branch differs from the recorded private association' }
   $privateGit = @('-C', $root, "--git-dir=$($attachment.PrivateGitDir)", "--work-tree=$root")
   $privateCommon = (Get-CrgStatusGitLine -Arguments ($privateGit + @('rev-parse', '--path-format=absolute', '--git-common-dir')) -GitExe $GitExe).Replace('/', '\')
   if (-not [string]::Equals($privateCommon, $attachment.PrivateGitDir, [StringComparison]::OrdinalIgnoreCase) -or
@@ -159,7 +160,7 @@ function Invoke-CrgCentralOperation {
   param([Parameter(Mandatory = $true)][string]$TargetRepo,
     [Parameter(Mandatory = $true)][object]$Operation,
     [Parameter(Mandatory = $true)][object]$Context)
-  if ($null -eq $Operation -or $Operation.Name -cnotin @('Open', 'Status', 'Stage', 'Commit', 'Resume', 'Attach', 'PushCheck')) { throw 'central operation is invalid' }
+  if ($null -eq $Operation -or -not [System.Linq.Enumerable]::Contains([string[]]@('Open', 'Status', 'Stage', 'Commit', 'Resume', 'Attach', 'PushCheck'), [string]$Operation.Name, [System.StringComparer]::Ordinal)) { throw 'central operation is invalid' }
   if ($Operation.Name -ceq 'Status') { return Get-CrgCentralProjectStatus -TargetRepo $TargetRepo -Context $Context }
   if ($Operation.Name -ceq 'Resume' -and $null -eq $Context.PSObject.Properties['ResumeHandoffSha256']) {
     # Select the recorded approved release before importing any live native
@@ -181,12 +182,12 @@ function Invoke-CrgCentralOperation {
       finally { $sha.Dispose() }
     } finally { $pending.Stream.Dispose() }
     $selected = $Context
-    if ($id -cne $Context.Id) {
+    if (-not [string]::Equals($id, $Context.Id, [StringComparison]::Ordinal)) {
       if ($Context.RetainRelease -isnot [scriptblock]) { throw 'Resume cannot retain the transaction runtime' }
       $selected = & $Context.RetainRelease -Id $id
     }
     $selected | Add-Member -NotePropertyName ResumeHandoffSha256 -NotePropertyValue $handoffDigest
-    if ($selected.Id -cne $Context.Id) {
+    if (-not [string]::Equals($selected.Id, $Context.Id, [StringComparison]::Ordinal)) {
       $module = Import-Module -Name $selected.Payloads['scripts/central-context.psm1'].Path -Force -Global -PassThru -ErrorAction Stop
       return & $module { param($Root, $Request, $Runtime) Invoke-CrgCentralOperation -TargetRepo $Root -Operation $Request -Context $Runtime } $TargetRepo $Operation $selected
     }
@@ -250,30 +251,29 @@ function Enter-CrgCentralPushEnvironment {
   if ([string]::IsNullOrWhiteSpace($TargetRepo)) { throw 'pre-push requires an explicit public root' }
   $TargetRepo = $TargetRepo.Replace('/', '\')
   Assert-CrgContextAbsolutePath -Path $TargetRepo
-  $gitExe = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
+  $gitExe = Get-CrgCentralGitExecutable
   $prefix = @('-C', $TargetRepo)
   $root = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--show-toplevel')) -GitExe $gitExe).Replace('/', '\')
   if (-not [string]::Equals($root, $TargetRepo, [StringComparison]::OrdinalIgnoreCase)) { throw 'pre-push selector normalization requires the actual explicit public root' }
-  $expected = @{
-    GIT_DIR = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--absolute-git-dir')) -GitExe $gitExe).Replace('/', '\')
-    GIT_COMMON_DIR = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--path-format=absolute', '--git-common-dir')) -GitExe $gitExe).Replace('/', '\')
-    GIT_WORK_TREE = $root
-    GIT_EXEC_PATH = (Get-CrgStatusGitLine -Arguments @('--exec-path') -GitExe $gitExe).Replace('/', '\')
-  }
-  $expected.GIT_INDEX_FILE = Join-Path $expected.GIT_DIR 'index'
+  $expected = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+  $expected['GIT_DIR'] = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--absolute-git-dir')) -GitExe $gitExe).Replace('/', '\')
+  $expected['GIT_COMMON_DIR'] = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--path-format=absolute', '--git-common-dir')) -GitExe $gitExe).Replace('/', '\')
+  $expected['GIT_WORK_TREE'] = $root
+  $expected['GIT_EXEC_PATH'] = (Get-CrgStatusGitLine -Arguments @('--exec-path') -GitExe $gitExe).Replace('/', '\')
+  $expected['GIT_INDEX_FILE'] = Join-Path $expected['GIT_DIR'] 'index'
   $session = @(Get-Command Invoke-CrgPairedReviewSession -Module paired-review-session -CommandType Function -ListImported -ErrorAction Stop)
-  if ($session.Count -ne 1 -or $session[0].Module.Path -cne $Context.Payloads['scripts/paired-review-session.psm1'].Path) { throw 'pre-push requires the retained raw environment reader' }
+  if ($session.Count -ne 1 -or -not [string]::Equals($session[0].Module.Path, $Context.Payloads['scripts/paired-review-session.psm1'].Path, [StringComparison]::Ordinal)) { throw 'pre-push requires the retained raw environment reader' }
   $raw = & $session[0].Module { $null = Get-CrgPairedSessionEnvironment; return ,([CrgPairedSession.EnvironmentV1]::Capture()) }
   $saved = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
   foreach ($entry in $raw) {
     if ([string]::IsNullOrEmpty($entry)) { throw 'pre-push environment entry is empty' }
-    $separator = if ($entry[0] -ceq '=') { $entry.IndexOf('=', 1) } else { $entry.IndexOf('=') }
+    $separator = if ($entry.StartsWith('=', [StringComparison]::Ordinal)) { $entry.IndexOf([char]'=', 1) } else { $entry.IndexOf([char]'=') }
     if ($separator -le 0) { throw 'pre-push environment entry has invalid grammar' }
     $name = $entry.Substring(0, $separator); $value = $entry.Substring($separator + 1)
-    if (-not $expected.ContainsKey($name) -and $name -ine 'GIT_PREFIX') { continue }
+    if (-not $expected.ContainsKey($name) -and -not [string]::Equals($name, 'GIT_PREFIX', [StringComparison]::OrdinalIgnoreCase)) { continue }
     if ($saved.ContainsKey($name)) { throw 'pre-push environment has duplicate repository selectors' }
-    if ($name -ieq 'GIT_PREFIX') {
-      if ($value -cne '') { throw 'pre-push Git prefix is not the public root' }
+    if ([string]::Equals($name, 'GIT_PREFIX', [StringComparison]::OrdinalIgnoreCase)) {
+      if ($value.Length -ne 0) { throw 'pre-push Git prefix is not the public root' }
     } else {
       if ([string]::IsNullOrWhiteSpace($value) -or $value -match '[\x00-\x1f\x7f]') { throw "pre-push selector '$name' is invalid" }
       $path = $value.Replace('/', '\')
@@ -302,9 +302,9 @@ function Import-CrgCentralOperationModules {
       'first-attachment-context', 'first-attachment-preparation', 'central-guards',
       'central-attachment', 'central-instructions', 'central-publication', 'central-recovery')) {
     $relative = 'scripts/' + $name + '.psm1'
-    if ($Context.Payloads -isnot [Collections.IDictionary] -or $relative -cnotin @($Context.Payloads.Keys)) { throw "central operation requires release payload '$relative'" }
+    if ($Context.Payloads -isnot [Collections.IDictionary] -or -not [System.Linq.Enumerable]::Contains([string[]]@($Context.Payloads.Keys), [string]$relative, [System.StringComparer]::Ordinal)) { throw "central operation requires release payload '$relative'" }
     $payload = $Context.Payloads[$relative]
-    if ($payload.Bytes -isnot [byte[]] -or $payload.Path -cne (Join-Path $Context.Root $relative.Replace('/', '\'))) { throw 'central module path differs from the retained release' }
+    if ($payload.Bytes -isnot [byte[]] -or -not [string]::Equals($payload.Path, (Join-Path $Context.Root $relative.Replace('/', '\')), [StringComparison]::Ordinal)) { throw 'central module path differs from the retained release' }
     Import-Module -Name $payload.Path -Force -Global -ErrorAction Stop
   }
 }
@@ -316,7 +316,7 @@ function Get-CrgCentralOpenState {
   $template = $runtime.Payloads['scripts/codex/review-prompt-template.md'].Bytes
   $bytes = New-CrgProjectPreparationBytes -Kind governing -RuntimeSha256 $runtime.Id -ConfigBytes $source.ConfigBytes -ValuesBytes $source.ValuesBytes -ModePresent $source.ModePresent -ModeBytes $source.ModeBytes -TemplateBytes $template
   $prepared = Read-CrgProjectPreparationBytes -Bytes $bytes -ExpectedKind governing -ExpectedRuntimeSha256 $runtime.Id -TemplateBytes $template
-  $mode = if ($prepared.ModeState -ceq 'valid') { $prepared.Mode.Mode } else { 'shipped' }
+  $mode = if ([string]::Equals($prepared.ModeState, 'valid', [StringComparison]::Ordinal)) { $prepared.Mode.Mode } else { 'shipped' }
   $discovery = Sync-CrgCentralInstructions -Operation $Operation
   Assert-CrgPairedOperationReads -Owner $Operation.ReadOwner
   return [pscustomobject]@{ Status = 'open'; Root = $project.Root; Runtime = $runtime.Id
@@ -329,6 +329,16 @@ function Assert-CrgContextAbsolutePath {
   param([string]$Path)
   if ($Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Contains('/') -or $Path -match '[\x00-\x1f\x7f]' -or
       -not [string]::Equals([IO.Path]::GetFullPath($Path), $Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'captured Git path must be canonical and local' }
+}
+
+# Git for Windows puts its exec directory first on PATH, in forward-slash form,
+# for every program it starts, hooks included; a PATH lookup there returns
+# 'C:/Program Files/Git/mingw64/libexec/git-core\git.exe'. Only that spelling
+# is converted; the strict canonical check still decides.
+function Get-CrgCentralGitExecutable {
+  $path = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source.Replace('/', '\')
+  Assert-CrgContextAbsolutePath -Path $path
+  return $path
 }
 
 function Assert-CrgContextIndirection {
@@ -354,7 +364,7 @@ function Assert-CrgCentralGitState {
   if ($null -eq $head -or $head.Present -isnot [bool] -or -not $head.Present -or $head.Bytes -isnot [byte[]]) { throw 'central Git state requires the retained public HEAD' }
   $headText = [Text.UTF8Encoding]::new($false, $true).GetString($head.Bytes)
   if ($headText -cnotmatch '\Aref: ([^\r\n]+)\r?\n?\z') { throw 'central public HEAD must be an exact symbolic ref' }
-  if ($Matches[1] -cne $PublicRef) { throw 'central public HEAD differs from the captured branch association' }
+  if (-not [string]::Equals($Matches[1], $PublicRef, [StringComparison]::Ordinal)) { throw 'central public HEAD differs from the captured branch association' }
   foreach ($directory in @($PublicGitDir, $PrivateGitDir)) {
     foreach ($leaf in @('MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer')) {
       $record = & $Context.ReadFile -Path (Join-Path $directory $leaf) -Maximum 65536 -AllowAbsent
@@ -367,8 +377,7 @@ function Get-CrgCentralProjectContext {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$TargetRepo, [Parameter(Mandatory = $true)][object]$Context)
   if ($null -eq $Context -or $Context.ReadFile -isnot [scriptblock]) { throw 'Git capture requires the live retained launcher context' }
-  $gitExe = @(Get-Command git.exe -CommandType Application -ErrorAction Stop)[0].Source
-  Assert-CrgContextAbsolutePath -Path $gitExe
+  $gitExe = Get-CrgCentralGitExecutable
   $null = & $Context.ReadFile -Path $gitExe -Maximum 16777216
   $status = Get-CrgCentralProjectStatus -TargetRepo $TargetRepo -Context $Context -GitExe $gitExe
   if ($status.Attachment -ceq 'absent') { throw 'paired Git capture requires an existing validated attachment' }
@@ -392,15 +401,15 @@ function Get-CrgCentralProjectContext {
     foreach ($path in @($directory, $common, $index)) { Assert-CrgContextAbsolutePath -Path $path }
     $prefix = @("--git-dir=$directory", "--work-tree=$($status.PublicRoot)")
     $format = Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--show-object-format')) -GitExe $gitExe
-    if ($format -cnotin @('sha1', 'sha256')) { throw 'captured Git object format is unsupported' }
-    $width = if ($format -ceq 'sha1') { 40 } else { 64 }
+    if (-not ([string]::Equals($format, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($format, 'sha256', [StringComparison]::Ordinal))) { throw 'captured Git object format is unsupported' }
+    $width = if ([string]::Equals($format, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
     if ($parent -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $parent -match '\A0+\z') { throw 'captured parent has the wrong domain object format' }
     $actualCommon = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--path-format=absolute', '--git-common-dir')) -GitExe $gitExe).Replace('/', '\')
     $objects = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--path-format=absolute', '--git-path', 'objects')) -GitExe $gitExe).Replace('/', '\')
     if (-not [string]::Equals($actualCommon, $common, [StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals($objects, (Join-Path $common 'objects'), [StringComparison]::OrdinalIgnoreCase)) { throw 'captured common/object directory differs from the explicit domain' }
     $actualParent = Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--verify', "$branch^{commit}")) -GitExe $gitExe
-    if ($actualParent -cne $parent) { throw 'paired branch changed during read-only context capture' }
+    if (-not [string]::Equals($actualParent, $parent, [StringComparison]::Ordinal)) { throw 'paired branch changed during read-only context capture' }
     $tree = Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--verify', "$parent^{tree}")) -GitExe $gitExe
     if ($tree -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $tree -match '\A0+\z') { throw 'captured parent tree identity is invalid' }
     $domains[$name] = [pscustomobject]@{ GitDir = $directory; CommonDir = $common; ObjectDir = $objects; IndexPath = $index; Ref = $branch; Parent = $parent; ParentTree = $tree; ObjectFormat = $format }
@@ -411,11 +420,12 @@ function Get-CrgCentralProjectContext {
 function Get-CrgContextObjectArguments {
   param([object]$ProjectContext, [string]$Domain, [string]$Oid)
   if ($null -eq $ProjectContext -or $ProjectContext.Schema -ne 1 -or $ProjectContext.Domains -isnot [System.Collections.IDictionary] -or
-      $Domain -cnotin @('public', 'private') -or -not $ProjectContext.Domains.Contains($Domain)) { throw 'captured Git domain is invalid' }
+      -not ([string]::Equals($Domain, 'public', [StringComparison]::Ordinal) -or [string]::Equals($Domain, 'private', [StringComparison]::Ordinal)) -or
+      -not $ProjectContext.Domains.Contains($Domain)) { throw 'captured Git domain is invalid' }
   $selected = $ProjectContext.Domains[$Domain]
   foreach ($path in @($ProjectContext.GitExe, $ProjectContext.Root, $selected.GitDir)) { Assert-CrgContextAbsolutePath -Path $path }
-  if ($selected.ObjectFormat -cnotin @('sha1', 'sha256')) { throw 'captured object format is invalid' }
-  $width = if ($selected.ObjectFormat -ceq 'sha1') { 40 } else { 64 }
+  if (-not ([string]::Equals($selected.ObjectFormat, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($selected.ObjectFormat, 'sha256', [StringComparison]::Ordinal))) { throw 'captured object format is invalid' }
+  $width = if ([string]::Equals($selected.ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
   if ($Oid -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $Oid -match '\A0+\z') { throw 'requested object identity is not canonical for the selected domain' }
   # Reconstruct switches from checked fields, never execute a supplied argv list.
   return ,([string[]]@("--git-dir=$($selected.GitDir)", "--work-tree=$($ProjectContext.Root)"))
@@ -468,7 +478,7 @@ function Wait-CrgCentralBatchTask {
 function Read-CrgCentralObjectBatch {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Requests,
     [Parameter(Mandatory = $true)][long]$MaximumAggregate,
     [switch]$ValidationOnly)
@@ -486,12 +496,13 @@ function Read-CrgCentralObjectBatch {
     }
     $oid = $request.Oid; $type = $request.Type; $maximum = $request.Maximum
     if ($oid -isnot [string] -or $type -isnot [string] -or $maximum -isnot [int] -or
-        $type -cnotin @('blob', 'tree', 'commit') -or $maximum -lt 0) { throw 'batch object request has an invalid type or bound' }
+        -not ([string]::Equals($type, 'blob', [StringComparison]::Ordinal) -or [string]::Equals($type, 'tree', [StringComparison]::Ordinal) -or [string]::Equals($type, 'commit', [StringComparison]::Ordinal)) -or
+        $maximum -lt 0) { throw 'batch object request has an invalid type or bound' }
     $arguments = Get-CrgContextObjectArguments -ProjectContext $ProjectContext -Domain $Domain -Oid $oid
     if ($null -eq $prefix) { $prefix = $arguments }
     if ($specifications.ContainsKey($oid)) {
       $prior = $specifications[$oid]
-      if ($prior.Type -cne $type) { throw 'batch object identity has conflicting expected types' }
+      if (-not [string]::Equals($prior.Type, $type, [StringComparison]::Ordinal)) { throw 'batch object identity has conflicting expected types' }
       if ($maximum -lt $prior.Maximum) { $prior.Maximum = $maximum }
       continue
     }
@@ -528,7 +539,7 @@ function Read-CrgCentralObjectBatch {
     $errorRead = $process.StandardError.ReadToEndAsync()
     $state = [pscustomobject]@{ Stream = $process.StandardOutput.BaseStream; Buffer = (New-Object byte[] 65536); Offset = 0; Count = 0 }
     [long]$aggregate = 0
-    $width = if ($ProjectContext.Domains[$Domain].ObjectFormat -ceq 'sha1') { 40 } else { 64 }
+    $width = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
     foreach ($specification in $ordered) {
       $deadline = [DateTime]::UtcNow.AddSeconds(10)
       $query = [Text.Encoding]::ASCII.GetBytes($specification.Oid + "`n")
@@ -555,12 +566,12 @@ function Read-CrgCentralObjectBatch {
       $bytes = New-Object byte[] ([int]$size)
       Read-CrgCentralBatchStreamBytes -State $state -Destination $bytes -Deadline $deadline
       if ((Read-CrgCentralBatchStreamByte -State $state -Deadline $deadline) -ne 10) { throw 'batch object contents lack the required record terminator' }
-      $hash = if ($ProjectContext.Domains[$Domain].ObjectFormat -ceq 'sha1') { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
+      $hash = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
       try {
         $objectHeader = [Text.Encoding]::ASCII.GetBytes($actualType + ' ' + $size.ToString([Globalization.CultureInfo]::InvariantCulture) + [char]0)
         $null = $hash.TransformBlock($objectHeader, 0, $objectHeader.Length, $null, 0)
         $null = $hash.TransformFinalBlock($bytes, 0, $bytes.Length)
-        if (([BitConverter]::ToString($hash.Hash)).Replace('-', '').ToLowerInvariant() -cne $actualOid) { throw 'batch object failed independent raw identity verification' }
+        if (-not [string]::Equals(([BitConverter]::ToString($hash.Hash)).Replace('-', '').ToLowerInvariant(), $actualOid, [StringComparison]::Ordinal)) { throw 'batch object failed independent raw identity verification' }
       } finally { $hash.Dispose() }
       if ($ValidationOnly) { $bytes = $null }
       else { $objects.Add($actualOid, $bytes) }
@@ -588,10 +599,10 @@ function Read-CrgCentralObjectBatch {
 function Read-CrgCentralTreeBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][string]$TreeOid)
   $prefix = Get-CrgContextObjectArguments -ProjectContext $ProjectContext -Domain $Domain -Oid $TreeOid
-  if ((Get-CrgStatusGitLine -Arguments ($prefix + @('cat-file', '-t', $TreeOid)) -GitExe $ProjectContext.GitExe) -cne 'tree') { throw 'requested tree identity is not a Git tree' }
+  if (-not [string]::Equals((Get-CrgStatusGitLine -Arguments ($prefix + @('cat-file', '-t', $TreeOid)) -GitExe $ProjectContext.GitExe), 'tree', [StringComparison]::Ordinal)) { throw 'requested tree identity is not a Git tree' }
   $commands = @(Get-Command -Name Read-CrgGitTreeBytes -Module paired-tree -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($commands.Count -ne 1) { throw 'tree capture requires the already imported retained paired-tree reader' }
   $bytes = Invoke-CrgStatusGit -Arguments ($prefix + @('ls-tree', '--full-tree', '-r', '-t', '-z', $TreeOid)) -Maximum 16777216 -GitExe $ProjectContext.GitExe
@@ -602,7 +613,7 @@ function Read-CrgCentralTreeBytes {
 function Read-CrgCentralBlobBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][string]$BlobOid,
     [Parameter(Mandatory = $true)][ValidateRange(0, 2147483647)][int]$Maximum)
   $objects = Read-CrgCentralObjectBatch -ProjectContext $ProjectContext -Domain $Domain `
@@ -637,12 +648,13 @@ function Read-CrgCentralPreparationSource {
     @{ Name = 'Values'; Path = 'CROSS-REVIEW-VALUES.md'; Maximum = 262144; Optional = $false },
     @{ Name = 'Mode'; Path = 'PROJECT-MODE.md'; Maximum = 16777216; Optional = $true }
   )) {
-    $matches = @($entries.private | Where-Object { $_.Path -ceq $item.Path })
+    $matches = @($entries.private | Where-Object { [string]::Equals($_.Path, $item.Path, [StringComparison]::Ordinal) })
     if ($matches.Count -eq 0 -and $item.Optional) {
       $sources[$item.Name] = [pscustomobject]@{ Present = $false; Bytes = [byte[]]@(); Entry = $null }
       continue
     }
-    if ($matches.Count -ne 1 -or $matches[0].Mode -cnotin @('100644', '100755') -or $matches[0].Type -cne 'blob') { throw "private preparation source '$($item.Path)' must be a regular blob" }
+    if ($matches.Count -ne 1 -or -not ([string]::Equals($matches[0].Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($matches[0].Mode, '100755', [StringComparison]::Ordinal)) -or
+        -not [string]::Equals($matches[0].Type, 'blob', [StringComparison]::Ordinal)) { throw "private preparation source '$($item.Path)' must be a regular blob" }
     $bytes = Read-CrgCentralBlobBytes -ProjectContext $ProjectContext -Domain private -BlobOid $matches[0].Oid -Maximum $item.Maximum
     $sources[$item.Name] = [pscustomobject]@{ Present = $true; Bytes = $bytes; Entry = $matches[0] }
   }
@@ -651,8 +663,9 @@ function Read-CrgCentralPreparationSource {
   foreach ($role in $config.Roles) {
     $bindings = @()
     foreach ($domain in @('public', 'private')) {
-      foreach ($entry in @($entries[$domain] | Where-Object { $_.Path -ceq $role.Path })) {
-        if ($entry.Mode -cnotin @('100644', '100755') -or $entry.Type -cne 'blob') { throw "document role '$($role.Path)' is not a regular blob" }
+      foreach ($entry in @($entries[$domain] | Where-Object { [string]::Equals($_.Path, $role.Path, [StringComparison]::Ordinal) })) {
+        if (-not ([string]::Equals($entry.Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($entry.Mode, '100755', [StringComparison]::Ordinal)) -or
+            -not [string]::Equals($entry.Type, 'blob', [StringComparison]::Ordinal)) { throw "document role '$($role.Path)' is not a regular blob" }
         $bindings += [pscustomobject]@{ Domain = $domain; Path = $entry.Path; Mode = $entry.Mode; Oid = $entry.Oid }
       }
     }
@@ -674,11 +687,11 @@ function Read-CrgCentralPreparationSource {
 function Get-CrgCentralIndexTree {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain)
   $prefix = Get-CrgContextObjectArguments -ProjectContext $ProjectContext -Domain $Domain -Oid $ProjectContext.Domains[$Domain].ParentTree
   if ($ProjectContext.Runtime.ReadFile -isnot [scriptblock]) { throw 'index capture requires the live retained launcher callback' }
   $selected = $ProjectContext.Domains[$Domain]
-  $indexName = if ($Domain -ceq 'public') { 'index' } else { 'crg-private-index' }
+  $indexName = if ([string]::Equals($Domain, 'public', [StringComparison]::Ordinal)) { 'index' } else { 'crg-private-index' }
   $expectedIndex = Join-Path $ProjectContext.Domains.public.GitDir $indexName
   Assert-CrgContextAbsolutePath -Path $expectedIndex
   if (-not [string]::Equals($selected.IndexPath, $expectedIndex, [StringComparison]::OrdinalIgnoreCase)) { throw 'index path differs from the captured public-worktree association' }
@@ -688,12 +701,12 @@ function Get-CrgCentralIndexTree {
   $sharedBytes = Invoke-CrgStatusGit -Arguments ($arguments + @('rev-parse', '--path-format=absolute', '--shared-index-path')) -Maximum 16384 -GitExe $ProjectContext.GitExe -IndexPath $expectedIndex
   $sharedText = [Text.UTF8Encoding]::new($false, $true).GetString($sharedBytes)
   $shared = $null; $sharedPath = ''
-  if ($sharedText.Length -gt 0 -and $sharedText -cnotin @("`n", "`r`n")) {
+  if ($sharedText.Length -gt 0 -and -not ([string]::Equals($sharedText, "`n", [StringComparison]::Ordinal) -or [string]::Equals($sharedText, "`r`n", [StringComparison]::Ordinal))) {
     if ($sharedText -cnotmatch '\A[^\r\n]+\r?\n?\z') { throw 'split-index path capture did not return one complete line' }
     $sharedPath = $sharedText.TrimEnd([char[]]@(13, 10)).Replace('/', '\')
     Assert-CrgContextAbsolutePath -Path $sharedPath
     $sharedParent = [IO.Path]::GetDirectoryName($sharedPath)
-    $width = if ($selected.ObjectFormat -ceq 'sha1') { 40 } else { 64 }
+    $width = if ([string]::Equals($selected.ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
     if ([IO.Path]::GetFileName($sharedPath) -cnotmatch ('\Asharedindex\.[0-9a-f]{' + $width + '}\z') -or
         (-not [string]::Equals($sharedParent, $selected.GitDir, [StringComparison]::OrdinalIgnoreCase) -and
          -not [string]::Equals($sharedParent, $selected.CommonDir, [StringComparison]::OrdinalIgnoreCase))) { throw 'split-index backing path is outside the captured domain namespace' }
@@ -714,7 +727,7 @@ function Get-CrgCentralIndexTree {
     $copyArguments = $arguments + @('-c', "core.hooksPath=$($copy.HooksPath)", '-c', 'splitIndex.maxPercentChange=100')
     $copySharedBytes = Invoke-CrgStatusGit -Arguments ($copyArguments + @('rev-parse', '--path-format=absolute', '--shared-index-path')) -Maximum 16384 -GitExe $ProjectContext.GitExe -IndexPath $copy.IndexPath
     $copySharedText = [Text.UTF8Encoding]::new($false, $true).GetString($copySharedBytes).TrimEnd([char[]]@(13, 10)).Replace('/', '\')
-    if ($copySharedText -cne $sharedPath) { throw 'copied index resolves a different split-index backing path' }
+    if (-not [string]::Equals($copySharedText, $sharedPath, [StringComparison]::Ordinal)) { throw 'copied index resolves a different split-index backing path' }
     $tree = Get-CrgStatusGitLine -Arguments ($copyArguments + @('write-tree')) -GitExe $ProjectContext.GitExe -IndexPath $copy.IndexPath
   } finally {
     $closed = & $closeCopy[0] -Copy $copy
@@ -736,13 +749,13 @@ function Get-CrgCentralIndexTree {
 function Read-CrgCentralCommitLogBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
-    [Parameter(Mandatory = $true)][ValidateSet('public', 'private')][string]$Domain)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain)
   $getHistoryBounds = @(Get-Command -Name Get-CrgPreparedHistoryBounds -Module paired-review-input -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($getHistoryBounds.Count -ne 1) { throw 'history capture requires the retained prepared-input history bounds' }
   $bounds = & $getHistoryBounds[0]
   $parent = $ProjectContext.Domains[$Domain].Parent
   $prefix = Get-CrgContextObjectArguments -ProjectContext $ProjectContext -Domain $Domain -Oid $parent
-  if ((Get-CrgStatusGitLine -Arguments ($prefix + @('cat-file', '-t', $parent)) -GitExe $ProjectContext.GitExe) -cne 'commit') { throw 'history capture parent is not a commit object' }
+  if (-not [string]::Equals((Get-CrgStatusGitLine -Arguments ($prefix + @('cat-file', '-t', $parent)) -GitExe $ProjectContext.GitExe), 'commit', [StringComparison]::Ordinal)) { throw 'history capture parent is not a commit object' }
   # Message bytes cannot delimit history records. Capture object identities
   # separately, then length-frame raw objects without pretty-format recoding.
   $newControl = @(Get-Command -Name New-CrgPairedIndexCopy -Module paired-diff -CommandType Function -ListImported -ErrorAction SilentlyContinue)
@@ -755,7 +768,7 @@ function Read-CrgCentralCommitLogBytes {
   $output = New-Object IO.MemoryStream
   try {
     $ids = Invoke-CrgStatusGit -Arguments ($prefix + @('rev-list', ('--max-count=' + $bounds.DomainCommitCount), $parent, '--')) -Maximum 1024 -GitExe $ProjectContext.GitExe -HistoryControlPath $control.IndexPath
-    $width = if ($ProjectContext.Domains[$Domain].ObjectFormat -ceq 'sha1') { 40 } else { 64 }
+    $width = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
     $text = [Text.Encoding]::ASCII.GetString($ids)
     if ($text -cnotmatch ('\A(?:[0-9a-f]{' + $width + '}\n){1,' + $bounds.DomainCommitCount + '}\z')) { throw 'history capture did not return a bounded canonical commit list' }
     $shas = @($text.Substring(0, $text.Length - 1) -split "`n", 0)

@@ -1,54 +1,59 @@
-# Cross-review commit wrapper for Claude-as-implementer.
+# Cross-review commit wrapper: the one implementation for both implementers.
 #
-# Used when Claude authored the staged changes. Sets the REVIEW_BACKEND
-# env var to `codex` so the pre-commit hook routes review to the Codex
-# wrapper (cross-review). Then forwards arguments to `git commit`,
+# Run directly, this is the Claude-as-implementer entry: it sets the
+# REVIEW_BACKEND env var to `codex` so the pre-commit hook routes review to
+# the other provider (cross-review). scripts/codex/commit.ps1 invokes this
+# file with `-CrgImplementer codex` and gets REVIEW_BACKEND=claude. Keeping
+# the implementation inside an existing wrapper path, not a new shared file,
+# leaves every install inventory, recovery catalog, guard list and the legacy
+# routing-driver custody naming exactly the files they already name.
+# Then forwards arguments to `git commit`,
 # EXCEPT hook-bypass flags (`--no-verify`, `-n`, and clustered short
 # options containing `n` such as `-nF` or `-nm`) which are rejected
-# before forwarding. The wrapper exists to enforce cross-review
-# routing, so it refuses to participate in a hook-bypass path; use
-# CROSS_REVIEW_SKIP=1 (audited per your project's AGENTS.md) for the
-# documented skip case. Exits with git's exit code, or 1 on a pre-commit
-# abort before `git commit` runs: a bypass-flag rejection, an ambient Git
-# selector, a set core.hooksPath that would redirect the pre-commit dispatcher,
-# a missing/foreign/tampered default dispatcher, or a failure to prepare the
-# controlled Git environment.
+# before forwarding. The wrapper exists to enforce cross-review routing,
+# so it refuses to participate in a hook-bypass path; use CROSS_REVIEW_SKIP=1
+# (audited per your project's AGENTS.md) for the documented skip case. Exits
+# with git's exit code, or 1 on a pre-commit abort before `git commit` runs: a
+# bypass-flag rejection, a `-CrgImplementer` value other than codex, an
+# ambient Git selector, a set core.hooksPath that would redirect the
+# pre-commit dispatcher, a missing/foreign/tampered default dispatcher, or a
+# failure to prepare the controlled Git environment.
 #
-# Usage examples (run from the Claude session):
+# Usage examples (from a Claude session; a Codex session uses
+# scripts/codex/commit.ps1 the same way):
 #   scripts/claude/commit.ps1 -m "task X: short summary"
 #   scripts/claude/commit.ps1 -F .commit-msg.tmp
 #   scripts/claude/commit.ps1 --amend
 #
-# Setting REVIEW_BACKEND=codex here is REQUIRED -- the pre-commit
-# hook has NO implicit default and rejects bare `git commit` when
-# REVIEW_BACKEND is unset. The wrapper makes the implementer-vs-
-# reviewer pairing explicit and symmetric with scripts/codex/commit.ps1
-# (saved/restored so later commits in the same shell are not
-# affected). It also makes future workflow changes (e.g.,
-# REVIEW_BACKEND=both for high-stakes commits) a one-line edit in
-# the wrapper rather than every commit call site.
+# Without this wrapper, a bare `git commit` leaves REVIEW_BACKEND unset,
+# which the pre-commit hook REJECTS (no implicit default; cross-review
+# requires the committer to declare which backend reviews). The wrapper is
+# the convenience layer that makes the env-var convention hard to forget;
+# it sets the variable only inside the dedicated commit worker, so the
+# invoking shell never sees it.
 #
 # The wrapper does NOT skip the pre-commit hook -- it just selects
 # which backend reviews. CROSS_REVIEW_SKIP=1 is still the only skip path
 # (documented in scripts/git-hooks/pre-commit and your AGENTS.md).
-#
-# Symmetric counterpart for Codex-as-implementer:
-# scripts/codex/commit.ps1 (sets REVIEW_BACKEND=claude).
 
-# Save/restore the caller's REVIEW_BACKEND so the env mutation is
-# scoped to THIS `git commit` only. Symmetric with
-# scripts/codex/commit.ps1 (leaving REVIEW_BACKEND set would route
-# later bare commits to a stale backend, defeating the wrapper's
-# purpose).
 # Reject hook-bypass flags BEFORE invoking git: the wrapper's comment
-# block above promises "does NOT skip the pre-commit hook", but a
-# naive `git commit @args` pass-through would forward `--no-verify` /
-# `-n` straight to git, bypassing the hook before REVIEW_BACKEND
-# routing runs. Reject those flags explicitly so the wrapper's stated
-# contract holds against caller misuse.
-# Value-taking options for `git commit`. See scripts/codex/commit.ps1
-# for the full per-letter rationale + the optional-attached split.
-$alwaysValueShort   = @('m','F','c','C','t')
+# block above promises "does NOT skip the pre-commit hook", but a naive
+# `git commit @args` pass-through would forward `--no-verify` / `-n`
+# straight to git, bypassing the hook before REVIEW_BACKEND routing
+# runs. Reject those flags explicitly so the wrapper's stated contract
+# holds against caller misuse.
+# Short options for `git commit` that consume an attached value within
+# a cluster (everything after the letter is the value, NOT another
+# option). Split into two sets by next-argv behavior:
+#   - $alwaysValueShort: always require a value. When standalone
+#     (e.g., `-m`), the value comes from the NEXT argv element.
+#   - $optionalValueShort: accept an OPTIONAL attached value
+#     (e.g., `-Skeyid`, `-Smode`). When standalone they use a default
+#     and do NOT consume the next argv element. The attached-value form
+#     is valid and any `n` after S/u is content, not a hook bypass;
+#     the scan must stop at S/u even though no skipNext is set.
+# Case-sensitive: -S takes a value, -s (signoff) does not.
+$alwaysValueShort  = @('m','F','c','C','t')
 $optionalValueShort = @('S','u')
 $valueTakingShortOpts = $alwaysValueShort + $optionalValueShort
 
@@ -61,19 +66,22 @@ function Test-Bypass-Args {
   foreach ($a in $ArgList) {
     if ($afterDoubleDash) { continue }
     if ($skipNext) { $skipNext = $false; continue }
-    if ($a -eq '--') { $afterDoubleDash = $true; continue }
-    if ($valueTakingLongOpts -contains $a) { $skipNext = $true; continue }
-    if ($a -match '^-([a-zA-Z])$' -and ($alwaysValueShort -ccontains $matches[1])) {
+    # Ordinal compares: PS 5.1 culture rules ignore characters such as U+00AD.
+    if ([string]::Equals($a, '--', [System.StringComparison]::Ordinal)) { $afterDoubleDash = $true; continue }
+    if ([Array]::IndexOf([string[]]$valueTakingLongOpts, [string]$a) -ge 0) { $skipNext = $true; continue }
+    if ($a -match '^-([a-zA-Z])$' -and ([Array]::IndexOf([string[]]$alwaysValueShort, [string]$matches[1]) -ge 0)) {
       $skipNext = $true; continue
     }
-    if ($a -match '^--no-v') { $bypass = $true; $offending = $a; break }
+    if ($a -match '^--no-v') {
+      $bypass = $true; $offending = $a; break
+    }
     if ($a -match '^-[a-zA-Z]' -and $a -notmatch '^--') {
       $letters = $a.Substring(1).ToCharArray()
       for ($i = 0; $i -lt $letters.Length; $i++) {
         $ch = $letters[$i]
         if ($ch -ceq 'n') { $bypass = $true; $offending = $a; break }
-        if ($valueTakingShortOpts -ccontains [string]$ch) {
-          if ($i -eq $letters.Length - 1 -and $alwaysValueShort -ccontains [string]$ch) {
+        if ([Array]::IndexOf([string[]]$valueTakingShortOpts, [string]$ch) -ge 0) {
+          if ($i -eq $letters.Length - 1 -and [Array]::IndexOf([string[]]$alwaysValueShort, [string]$ch) -ge 0) {
             $skipNext = $true
           }
           break
@@ -90,17 +98,24 @@ $valueTakingLongOpts = @(
   '--reuse-message', '--reedit-message', '--fixup', '--squash',
   '--cleanup', '--pathspec-from-file', '--trailer'
 )
-# `--gpg-sign` and `--untracked-files` take OPTIONAL values only --
-# see scripts/codex/commit.ps1 for the full rationale. Both must use
-# the attached `=<value>` form, not the separate-argv form.
+# NOTE: `--gpg-sign` and `--untracked-files` are deliberately NOT in
+# the value-taking list. Both accept an OPTIONAL attached value
+# (`--gpg-sign=<keyid>`, `--untracked-files=<mode>`); when used
+# standalone they do NOT consume the next argv element. If we treated
+# them as always-value-taking, `--gpg-sign --no-verify ...` would skip
+# checking `--no-verify` and forward it to git, bypassing the hook.
+# (Historical regression on the `--gpg-sign` skip-state gap.)
+# Users who need to pin a specific gpg key should use the attached
+# form `--gpg-sign=<keyid>` which is a single argv element and does
+# not trigger skipNext anyway.
 
 # Classify the `git config --get core.hooksPath` exit status for the
 # config-redirect guard below. Exit 1 = key ABSENT (the required UNSET
-# state) -> 'proceed'; exit 0 = key SET to ANY value
-# INCLUDING an empty `core.hooksPath=` (still a configured hook-path state
-# that can redirect the dispatcher) -> 'abort-set'; anything else = git
-# error -> 'abort-indeterminate' (fail closed). Byte-identical to the copy
-# in scripts/codex/commit.ps1.
+# state) -> 'proceed';
+# exit 0 = key SET to ANY value INCLUDING an empty `core.hooksPath=` (still
+# a configured hook-path state that can redirect the dispatcher) ->
+# 'abort-set'; anything else = git error -> 'abort-indeterminate' (fail
+# closed).
 function Resolve-HooksPathGuard {
   param([int]$ExitCode)
   if ($ExitCode -eq 1) { return 'proceed' }
@@ -108,13 +123,17 @@ function Resolve-HooksPathGuard {
   return 'abort-indeterminate'
 }
 
-# PURE PATH-assembly helper for Enable-GitUnixToolPathForHook (below): given the
-# (already existence-filtered) candidate tool dirs + the current PATH string,
-# return the ordered, case-insensitively-deduped parts with the candidates
-# PREPENDED, then the current PATH's parts (skipping blanks and any already
-# contributed by a candidate). Byte-identical to the copies in
-# scripts/codex/commit.ps1, scripts/shared/auto-merge.ps1, and
-# scripts/codex/auto-review.ps1 and scripts/shared/author-lint.ps1.
+# PURE PATH assembly: given already existence-filtered candidate tool dirs and
+# the current PATH string, return the ordered, case-insensitively-deduped parts
+# with the candidates PREPENDED, then the current PATH's parts (skipping blanks
+# and any already contributed by a candidate). No filesystem access, so the
+# result depends only on its inputs.
+# This file's PATH helpers equal the shared ones in
+# scripts/review-common.ps1 but stay local on purpose: this file is a
+# review-routing driver whose executed bytes the pre-commit hook guards (a
+# dirty copy refuses, a staged edit forces review by both providers).
+# Dot-sourcing the shared file from the working tree would let bytes outside
+# that guard change this driver's behavior. Keep the copies equivalent.
 function Get-PrependedToolPathParts {
   param([string[]]$CandidateDirs, [string]$CurrentPath)
   $parts = New-Object 'System.Collections.Generic.List[string]'
@@ -168,9 +187,6 @@ function Get-ProcessPathSpellings {
 # effective lookup spelling precedes deterministic raw-only additions; reading
 # only ONE spelling would silently DROP the other's dirs. Delegates the dedup to
 # Get-PrependedToolPathParts.
-# Byte-identical to the copies in scripts/codex/commit.ps1,
-# scripts/shared/auto-merge.ps1, scripts/codex/auto-review.ps1, and
-# scripts/shared/author-lint.ps1.
 function Get-UnionProcessPathParts {
   param([string[]]$Spellings, [string[]]$CandidateDirs = @())
   $joined = (@($Spellings) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join [System.IO.Path]::PathSeparator
@@ -200,7 +216,7 @@ function Set-CanonicalProcessPathEnvironment {
   $finalKeys = @($final.Keys | Where-Object {
     [string]::Equals([string]$_, 'PATH', [System.StringComparison]::OrdinalIgnoreCase)
   })
-  if ($finalKeys.Count -ne 1 -or [string]$finalKeys[0] -cne 'Path' -or
+  if ($finalKeys.Count -ne 1 -or -not [string]::Equals([string]$finalKeys[0], 'Path', [System.StringComparison]::Ordinal) -or
       -not [string]::Equals([string]$final['Path'], $Value, [System.StringComparison]::Ordinal)) {
     throw [System.InvalidOperationException]::new("canonical Path postcondition failed (raw spelling count=$($finalKeys.Count))")
   }
@@ -235,95 +251,6 @@ function Get-CrgGitSelectorEnvironmentKeys {
     }
   }
   return $names.ToArray()
-}
-
-# A named environment lookup can hide case-variant duplicates on Windows, while
-# native Git consumes the raw block. Discover by ordinal-ignore-case comparison,
-# remove every exact spelling, then prove one canonical entry before any child
-# launch. The child-map helper covers ProcessStartInfo environments explicitly
-# instead of relying on the already-normalized parent. Kept byte-identical in
-# both commit wrappers and auto-merge.
-function Get-CrgNoReplaceObjectsEnvironmentKeys {
-  param([AllowNull()][object]$EnvEntries)
-  if ([object]::ReferenceEquals($null, $EnvEntries)) {
-    $EnvEntries = [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
-  }
-  if ([object]::ReferenceEquals($null, $EnvEntries) -or
-      $null -eq $EnvEntries.PSObject.Properties['Keys']) {
-    throw [System.InvalidOperationException]::new('raw environment enumeration is unavailable')
-  }
-  try { $rawNames = @($EnvEntries.Keys) }
-  catch { throw [System.InvalidOperationException]::new("raw environment enumeration failed: $($_.Exception.Message)") }
-  $names = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($rawName in $rawNames) {
-    $name = [string]$rawName
-    if ([string]::Equals($name, 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::OrdinalIgnoreCase)) {
-      [void]$names.Add($name)
-    }
-  }
-  return $names.ToArray()
-}
-
-function Assert-CrgNoReplaceObjectsEnvironment {
-  param([Parameter(Mandatory=$true)][object]$EnvEntries)
-  $names = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-  if ($names.Count -ne 1 -or
-      -not [string]::Equals([string]$names[0], 'GIT_NO_REPLACE_OBJECTS', [System.StringComparison]::Ordinal)) {
-    throw [System.InvalidOperationException]::new("replacement-suppression singleton postcondition failed (raw spelling count=$($names.Count))")
-  }
-  $value = $null
-  try { $value = [string]$EnvEntries[$names[0]] }
-  catch { throw [System.InvalidOperationException]::new("replacement-suppression value verification failed: $($_.Exception.Message)") }
-  if (-not [string]::Equals($value, '1', [System.StringComparison]::Ordinal)) {
-    throw [System.InvalidOperationException]::new('the canonical replacement-suppression value did not verify as exactly 1')
-  }
-}
-
-function Set-CrgNoReplaceObjectsInChildEnvironment {
-  param([Parameter(Mandatory=$true)][object]$EnvEntries)
-  if ([object]::ReferenceEquals($null, $EnvEntries)) {
-    throw [System.InvalidOperationException]::new('child environment is unavailable')
-  }
-  while ($true) {
-    $before = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-    if ($before.Count -eq 0) { break }
-    $exactName = [string]$before[0]
-    try { [void]$EnvEntries.Remove($exactName) }
-    catch { throw [System.InvalidOperationException]::new("could not remove child environment spelling '$exactName': $($_.Exception.Message)") }
-    $after = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-    if ($after.Count -ge $before.Count) {
-      throw [System.InvalidOperationException]::new("child environment removal made no progress for spelling '$exactName'")
-    }
-  }
-  $remaining = @(Get-CrgNoReplaceObjectsEnvironmentKeys -EnvEntries $EnvEntries)
-  if ($remaining.Count -ne 0) {
-    throw [System.InvalidOperationException]::new("replacement-suppression spelling(s) survived child-environment removal: $($remaining -join ', ')")
-  }
-  try { $EnvEntries.Set_Item('GIT_NO_REPLACE_OBJECTS', '1') }
-  catch { throw [System.InvalidOperationException]::new("could not install canonical child replacement suppression: $($_.Exception.Message)") }
-  Assert-CrgNoReplaceObjectsEnvironment -EnvEntries $EnvEntries
-}
-
-function Set-CrgNoReplaceObjects {
-  while ($true) {
-    $before = @(Get-CrgNoReplaceObjectsEnvironmentKeys)
-    if ($before.Count -eq 0) { break }
-    $exactName = [string]$before[0]
-    try { [Environment]::SetEnvironmentVariable($exactName, $null, [EnvironmentVariableTarget]::Process) }
-    catch { throw [System.InvalidOperationException]::new("could not remove process environment spelling '$exactName': $($_.Exception.Message)") }
-    $after = @(Get-CrgNoReplaceObjectsEnvironmentKeys)
-    if ($after.Count -ge $before.Count) {
-      throw [System.InvalidOperationException]::new("process environment removal made no progress for spelling '$exactName'")
-    }
-  }
-  $remaining = @(Get-CrgNoReplaceObjectsEnvironmentKeys)
-  if ($remaining.Count -ne 0) {
-    throw [System.InvalidOperationException]::new("replacement-suppression spelling(s) survived process-environment removal: $($remaining -join ', ')")
-  }
-  [Environment]::SetEnvironmentVariable('GIT_NO_REPLACE_OBJECTS', '1', [EnvironmentVariableTarget]::Process)
-  Assert-CrgNoReplaceObjectsEnvironment -EnvEntries (
-    [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
-  )
 }
 
 # Read and launch through the native Windows environment boundary. A managed
@@ -814,9 +741,9 @@ function ConvertFrom-CrgRawCommitEnvironmentEntry {
     throw [System.InvalidOperationException]::new('raw environment entries must be non-empty and NUL-free')
   }
   $separator = $(if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) {
-    $Entry.IndexOf('=', 1)
+    $Entry.IndexOf('=', 1, [System.StringComparison]::Ordinal)
   } else {
-    $Entry.IndexOf('=')
+    $Entry.IndexOf('=', [System.StringComparison]::Ordinal)
   })
   $minimum = $(if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) { 1 } else { 0 })
   if ($separator -le $minimum) {
@@ -873,6 +800,21 @@ function Assert-CrgRawCommitPathSingleton {
 # an explicit worker environment. This marker bounds the proxy-to-worker hop but grants no authority: a worker must also
 # prove the independent replacement-suppression singleton before any Git use.
 $script:CrgCommitWorkerMarker = 'CRG_COMMIT_WORKER_V1'
+
+# The implementer arrives as `-CrgImplementer codex` only on the first, direct
+# call. The proxy and worker relaunch this file
+# by path, so the worker learns the implementer from the first element of the
+# authenticated argument transport, never from a raw command-line argument.
+# The reviewer is always the other provider.
+$script:CrgImplementerTokenPrefix = 'CRG_COMMIT_IMPLEMENTER_V1='
+function Set-CrgCommitImplementer {
+  param([string]$Implementer)
+  if ([Array]::IndexOf([string[]]@('codex', 'claude'), [string]$Implementer) -lt 0) { throw [System.InvalidOperationException]::new("unsupported commit implementer '$Implementer'") }
+  $script:CrgImplementer = $Implementer
+  $script:CrgReviewBackend = if ([string]::Equals($Implementer, 'codex', [System.StringComparison]::Ordinal)) { 'claude' } else { 'codex' }
+  $script:CrgCommitLabel = "scripts/$Implementer/commit.ps1"
+}
+Set-CrgCommitImplementer -Implementer 'claude'
 
 function Test-CrgCommitWorkerCommandTarget {
   [string[]]$commandArguments = @([Environment]::GetCommandLineArgs())
@@ -1417,11 +1359,11 @@ function Get-CrgDefaultHookAttestation {
 if ($args.Count -ge 1 -and
     [string]::Equals([string]$args[0], $script:CrgCommitProxyArgument, [System.StringComparison]::Ordinal)) {
   if (-not (Test-CrgCommitWorkerCommandTarget)) {
-    Write-Error 'scripts/claude/commit.ps1: ABORT -- the commit environment proxy requires an exact PowerShell -File invocation of this wrapper.'
+    Write-Error ($script:CrgCommitLabel + ': ABORT -- the commit environment proxy requires an exact PowerShell -File invocation of this wrapper.')
     exit 1
   }
   if ($args.Count -ne 4) {
-    Write-Error 'scripts/claude/commit.ps1: ABORT -- the commit environment proxy mapping descriptor is malformed.'
+    Write-Error ($script:CrgCommitLabel + ': ABORT -- the commit environment proxy mapping descriptor is malformed.')
     exit 1
   }
   $proxyExitCode = 1
@@ -1433,7 +1375,7 @@ if ($args.Count -ge 1 -and
       -ExitCode ([ref]$proxyExitCode)
   }
   catch {
-    Write-Error "scripts/claude/commit.ps1: ABORT -- the commit environment proxy failed ($($_.Exception.Message))."
+    Write-Error "$($script:CrgCommitLabel): ABORT -- the commit environment proxy failed ($($_.Exception.Message))."
     exit 1
   }
   exit $proxyExitCode
@@ -1441,14 +1383,23 @@ if ($args.Count -ge 1 -and
 
 try { $crgCommitWorker = Test-CrgCommitWorkerProcess }
 catch {
-  Write-Error "scripts/claude/commit.ps1: ABORT -- commit-worker authority is invalid ($($_.Exception.Message))."
+  Write-Error "$($script:CrgCommitLabel): ABORT -- commit-worker authority is invalid ($($_.Exception.Message))."
   exit 1
 }
 if (-not $crgCommitWorker) {
+  [string[]]$crgForwardArgs = @($args)
+  if ($crgForwardArgs.Count -ge 1 -and [string]::Equals($crgForwardArgs[0], '-CrgImplementer', [System.StringComparison]::Ordinal)) {
+    if ($crgForwardArgs.Count -lt 2 -or -not [string]::Equals($crgForwardArgs[1], 'codex', [System.StringComparison]::Ordinal)) {
+      Write-Error ($script:CrgCommitLabel + ': ABORT -- -CrgImplementer accepts only codex; run scripts/claude/commit.ps1 without it for Claude.')
+      exit 1
+    }
+    Set-CrgCommitImplementer -Implementer 'codex'
+    [string[]]$crgForwardArgs = @($crgForwardArgs | Select-Object -Skip 2)
+  }
   $dedicatedCommitExit = 1
-  try { Invoke-CrgDedicatedCommitProcess -ForwardArgs $args -ExitCode ([ref]$dedicatedCommitExit) }
+  try { Invoke-CrgDedicatedCommitProcess -ForwardArgs (@($script:CrgImplementerTokenPrefix + $script:CrgImplementer) + $crgForwardArgs) -ExitCode ([ref]$dedicatedCommitExit) }
   catch {
-    Write-Error "scripts/claude/commit.ps1: ABORT -- could not establish the dedicated commit-process boundary ($($_.Exception.Message))."
+    Write-Error "$($script:CrgCommitLabel): ABORT -- could not establish the dedicated commit-process boundary ($($_.Exception.Message))."
     exit 1
   }
   exit $dedicatedCommitExit
@@ -1456,7 +1407,7 @@ if (-not $crgCommitWorker) {
 
 if ($args.Count -ne 4 -or
     -not [string]::Equals([string]$args[0], $script:CrgCommitWorkerArgument, [System.StringComparison]::Ordinal)) {
-  Write-Error 'scripts/claude/commit.ps1: ABORT -- authenticated commit-worker argument transport is missing or malformed.'
+  Write-Error ($script:CrgCommitLabel + ': ABORT -- authenticated commit-worker argument transport is missing or malformed.')
   exit 1
 }
 try {
@@ -1464,22 +1415,27 @@ try {
     -MappingName ([string]$args[1]) `
     -LengthText ([string]$args[2]) `
     -Digest ([string]$args[3])
-  $args = [string[]]@($workerTransport.Arguments)
+  [string[]]$crgTransported = @($workerTransport.Arguments)
+  if ($crgTransported.Count -lt 1 -or $null -eq $crgTransported[0] -or
+      -not $crgTransported[0].StartsWith($script:CrgImplementerTokenPrefix, [System.StringComparison]::Ordinal)) {
+    throw [System.InvalidOperationException]::new('the transported arguments do not begin with the implementer record')
+  }
+  Set-CrgCommitImplementer -Implementer $crgTransported[0].Substring($script:CrgImplementerTokenPrefix.Length)
+  $args = [string[]]@($crgTransported | Select-Object -Skip 1)
 } catch {
-  Write-Error "scripts/claude/commit.ps1: ABORT -- authenticated commit-worker arguments are invalid ($($_.Exception.Message))."
+  Write-Error "$($script:CrgCommitLabel): ABORT -- authenticated commit-worker arguments are invalid ($($_.Exception.Message))."
   exit 1
 }
 
 $crgGitSelectorKeys = @(Get-CrgGitSelectorEnvironmentKeys)
 if ($crgGitSelectorKeys.Count -ne 0) {
-  Write-Error 'scripts/claude/commit.ps1: ABORT -- an ambient Git selector is present (repository/object/ref/index, history, attribute, or config-override family; case-insensitive, including empty values); this direct wrapper binds the current worktree and refuses before the first Git command.'
+  Write-Error ($script:CrgCommitLabel + ': ABORT -- an ambient Git selector is present (repository/object/ref/index, history, attribute, or config-override family; case-insensitive, including empty values); this direct wrapper binds the current worktree and refuses before the first Git command.')
   exit 1
 }
 
-# Apply bypass check via the shared Test-Bypass-Args function.
 $bypassResult = Test-Bypass-Args -ArgList $args
 if ($bypassResult.Bypass) {
-  Write-Error "scripts/claude/commit.ps1: refusing $($bypassResult.Offending) -- this wrapper exists to enforce cross-review routing; --no-verify / -n / clustered -n* short options / --no-v[erify] prefix abbreviations would bypass the pre-commit hook entirely. Use CROSS_REVIEW_SKIP=1 (audited per your project's AGENTS.md) for the documented skip path; never --no-verify."
+  Write-Error "$($script:CrgCommitLabel): refusing $($bypassResult.Offending) -- this wrapper exists to enforce cross-review routing; --no-verify / -n / clustered -n* short options / --no-v[erify] prefix abbreviations would bypass the pre-commit hook entirely. Use CROSS_REVIEW_SKIP=1 (audited per your project's AGENTS.md) for the documented skip path; never --no-verify."
   exit 1
 }
 
@@ -1513,30 +1469,24 @@ function Enable-GitUnixToolPathForHook {
   # dirs hidden behind extra PATH case variants.
   $existingCandidates = @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Container) })
   $pathParts = Get-UnionProcessPathParts -Spellings (Get-ProcessPathSpellings) -CandidateDirs $existingCandidates
-  # Side-effect only (mutates Env:PATH); the caller captures the ORIGINAL PATH
-  # BEFORE invoking this -- inside its restore-covered try -- and restores it in
-  # the finally. The Unix-tool prepend is only needed WHILE the hook runs; leaving
-  # it mutated would leak into the dedicated worker's later operations, same
-  # class as the REVIEW_BACKEND restore. An empty $pathParts
-  # is indeterminate and fails closed. Mirrors scripts/codex/commit.ps1
-  # and auto-merge.ps1's Normalize-ProcessPathEnvForStartProcess (caller owns save/restore).
+  # Mutates Env:PATH without saving it: the restore must be armed before this
+  # runs, so a throw midway still restores. An empty $pathParts is
+  # indeterminate and fails closed.
   if ($pathParts.Count -eq 0) { throw [System.InvalidOperationException]::new('no non-empty process PATH value is available to prepare') }
   $joinedPath = [string]::Join([System.IO.Path]::PathSeparator, $pathParts)
   Set-CanonicalProcessPathEnvironment -Value $joinedPath
 }
 
 # Capture the ORIGINAL process PATH BEFORE the try so the finally can restore it
-# even if Enable-GitUnixToolPathForHook throws MID-mutation (a partial Env:PATH
-# edit would otherwise leak into the caller). Enable-... is invoked INSIDE the try
-# below -- NOT here -- so a PATH-prep failure runs the restore finally and cannot
-# leak REVIEW_BACKEND or a partial PATH mutation into
-# later worker operations. Mirrors auto-merge.ps1's
-# save-before-try discipline around Normalize-ProcessPathEnvForStartProcess. The
+# even if Enable-GitUnixToolPathForHook throws MID-mutation; Enable-... runs
+# INSIDE the try for the same reason. This is the dedicated worker, which exits
+# right after `git commit`, so neither PATH nor REVIEW_BACKEND can reach the
+# invoking shell; the restore keeps the rest of this process exact. The
 # capture preserves the effective lookup order first and appends deterministic
 # raw-only additions so the finally restores every directory without changing
 # which executable wins.
 $savedProcessPath = (Get-UnionProcessPathParts -Spellings (Get-ProcessPathSpellings)) -join [System.IO.Path]::PathSeparator
-$env:REVIEW_BACKEND = 'codex'
+$env:REVIEW_BACKEND = $script:CrgReviewBackend
 try {
   # The native-invoked proxy established replacement suppression in this worker's child
   # environment. Re-verify every trampoline singleton before the first Git command.
@@ -1562,7 +1512,7 @@ try {
   # entry is written). Refuse to commit if it is set -- one check closes the
   # whole config-redirect class. core.hooksPath lives in shared repo config,
   # so this passes identically in the main checkout and linked worktrees
-  # (both leave it unset). Symmetric with scripts/codex/commit.ps1.
+  # (both leave it unset).
   #
   # This guard runs INSIDE the try so the finally below restores
   # REVIEW_BACKEND and PATH even when the guard aborts.
@@ -1575,11 +1525,11 @@ try {
   # set-empty value (exit 0, empty stdout) slip through.
   switch (Resolve-HooksPathGuard -ExitCode $hooksPathExit) {
     'abort-set' {
-      Write-Error "scripts/claude/commit.ps1: ABORT -- core.hooksPath is SET (value: '$effectiveHooksPath'); this gate requires it UNSET so the .git/hooks/pre-commit dispatcher fires. A set value (incl. empty, or one from ordinary HOME/XDG/global/system configuration) can redirect the pre-commit hook to a no-op dir and bypass review. Unset it (git config --unset core.hooksPath) or investigate the config source."
+      Write-Error "$($script:CrgCommitLabel): ABORT -- core.hooksPath is SET (value: '$effectiveHooksPath'); this gate requires it UNSET so the .git/hooks/pre-commit dispatcher fires. A set value (incl. empty, or one from ordinary HOME/XDG/global/system configuration) can redirect the pre-commit hook to a no-op dir and bypass review. Unset it (git config --unset core.hooksPath) or investigate the config source."
       exit 1
     }
     'abort-indeterminate' {
-      Write-Error "scripts/claude/commit.ps1: ABORT -- 'git config --get core.hooksPath' exited $hooksPathExit (neither 0=set nor 1=unset); failing closed rather than committing with an indeterminate hook-path state."
+      Write-Error "$($script:CrgCommitLabel): ABORT -- 'git config --get core.hooksPath' exited $hooksPathExit (neither 0=set nor 1=unset); failing closed rather than committing with an indeterminate hook-path state."
       exit 1
     }
   }
@@ -1593,7 +1543,7 @@ try {
   $defaultHookExit = $LASTEXITCODE
   if ($defaultHookExit -ne 0 -or $defaultHookRows.Count -ne 1 -or
       [string]::IsNullOrWhiteSpace([string]$defaultHookRows[0])) {
-    Write-Error "scripts/claude/commit.ps1: ABORT -- 'git rev-parse --git-path hooks/pre-commit' did not resolve exactly one default dispatcher path (exit=$defaultHookExit, rows=$($defaultHookRows.Count)); refusing to commit with an indeterminate hook identity."
+    Write-Error "$($script:CrgCommitLabel): ABORT -- 'git rev-parse --git-path hooks/pre-commit' did not resolve exactly one default dispatcher path (exit=$defaultHookExit, rows=$($defaultHookRows.Count)); refusing to commit with an indeterminate hook identity."
     exit 1
   }
   try {
@@ -1608,12 +1558,12 @@ try {
       $defaultHookPath = [System.IO.Path]::GetFullPath((Join-Path -Path $currentFileSystemPath -ChildPath $defaultHookText))
     }
   } catch {
-    Write-Error "scripts/claude/commit.ps1: ABORT -- the resolved default dispatcher path could not be normalized ($($_.Exception.Message)); refusing to commit with an indeterminate hook identity."
+    Write-Error "$($script:CrgCommitLabel): ABORT -- the resolved default dispatcher path could not be normalized ($($_.Exception.Message)); refusing to commit with an indeterminate hook identity."
     exit 1
   }
   $defaultHookAttestation = Get-CrgDefaultHookAttestation -HookPath $defaultHookPath
   if (-not $defaultHookAttestation.Ok) {
-    Write-Error "scripts/claude/commit.ps1: ABORT -- default dispatcher attestation is $($defaultHookAttestation.State): $($defaultHookAttestation.Reason); refusing to commit un-gated. Investigate a digest mismatch first per docs/audit-protocol.md; repair the installation afterward with bootstrap.ps1 -DispatcherOnly."
+    Write-Error "$($script:CrgCommitLabel): ABORT -- default dispatcher attestation is $($defaultHookAttestation.State): $($defaultHookAttestation.Reason); refusing to commit un-gated. Investigate a digest mismatch first per docs/audit-protocol.md; repair the installation afterward with bootstrap.ps1 -DispatcherOnly."
     exit 1
   }
   & git commit @args
@@ -1621,23 +1571,23 @@ try {
 } catch {
   # A controlled-Git-environment or PATH-prep failure reaches here; the finally
   # below still restores the environment, then the commit aborts with exit 1.
-  Write-Error "scripts/claude/commit.ps1: ABORT -- failed to prepare the controlled Git environment or Unix-tool PATH for the pre-commit dispatcher ($($_.Exception.Message))."
+  Write-Error "$($script:CrgCommitLabel): ABORT -- failed to prepare the controlled Git environment or Unix-tool PATH for the pre-commit dispatcher ($($_.Exception.Message))."
   $gitExit = 1
 } finally {
   if ($prevBackendWasSet) {
     try { $env:REVIEW_BACKEND = $prevBackend }
-    catch { Write-Warning "scripts/claude/commit.ps1: failed to restore REVIEW_BACKEND='$prevBackend' ($($_.Exception.Message))." }
+    catch { Write-Warning "$($script:CrgCommitLabel): failed to restore REVIEW_BACKEND='$prevBackend' in the commit worker ($($_.Exception.Message))." }
   } else {
     try { Remove-Item -LiteralPath Env:REVIEW_BACKEND -ErrorAction Stop }
-    catch { Write-Warning "scripts/claude/commit.ps1: failed to clear REVIEW_BACKEND ($($_.Exception.Message))." }
+    catch { Write-Warning "$($script:CrgCommitLabel): failed to clear REVIEW_BACKEND in the commit worker ($($_.Exception.Message))." }
   }
   # Restore the pre-Enable PATH (the Unix-tool prepend was only for the hook).
-  # Skip on an empty original (a capture failure, not a real empty PATH). Mirrors
-  # scripts/codex/commit.ps1.
+  # Skip on an empty original (a capture failure, not a real empty PATH -- leaving
+  # the mutated PATH beats clobbering this process with an empty one).
   if (-not [string]::IsNullOrEmpty($savedProcessPath)) {
     try {
       Set-CanonicalProcessPathEnvironment -Value $savedProcessPath
-    } catch { Write-Warning "scripts/claude/commit.ps1: failed to restore PATH after the commit ($($_.Exception.Message)); later commands in this shell may retain the Git-Unix-tool-prepended PATH." }
+    } catch { Write-Warning "$($script:CrgCommitLabel): failed to restore PATH in the commit worker after the commit ($($_.Exception.Message))." }
   }
 }
 exit $gitExit

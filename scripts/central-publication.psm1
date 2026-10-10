@@ -6,9 +6,10 @@ function Get-CrgPublicationCommand {
   param([object]$Runtime, [string]$Module, [string]$Name)
   $relative = 'scripts/' + $Module + '.psm1'
   $commands = @(Get-Command -Name $Name -Module $Module -CommandType Function -ListImported -ErrorAction SilentlyContinue)
+  # Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
   if ($null -eq $Runtime -or $Runtime.Payloads -isnot [System.Collections.IDictionary] -or
-      $relative -cnotin @($Runtime.Payloads.Keys) -or $commands.Count -ne 1 -or
-      $commands[0].Module.Path -cne $Runtime.Payloads[$relative].Path) { throw "central publication requires retained '$Module/$Name'" }
+      -not [System.Linq.Enumerable]::Contains([string[]]@($Runtime.Payloads.Keys), [string]$relative, [System.StringComparer]::Ordinal) -or $commands.Count -ne 1 -or
+      -not [string]::Equals($commands[0].Module.Path, $Runtime.Payloads[$relative].Path, [System.StringComparison]::Ordinal)) { throw "central publication requires retained '$Module/$Name'" }
   return $commands[0]
 }
 
@@ -25,7 +26,7 @@ function Save-CrgUncertainCentralOperation {
   $cause = $Failure; $uncertain = $false
   while ($null -ne $cause) {
     foreach ($key in $cause.Data.Keys) {
-      if ([string]$key -cin @('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins')) { $uncertain = $true }
+      if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $uncertain = $true }
     }
     $cause = $cause.InnerException
   }
@@ -42,7 +43,7 @@ function Save-CrgUncertainCentralOperation {
 
 function Assert-CrgCentralCapturedState {
   param([object]$Operation, [object]$CapturedInput,
-    [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin,
+    [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
     [System.Collections.IDictionary]$ExpectedRefs, [AllowNull()][byte[]]$ExpectedPointerBytes,
     [AllowNull()][byte[]]$ExpectedHandoffBytes)
   $project = $Operation.ProjectContext; $runtime = $Operation.Runtime
@@ -54,21 +55,21 @@ function Assert-CrgCentralCapturedState {
   $retention = Get-CrgPublicationCommand -Runtime $runtime -Module paired-retention -Name Read-CrgCompletedPairRetention
   foreach ($domain in @('public', 'private')) {
     $index = & $getIndex -ProjectContext $project -Domain $domain
-    if ($index.TreeOid -cne $CapturedInput.Indexes[$domain].TreeOid) { throw "central $domain staged tree changed from the reviewed candidate" }
+    if (-not [string]::Equals($index.TreeOid, $CapturedInput.Indexes[$domain].TreeOid, [System.StringComparison]::Ordinal)) { throw "central $domain staged tree changed from the reviewed candidate" }
     $actualRef = & $retention.Module { param($Project, $Domain) Get-CrgRetentionRef -ProjectContext $Project -Domain $Domain -Ref $Project.Domains[$Domain].Ref } $project $domain
     if ($null -eq $actualRef) { $actualRef = 'absent' }
-    if ($actualRef -cne $ExpectedRefs[$domain]) { throw "central $domain branch differs from the expected publication state" }
+    if (-not [string]::Equals($actualRef, $ExpectedRefs[$domain], [System.StringComparison]::Ordinal)) { throw "central $domain branch differs from the expected publication state" }
   }
   foreach ($binding in @(@('crg-pair', $ExpectedPointerBytes), @('crg-handoff', $ExpectedHandoffBytes))) {
     $file = & $runtime.ReadFile -Path (Join-Path $project.Domains.public.GitDir $binding[0]) -Maximum 16384 -AllowAbsent
     if ($null -eq $binding[1]) {
       if ($file.Present -isnot [bool] -or $file.Present) { throw "central '$($binding[0])' appeared after capture" }
-    } elseif (-not $file.Present -or (Get-CrgPublicationDigest -Bytes $file.Bytes) -cne (Get-CrgPublicationDigest -Bytes $binding[1])) { throw "central '$($binding[0])' differs from the captured publication record" }
+    } elseif (-not $file.Present -or -not [string]::Equals((Get-CrgPublicationDigest -Bytes $file.Bytes), (Get-CrgPublicationDigest -Bytes $binding[1]), [System.StringComparison]::Ordinal)) { throw "central '$($binding[0])' differs from the captured publication record" }
   }
   $attachment = & $runtime.ReadFile -Path (Join-Path $project.Domains.public.GitDir 'crg-attachment') -Maximum 16384 -AllowAbsent
-  if ($Origin -ceq 'paired-v1') {
-    if (-not $attachment.Present -or (Get-CrgPublicationDigest -Bytes $attachment.Bytes) -cne (Get-CrgPublicationDigest -Bytes $Operation.AttachmentBytes)) { throw 'central attachment changed during publication' }
-  } elseif ($attachment.Present -and (Get-CrgPublicationDigest -Bytes $attachment.Bytes) -cne (Get-CrgPublicationDigest -Bytes $Operation.AttachmentBytes)) { throw 'initial attachment conflicts with the reviewed proposal' }
+  if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) {
+    if (-not $attachment.Present -or -not [string]::Equals((Get-CrgPublicationDigest -Bytes $attachment.Bytes), (Get-CrgPublicationDigest -Bytes $Operation.AttachmentBytes), [System.StringComparison]::Ordinal)) { throw 'central attachment changed during publication' }
+  } elseif ($attachment.Present -and -not [string]::Equals((Get-CrgPublicationDigest -Bytes $attachment.Bytes), (Get-CrgPublicationDigest -Bytes $Operation.AttachmentBytes), [System.StringComparison]::Ordinal)) { throw 'initial attachment conflicts with the reviewed proposal' }
   & $assertReads -Owner $Operation.ReadOwner
 }
 
@@ -76,19 +77,19 @@ function Invoke-CrgCentralAuthorLint {
   param([object]$Operation, [object]$CapturedInput, [string]$Origin)
   $Runtime = $Operation.Runtime
   $payload = $Runtime.Payloads['scripts/shared/author-lint.ps1']
-  if ($null -eq $payload -or $payload.Bytes -isnot [byte[]] -or $payload.Path -cne (Join-Path $Runtime.Root 'scripts\shared\author-lint.ps1')) { throw 'central author-lint payload is not retained' }
+  if ($null -eq $payload -or $payload.Bytes -isnot [byte[]] -or -not [string]::Equals($payload.Path, (Join-Path $Runtime.Root 'scripts\shared\author-lint.ps1'), [System.StringComparison]::Ordinal)) { throw 'central author-lint payload is not retained' }
   $arguments = @{}
-  $name = if ($Origin -ceq 'paired-v1') { 'PairedInput' } else { 'FirstAttachmentInput' }
+  $name = if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { 'PairedInput' } else { 'FirstAttachmentInput' }
   $inputData = @{ Runtime = $Runtime; CapturedInput = $CapturedInput }
   $fields = $CapturedInput.Bundle.Metadata.ReviewUnit.Fields
   $originalPrivateParent = $fields['private-parent']
-  if ($Origin -ceq 'first-attachment-v1' -and $originalPrivateParent -cne 'absent') {
+  if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal) -and -not [string]::Equals($originalPrivateParent, 'absent', [System.StringComparison]::Ordinal)) {
     # Mandatory review remains empty-tree-to-candidate. Added-line attribution is
     # independently derived from the original adopted parent while the operation
     # owns the exact private namespace, never from the possibly advanced ref.
     $private = $Operation.ProjectContext.Domains.private
     $candidateTree = $CapturedInput.Indexes.private.TreeOid
-    if ($fields['private-tree'] -cne $candidateTree) { throw 'first-attachment lint attribution differs from the captured private identity' }
+    if (-not [string]::Equals($fields['private-tree'], $candidateTree, [System.StringComparison]::Ordinal)) { throw 'first-attachment lint attribution differs from the captured private identity' }
     $retention = Get-CrgPublicationCommand -Runtime $Runtime -Module paired-retention -Name Read-CrgCompletedPairRetention
     $parentCommit = & $retention.Module {
       param($ProjectContext, $ParentOid)
@@ -100,8 +101,9 @@ function Invoke-CrgCentralAuthorLint {
     $parentTree = $parentCommit.TreeOid
     $capture = Get-CrgPublicationCommand -Runtime $Runtime -Module paired-diff -Name Get-CrgPairedGitDiffEvidence
     $diff = & $capture -ProjectContext $Operation.ProjectContext -Domain private -ParentTree $parentTree -CandidateTree $candidateTree -TempParent $private.GitDir
-    if ($diff.Ok -isnot [bool] -or -not $diff.Ok -or $diff.Domain -cne 'private' -or
-        $diff.ParentTree -cne $parentTree -or $diff.CandidateTree -cne $candidateTree -or
+    if ($diff.Ok -isnot [bool] -or -not $diff.Ok -or -not [string]::Equals($diff.Domain, 'private', [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($diff.ParentTree, $parentTree, [System.StringComparison]::Ordinal) -or
+        -not [string]::Equals($diff.CandidateTree, $candidateTree, [System.StringComparison]::Ordinal) -or
         $diff.PatchBytes -isnot [byte[]] -or $diff.NameStatusBytes -isnot [byte[]]) { throw "first-attachment private lint attribution failed: $($diff.Reason)" }
     $inputData['PrivateAttribution'] = @{
       Domain = 'private'; Parent = $originalPrivateParent; ParentTree = $parentTree; CandidateTree = $candidateTree
@@ -111,7 +113,7 @@ function Invoke-CrgCentralAuthorLint {
   $arguments[$name] = $inputData
   $result = @(& $payload.Path @arguments)
   if ($result.Count -ne 1 -or $result[0].ExitCode -notin @(0, 3) -or
-      $result[0].ReviewUnitSha256 -cne $CapturedInput.Bundle.Metadata.ReviewUnit.ReviewUnitSha256) { throw 'central author-lint returned an invalid result' }
+      -not [string]::Equals($result[0].ReviewUnitSha256, $CapturedInput.Bundle.Metadata.ReviewUnit.ReviewUnitSha256, [System.StringComparison]::Ordinal)) { throw 'central author-lint returned an invalid result' }
   Write-Host $result[0].Report
   if ($result[0].ExitCode -eq 3) { throw 'central author-lint reported ERROR-tier findings; review has not started' }
 }
@@ -120,10 +122,11 @@ function New-CrgCentralReceipt {
   param([object]$Operation, [object]$CapturedInput, [object]$Review,
     [System.Collections.IDictionary]$Results, [string]$Origin)
   $runtime = $Operation.Runtime; $project = $Operation.ProjectContext
-  $name = if ($Origin -ceq 'paired-v1') { 'New-CrgPairReceiptBytes' } else { 'New-CrgFirstAttachmentReceiptBytes' }
+  $name = if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { 'New-CrgPairReceiptBytes' } else { 'New-CrgFirstAttachmentReceiptBytes' }
   $constructor = Get-CrgPublicationCommand -Runtime $runtime -Module paired-governance -Name $name
   $unit = $CapturedInput.Bundle.Metadata.ReviewUnit
-  if ($Review.ReviewUnitSha256 -cne $unit.ReviewUnitSha256 -or $Review.DescriptorSha256 -cne $CapturedInput.Bundle.DescriptorSha256) { throw 'current review does not bind the captured publication input' }
+  if (-not [string]::Equals($Review.ReviewUnitSha256, $unit.ReviewUnitSha256, [System.StringComparison]::Ordinal) -or
+      -not [string]::Equals($Review.DescriptorSha256, $CapturedInput.Bundle.DescriptorSha256, [System.StringComparison]::Ordinal)) { throw 'current review does not bind the captured publication input' }
   $fields = [ordered]@{}
   foreach ($key in $unit.Fields.Keys) { $fields.Add($key, $unit.Fields[$key]) }
   foreach ($domain in @('public', 'private')) { $fields.Add($domain + '-result', $Results[$domain]) }
@@ -142,10 +145,10 @@ function Invoke-CrgCentralCapturedPublication {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$Operation,
     [Parameter(Mandatory = $true)][object]$CapturedInput,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$AuthoringAgent)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent)
   $runtime = $Operation.Runtime; $project = $Operation.ProjectContext
-  $guard = $null; $retained = $false; $ownsGuard = $Origin -ceq 'paired-v1'
+  $guard = $null; $retained = $false; $ownsGuard = [string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)
   $openGuard = Get-CrgPublicationCommand -Runtime $runtime -Module central-guards -Name Open-CrgCentralGuardCustody
   $assertGuard = Get-CrgPublicationCommand -Runtime $runtime -Module central-guards -Name Assert-CrgCentralPublicationGuards
   $closeGuard = Get-CrgPublicationCommand -Runtime $runtime -Module central-guards -Name Close-CrgCentralGuardCustody
@@ -155,45 +158,55 @@ function Invoke-CrgCentralCapturedPublication {
   $results = [ordered]@{ public = $project.Domains.public.Parent; private = $project.Domains.private.Parent }
   $expected = [ordered]@{ public = $results.public; private = $results.private }
   $pointerBytes = $null
-  if ($Origin -ceq 'paired-v1') { $pointerBytes = $Operation.PointerBytes }
+  if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { $pointerBytes = $Operation.PointerBytes }
+  $precedingHandoffBytes = $null
+  if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal) -and $null -ne $Operation.PSObject.Properties['CorrectionAnchor']) {
+    $precedingHandoffBytes = $Operation.CorrectionAnchor.HandoffBytes
+  }
   try {
     if ($ownsGuard) { $guard = & $openGuard -ProjectContext $project -OperationLock $Operation.OperationLock -Origin $Origin }
     else { $guard = $Operation.GuardCustody }
     & $assertGuard -ProjectContext $project -OperationLock $Operation.OperationLock -CapturedInput $CapturedInput -Origin $Origin -GuardCustody $guard
-    Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes
+    Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $precedingHandoffBytes
     $assertInstructions = Get-CrgPublicationCommand -Runtime $runtime -Module central-instructions -Name Assert-CrgCentralInstructionDiscovery
-    $null = & $assertInstructions -Operation $Operation -CapturedInput $CapturedInput
+    $null = & $assertInstructions -Operation $Operation -CapturedInput $CapturedInput -RequireWorkingBytes:([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal))
     Invoke-CrgCentralAuthorLint -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin
-    $reviewName = if ($Origin -ceq 'paired-v1') { 'Invoke-CrgPairedReviewSession' } else { 'Invoke-CrgFirstAttachmentReviewSession' }
+    $reviewName = if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { 'Invoke-CrgPairedReviewSession' } else { 'Invoke-CrgFirstAttachmentReviewSession' }
     $reviewer = Get-CrgPublicationCommand -Runtime $runtime -Module paired-review-session -Name $reviewName
     # This call owns reviewer children and validates current exits/artifacts.
     # No parameter accepts a saved review result, receipt, or permission flag.
     $review = & $reviewer -Runtime $runtime -CapturedInput $CapturedInput -AuthoringAgent $AuthoringAgent
     & $assertGuard -ProjectContext $project -OperationLock $Operation.OperationLock -CapturedInput $CapturedInput -Origin $Origin -GuardCustody $guard
-    Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes
+    Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $precedingHandoffBytes
     $newCommit = Get-CrgPublicationCommand -Runtime $runtime -Module paired-git-operation -Name New-CrgPairedGitResultCommit
     $message = $CapturedInput.Bundle.Buffers['COMMIT-MESSAGE.txt']
     foreach ($domain in @('private', 'public')) {
       $selected = $project.Domains[$domain]
-      if ($selected.Parent -ceq 'absent' -or $CapturedInput.Indexes[$domain].TreeOid -cne $selected.ParentTree) {
+      if ([string]::Equals($selected.Parent, 'absent', [System.StringComparison]::Ordinal) -or
+          -not [string]::Equals($CapturedInput.Indexes[$domain].TreeOid, $selected.ParentTree, [System.StringComparison]::Ordinal)) {
         $commit = & $newCommit -ProjectContext $project -OperationLock $Operation.OperationLock -Domain $domain -TreeOid $CapturedInput.Indexes[$domain].TreeOid -ParentOid $selected.Parent -MessageBytes $message
         $results[$domain] = $commit.Value.Oid
       }
     }
     $receiptBytes = New-CrgCentralReceipt -Operation $Operation -CapturedInput $CapturedInput -Review $review -Results $results -Origin $Origin
-    $retentionName = if ($Origin -ceq 'paired-v1') { 'Write-CrgPairRetention' } else { 'Write-CrgFirstAttachmentRetention' }
+    $retentionName = if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { 'Write-CrgPairRetention' } else { 'Write-CrgFirstAttachmentRetention' }
     $retain = Get-CrgPublicationCommand -Runtime $runtime -Module paired-retention -Name $retentionName
     $retentionArguments = @{ ProjectContext = $project; OperationLock = $Operation.OperationLock; ReceiptBytes = $receiptBytes; CapturedInput = $CapturedInput; ReviewAttempts = $review.ReviewAttempts }
-    if ($Origin -ceq 'first-attachment-v1') { $retentionArguments.AttachmentBytes = $Operation.AttachmentBytes }
+    if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal)) { $retentionArguments.AttachmentBytes = $Operation.AttachmentBytes }
     $record = & $retain @retentionArguments
     $promote = Get-CrgPublicationCommand -Runtime $runtime -Module paired-preparation -Name Publish-CrgPairedFollowups
     $followups = & $promote -Operation $Operation -CapturedInput $CapturedInput -Review $review -ReceiptSha256 $record.ReceiptSha256 -Origin $Origin
-    $handoffName = if ($Origin -ceq 'paired-v1') { 'New-CrgPairHandoffBytes' } else { 'New-CrgFirstAttachmentHandoffBytes' }
+    $handoffName = if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { 'New-CrgPairHandoffBytes' } else { 'New-CrgFirstAttachmentHandoffBytes' }
     $newHandoff = Get-CrgPublicationCommand -Runtime $runtime -Module paired-governance -Name $handoffName
     $handoff = & $newHandoff -ReceiptBytes $receiptBytes -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
+    if ($null -ne $precedingHandoffBytes) {
+      $assertCorrection = Get-CrgPublicationCommand -Runtime $runtime -Module central-attachment -Name Assert-CrgCentralAttachmentCorrectionCandidate
+      $null = & $assertCorrection -Operation $Operation -Anchor $Operation.CorrectionAnchor -RequireChanges
+      Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $precedingHandoffBytes
+    }
     & $releaseReads -Owner $Operation.ReadOwner -Paths @((Join-Path $project.Domains.public.GitDir 'crg-handoff'))
-    & $writeState -ProjectContext $project -OperationLock $Operation.OperationLock -Leaf crg-handoff -Bytes $handoff
-    if ($Origin -ceq 'first-attachment-v1') {
+    & $writeState -ProjectContext $project -OperationLock $Operation.OperationLock -Leaf crg-handoff -ExpectedBytes $precedingHandoffBytes -Bytes $handoff
+    if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal)) {
       $associate = Get-CrgPublicationCommand -Runtime $runtime -Module central-attachment -Name Complete-CrgCentralAttachmentAssociation
       $null = & $associate -Operation $Operation
     }
@@ -202,18 +215,18 @@ function Invoke-CrgCentralCapturedPublication {
     Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $handoff
     $update = Get-CrgPublicationCommand -Runtime $runtime -Module paired-git-operation -Name Set-CrgPairedGitExpectedRef
     foreach ($domain in @('private', 'public')) {
-      if ($results[$domain] -cne $expected[$domain]) {
+      if (-not [string]::Equals($results[$domain], $expected[$domain], [System.StringComparison]::Ordinal)) {
         $null = & $update -ProjectContext $project -OperationLock $Operation.OperationLock -Domain $domain -ExpectedOldOid $expected[$domain] -NewOid $results[$domain]
         $expected[$domain] = $results[$domain]
       }
     }
     Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $handoff
-    if ($record.Receipt.Fields['public-parent'] -cne $record.Receipt.Fields['public-result']) {
+    if (-not [string]::Equals($record.Receipt.Fields['public-parent'], $record.Receipt.Fields['public-result'], [System.StringComparison]::Ordinal)) {
       $postCommit = Get-CrgPublicationCommand -Runtime $runtime -Module central-guards -Name Invoke-CrgCentralLfsPostCommit
       $null = & $postCommit -ProjectContext $project -OperationLock $Operation.OperationLock -GuardCustody $guard -ExpectedPublicOid $record.Receipt.Fields['public-result']
       Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin $Origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $handoff
     }
-    if ($Origin -ceq 'first-attachment-v1') {
+    if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal)) {
       $installGuards = Get-CrgPublicationCommand -Runtime $runtime -Module central-guards -Name Install-CrgCentralGuards
       $syncInstructions = Get-CrgPublicationCommand -Runtime $runtime -Module central-instructions -Name Sync-CrgCentralInstructions
       $null = & $syncInstructions -Operation $Operation -Initial -CapturedInput $CapturedInput -ReceiptBytes $receiptBytes
@@ -223,7 +236,7 @@ function Invoke-CrgCentralCapturedPublication {
     $completed = & $newPointer -Origin $Origin -ReceiptSha256 $record.ReceiptSha256
     & $releaseReads -Owner $Operation.ReadOwner -Paths @((Join-Path $project.Domains.public.GitDir 'crg-pair'))
     & $writeState -ProjectContext $project -OperationLock $Operation.OperationLock -Leaf crg-pair -ExpectedBytes $pointerBytes -Bytes $completed
-    if ($Origin -ceq 'first-attachment-v1') {
+    if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal)) {
       & $releaseReads -Owner $Operation.ReadOwner -Paths @((Join-Path $project.Domains.public.GitDir 'crg-attachment'))
       & $writeState -ProjectContext $project -OperationLock $Operation.OperationLock -Leaf crg-attachment -Bytes $Operation.AttachmentBytes
     }
@@ -245,7 +258,7 @@ function Invoke-CrgCentralCommit {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$TargetRepo, [Parameter(Mandatory = $true)][object]$Context,
     [Parameter(Mandatory = $true)][string]$MessageFile,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$AuthoringAgent)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent)
   $open = Get-CrgPublicationCommand -Runtime $Context -Module paired-project-operation -Name Open-CrgPairedProjectOperation
   $close = Get-CrgPublicationCommand -Runtime $Context -Module paired-project-operation -Name Close-CrgPairedProjectOperation
   $operation = & $open -TargetRepo $TargetRepo -Runtime $Context
@@ -268,7 +281,7 @@ function Invoke-CrgCentralAttach {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$TargetRepo, [Parameter(Mandatory = $true)][object]$Context,
     [Parameter(Mandatory = $true)][string]$MessageFile,
-    [Parameter(Mandatory = $true)][ValidateSet('codex', 'claude')][string]$AuthoringAgent, [string]$PrivateGitDir)
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude)\z', Options = 'None')][string]$AuthoringAgent, [string]$PrivateGitDir)
   $open = Get-CrgPublicationCommand -Runtime $Context -Module central-attachment -Name Open-CrgCentralAttachment
   $close = Get-CrgPublicationCommand -Runtime $Context -Module central-attachment -Name Close-CrgCentralAttachment
   $parameters = @{ Runtime = $Context; TargetRepo = $TargetRepo; MessageFile = $MessageFile; AuthoringAgent = $AuthoringAgent }
@@ -305,7 +318,12 @@ function Invoke-CrgCentralPendingAttachmentStage {
   $operation = $null; $retained = $false
   try {
     $operation = & $open -Runtime $Context -TargetRepo $TargetRepo -StagePaths $Paths
-    return & $stage -Operation $operation -Paths $Paths -PendingAttachment
+    $result = & $stage -Operation $operation -Paths $Paths -PendingAttachment
+    if ($null -ne $operation.PSObject.Properties['CorrectionAnchor']) {
+      $assertCorrection = Get-CrgPublicationCommand -Runtime $operation.Runtime -Module central-attachment -Name Assert-CrgCentralAttachmentCorrectionCandidate
+      $null = & $assertCorrection -Operation $operation -Anchor $operation.CorrectionAnchor -RequireChanges
+    }
+    return $result
   } catch {
     if ($null -eq $operation) {
       $cause = $_.Exception

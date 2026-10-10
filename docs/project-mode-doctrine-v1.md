@@ -20,8 +20,8 @@ The declaration supplies review context through these fields:
 - `mode:` identifies the lifecycle lens for behavior preservation.
 - `campaign:` identifies current priority and, when explicit cutover
   wording names disposable targets, the intended compatibility boundary.
-- `invariant-surfaces:` identifies durable production contracts. The all-mode
-  code unit-test ban supplies no surface-specific exception.
+- `invariant-surfaces:` identifies durable production contracts. The code
+  unit-test ban (section 7) supplies no surface-specific exception.
 
 Nothing in the declaration limits what project work may be authored or
 landed. In particular:
@@ -185,7 +185,9 @@ discipline.
 
 ## 6. Mode semantics
 
-Mode affects only behavior preservation. Code unit tests are banned in every mode.
+Mode affects only behavior preservation, plus the code unit-test scope when a
+project's configuration names a mode allowance (section 7). Without that
+configuration, code unit tests are banned in every mode.
 
 - **`prototype`** — behavior preservation is not a default duty.
 - **`stabilizing`** — behavior preservation is a default duty except for
@@ -224,17 +226,24 @@ they do not make unrelated work inadmissible.
 The operator decision of 2026-09-07, clarified 2026-09-08, bans authoring,
 maintaining, restoring, and running code unit tests. Existing code unit tests
 and unit-test-only assets must be removed through the normal reviewed workflow.
-No project mode or invariant surface grants an exception. Renaming a code unit
-test as a probe or verification script does not change the ban.
+No project mode or invariant surface grants an exception on its own. Renaming a
+code unit test as a probe or verification script does not change the ban.
 
-The ban is limited to code unit tests. Earlier wording banning all tests was
-incorrect and is superseded. Integration, end-to-end, smoke, performance,
-manual, live, and other functional testing are not prohibited merely by category
-and remain important verification methods.
+The ban is the default. A centrally attached project may loosen it only through
+reviewed `unit-tests` records in its project configuration (operator ruling
+2026-10-07; grammar in [private governance](private-governance-v1.md)): a
+prototype allowance that takes effect while the governing declaration validly
+names `prototype`, and folder allowances that hold in every mode. The governing
+configuration and declaration select the scope; candidate changes never widen
+the current review. Outside the scope every rule in this section stands.
+Legacy per-project installs have no project configuration and keep the ban.
 
-Preserve production validation, runtime assertions, error handling, and safety
-checks. Source inspection, mandatory code review, builds, ordinary program
-operation, and applicable functional testing remain verification methods. Build output establishes buildability;
+The ban applies only to code unit tests. Live testing, manual checks, ordinary
+program runs, and functional validation remain permitted and important.
+
+Preserve production input validation, error handling, runtime assertions, and
+safety checks. Source inspection, mandatory code review, builds, ordinary
+program operation, and functional validation remain verification methods. Build output establishes buildability;
 a captured real-interface run demonstrates only the behavior actually observed.
 Every credited citation names the date, command, observed output, and revision.
 Commit and Branch scopes can consume the labeled full commit-message channel;
@@ -243,7 +252,7 @@ channel. Unverified behavior is reported explicitly, never filled with a new
 code unit test.
 
 New or restored code unit tests, unit-test-only support, or instructions requiring
-code unit tests are BLOCKER policy violations under the existing `TEST-QUALITY`
+code unit tests, outside any configured scope, are BLOCKER policy violations under the existing `TEST-QUALITY`
 category. Missing code unit tests and authorized code-unit-test deletion are never findings. Scope discipline still
 applies to untouched pre-existing files. Production correctness and mandatory
 cross-review remain unchanged.
@@ -254,8 +263,9 @@ cross-review remain unchanged.
   `scripts/claude/auto-review.ps1` mirror governing-ref resolution,
   declaration parsing, safe fallback, visibility, and block assembly.
 - `scripts/codex/review-prompt-template.md` owns the reviewer-facing mode,
-  campaign, invariant-surface, compatibility, evidence, and code-unit-test-ban
-  rules.
+  campaign, invariant-surface, compatibility, evidence, and stock code-unit-test-ban
+  rules; `scripts/project-preparation.psm1` replaces the marked ban body with a
+  configured scope ([project preparation](project-preparation-v1.md)).
 - `scripts/shared/auto-merge.ps1` supplies the pinned base OID. The wrappers
   remain the declaration resolvers.
 - Candidate declaration content reaches the reviewer through the ordinary

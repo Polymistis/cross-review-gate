@@ -10,11 +10,12 @@ function Get-CrgRetentionCommand {
 function Get-CrgRetentionDigest {
   param([byte[]]$Bytes, [string]$ObjectFormat, [string]$Type)
   $hash = [Security.Cryptography.SHA256]::Create()
-  if ($ObjectFormat -ceq 'sha1') { $hash.Dispose(); $hash = [Security.Cryptography.SHA1]::Create() }
-  elseif ($ObjectFormat -cnotin @('', 'sha256')) { $hash.Dispose(); throw 'retention object format is invalid' }
+  # Ordinal: -ceq/-cne/-cin and switch compare by culture and ignore characters such as U+00AD.
+  if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { $hash.Dispose(); $hash = [Security.Cryptography.SHA1]::Create() }
+  elseif (-not ([string]::IsNullOrEmpty($ObjectFormat) -or [string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal))) { $hash.Dispose(); throw 'retention object format is invalid' }
   try {
     if (-not [string]::IsNullOrEmpty($Type)) {
-      if ($Type -cnotin @('blob', 'tree', 'commit')) { throw 'retention object type is invalid' }
+      if (-not [System.Linq.Enumerable]::Contains([string[]]@('blob', 'tree', 'commit'), [string]$Type, [StringComparer]::Ordinal)) { throw 'retention object type is invalid' }
       $header = [Text.Encoding]::ASCII.GetBytes($Type + ' ' + $Bytes.Length.ToString([Globalization.CultureInfo]::InvariantCulture) + [char]0)
       $null = $hash.TransformBlock($header, 0, $header.Length, $null, 0)
     }
@@ -25,18 +26,18 @@ function Get-CrgRetentionDigest {
 
 function Assert-CrgRetentionOid {
   param([string]$Oid, [string]$ObjectFormat)
-  $width = if ($ObjectFormat -ceq 'sha1') { 40 } elseif ($ObjectFormat -ceq 'sha256') { 64 } else { throw 'retention object format is invalid' }
+  $width = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } elseif ([string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal)) { 64 } else { throw 'retention object format is invalid' }
   if ($Oid -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $Oid -match '\A0+\z') { throw 'retention object identity is invalid' }
 }
 
 function Get-CrgRetentionOriginCommands {
-  param([ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin)
-  if ($Origin -ceq 'first-attachment-v1') {
+  param([ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     return @{ Receipt = 'Read-CrgFirstAttachmentReceiptBytes'; Bundle = 'Read-CrgPreparedFirstAttachmentBundleBytes'
       Artifact = 'Read-CrgFirstAttachmentArtifactBytes'; SuccessfulArtifact = 'Read-CrgSuccessfulFirstAttachmentArtifactBytes'
       Exhaustion = 'Read-CrgFirstAttachmentExhaustionBytes' }
   }
-  if ($Origin -cne 'paired-v1') { throw 'retention origin is unsupported' }
+  if (-not [string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) { throw 'retention origin is unsupported' }
   return @{ Receipt = 'Read-CrgPairReceiptBytes'; Bundle = 'Read-CrgPreparedPairBundleBytes'
     Artifact = 'Read-CrgPairArtifactBytes'; SuccessfulArtifact = 'Read-CrgSuccessfulPairArtifactBytes'
     Exhaustion = 'Read-CrgPairExhaustionBytes' }
@@ -45,7 +46,8 @@ function Get-CrgRetentionOriginCommands {
 function Get-CrgRetentionGitArguments {
   param([object]$ProjectContext, [string]$Domain)
   if ($null -eq $ProjectContext -or $ProjectContext.Schema -ne 1 -or
-      $ProjectContext.Domains -isnot [System.Collections.IDictionary] -or $Domain -cnotin @('public', 'private') -or
+      $ProjectContext.Domains -isnot [System.Collections.IDictionary] -or
+      -not ([string]::Equals($Domain, 'public', [StringComparison]::Ordinal) -or [string]::Equals($Domain, 'private', [StringComparison]::Ordinal)) -or
       -not $ProjectContext.Domains.Contains($Domain)) { throw 'retention Git domain is invalid' }
   $selected = $ProjectContext.Domains[$Domain]
   $reader = Get-CrgRetentionCommand -Module central-context -Name Read-CrgCentralBlobBytes
@@ -55,7 +57,7 @@ function Get-CrgRetentionGitArguments {
     param($Paths)
     foreach ($path in $Paths) { Assert-CrgContextAbsolutePath -Path $path }
   } @($ProjectContext.GitExe, $ProjectContext.Root, $selected.GitDir, $selected.CommonDir, $selected.ObjectDir)
-  if ($selected.ObjectFormat -cnotin @('sha1', 'sha256') -or
+  if (-not ([string]::Equals($selected.ObjectFormat, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($selected.ObjectFormat, 'sha256', [StringComparison]::Ordinal)) -or
       -not [string]::Equals($selected.ObjectDir, (Join-Path $selected.CommonDir 'objects'), [StringComparison]::OrdinalIgnoreCase)) { throw 'retention Git object namespace is invalid' }
   return ,([string[]]@("--git-dir=$($selected.GitDir)", "--work-tree=$($ProjectContext.Root)"))
 }
@@ -121,7 +123,7 @@ function Get-CrgRetentionGitLine {
 }
 
 function Open-CrgRetentionContext {
-  param([object]$ProjectContext, [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1')
+  param([object]$ProjectContext, [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1')
   if ($null -eq $ProjectContext -or $ProjectContext.Schema -ne 1 -or
       $ProjectContext.Domains -isnot [System.Collections.IDictionary] -or $ProjectContext.Domains.Count -ne 2 -or
       $null -eq $ProjectContext.Runtime -or $ProjectContext.Runtime.ReadFile -isnot [scriptblock] -or
@@ -131,7 +133,7 @@ function Open-CrgRetentionContext {
     if (-not $ProjectContext.Domains.Contains($domain)) { throw 'retention domain is absent' }
     $selected = $ProjectContext.Domains[$domain]
     $null = Get-CrgRetentionGitArguments -ProjectContext $ProjectContext -Domain $domain
-    if ($Origin -cne 'first-attachment-v1' -or $domain -cne 'private' -or $selected.Parent -cne 'absent') {
+    if (-not [string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -or -not [string]::Equals($domain, 'private', [StringComparison]::Ordinal) -or -not [string]::Equals($selected.Parent, 'absent', [StringComparison]::Ordinal)) {
       Assert-CrgRetentionOid -Oid $selected.Parent -ObjectFormat $selected.ObjectFormat
     }
     if (-not [string]::Equals($selected.ObjectDir, (Join-Path $selected.CommonDir 'objects'), [StringComparison]::OrdinalIgnoreCase)) { throw 'retention object directory differs from its domain' }
@@ -157,7 +159,7 @@ function Open-CrgRetentionContext {
       $objects = (Get-CrgRetentionGitLine -ProjectContext $ProjectContext -Domain $domain -Arguments @('rev-parse', '--path-format=absolute', '--git-path', 'objects')).Replace('/', '\')
       $format = Get-CrgRetentionGitLine -ProjectContext $ProjectContext -Domain $domain -Arguments @('rev-parse', '--show-object-format')
       if (-not [string]::Equals($common, $selected.CommonDir, [StringComparison]::OrdinalIgnoreCase) -or
-          -not [string]::Equals($objects, $selected.ObjectDir, [StringComparison]::OrdinalIgnoreCase) -or $format -cne $selected.ObjectFormat) { throw 'retention Git namespace changed under custody' }
+          -not [string]::Equals($objects, $selected.ObjectDir, [StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals($format, $selected.ObjectFormat, [StringComparison]::Ordinal)) { throw 'retention Git namespace changed under custody' }
       foreach ($leaf in @('alternates', 'http-alternates')) {
         $file = & $ProjectContext.Runtime.ReadFile -Path (Join-Path $selected.ObjectDir ('info/' + $leaf)) -Maximum 65536 -AllowAbsent
         if ($null -eq $file -or $file.Present -isnot [bool] -or $file.Present) { throw 'retention requires positively absent object alternates' }
@@ -285,7 +287,7 @@ function New-CrgRetentionRef {
       }
     }
   }
-  if ((& $bindHooks -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain $Domain) -cne $hooksPath) { throw 'retention reference hook binding changed after the owned child' }
+  if (-not [string]::Equals((& $bindHooks -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain $Domain), $hooksPath, [StringComparison]::Ordinal)) { throw 'retention reference hook binding changed after the owned child' }
   if ((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain $Domain -Ref $Ref) -cne $Oid) { throw 'new retention reference failed exact reread' }
 }
 
@@ -312,7 +314,11 @@ function Get-CrgRetentionLeafBounds {
 function Read-CrgRetentionTree {
   param([object]$ProjectContext, [string]$TreeOid)
   $null = Read-CrgRetentionObject -ProjectContext $ProjectContext -Domain private -Oid $TreeOid -Type tree -Maximum 16384
-  $result = Invoke-CrgRetentionGit -ProjectContext $ProjectContext -Domain private -Arguments @('ls-tree', '-z', $TreeOid) -Maximum 16384
+  # Without --full-tree, ls-tree lists only the part of the tree under the
+  # child's directory inside the work tree. This child inherits the Windows
+  # process directory (not the PowerShell location), so a gate started from a
+  # project subfolder read every flat retention tree as empty (2026-10-02).
+  $result = Invoke-CrgRetentionGit -ProjectContext $ProjectContext -Domain private -Arguments @('ls-tree', '--full-tree', '-z', $TreeOid) -Maximum 16384
   $text = [Text.UTF8Encoding]::new($false, $true).GetString($result.Bytes)
   if ($text.Length -eq 0 -or $text[$text.Length - 1] -ne [char]0) { throw 'retention metadata tree is empty or truncated' }
   $entries = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
@@ -339,12 +345,10 @@ function Read-CrgRetentionRecord {
   $separator = [Array]::IndexOf($bytes, [byte]10)
   if ($separator -lt 0 -or $separator -gt 64) { throw 'retained receipt lacks a bounded closed-origin header' }
   $header = [Text.Encoding]::ASCII.GetString($bytes, 0, $separator)
-  $origin = switch -CaseSensitive ($header) {
-    'crg-pair-receipt v1' { 'paired-v1' }
-    'crg-first-attachment-receipt v1' { 'first-attachment-v1' }
-    default { throw 'retained receipt has an unsupported origin' }
-  }
-  if (-not [string]::IsNullOrEmpty($ExpectedOrigin) -and $ExpectedOrigin -cne $origin) { throw 'retained receipt differs from the explicitly selected origin' }
+  $origin = if ([string]::Equals($header, 'crg-pair-receipt v1', [StringComparison]::Ordinal)) { 'paired-v1' }
+    elseif ([string]::Equals($header, 'crg-first-attachment-receipt v1', [StringComparison]::Ordinal)) { 'first-attachment-v1' }
+    else { throw 'retained receipt has an unsupported origin' }
+  if (-not [string]::IsNullOrEmpty($ExpectedOrigin) -and -not [string]::Equals($ExpectedOrigin, $origin, [StringComparison]::Ordinal)) { throw 'retained receipt differs from the explicitly selected origin' }
   # This in-memory dispatch key is not a stored completion pointer or approval.
   # The fixed private ref and exact raw receipt supply the predecessor identity.
   $newPointer = Get-CrgRetentionCommand -Module paired-governance -Name New-CrgCompletedPairPointerBytes
@@ -384,7 +388,7 @@ function Get-CrgRetentionFiles {
   [long]$total = 0
   if ($files.Count -ne $bounds.Count) { throw 'retention payload differs from the exact fixed leaf set' }
   foreach ($name in $files.Keys) {
-    if ($name -cnotin @($bounds.Keys) -or $files[$name] -isnot [byte[]] -or $files[$name].Length -gt $bounds[$name]) { throw 'retention leaf exceeds its fixed byte boundary' }
+    if (-not [System.Linq.Enumerable]::Contains([string[]]@($bounds.Keys), [string]$name, [StringComparer]::Ordinal) -or $files[$name] -isnot [byte[]] -or $files[$name].Length -gt $bounds[$name]) { throw 'retention leaf exceeds its fixed byte boundary' }
     $total += $files[$name].Length
     if ($total -gt 536870912) { throw 'retention evidence exceeds the complete 512 MiB bound' }
   }
@@ -393,9 +397,9 @@ function Get-CrgRetentionFiles {
 
 function Assert-CrgRetentionAttachment {
   param([object]$ProjectContext, [System.Collections.IDictionary]$Fields, [string]$Origin, [byte[]]$AttachmentBytes)
-  if ($Origin -ceq 'paired-v1' -and $null -ne $AttachmentBytes) { throw 'ordinary retention requires the actual attachment, not a proposed association' }
+  if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal) -and $null -ne $AttachmentBytes) { throw 'ordinary retention requires the actual attachment, not a proposed association' }
   $runtime = $ProjectContext.Runtime
-  $attachment = & $runtime.ReadFile -Path (Join-Path $ProjectContext.Domains.public.GitDir 'crg-attachment') -Maximum 16384 -AllowAbsent:($Origin -ceq 'first-attachment-v1')
+  $attachment = & $runtime.ReadFile -Path (Join-Path $ProjectContext.Domains.public.GitDir 'crg-attachment') -Maximum 16384 -AllowAbsent:([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal))
   if ($null -eq $attachment -or $attachment.Present -isnot [bool]) { throw 'retention attachment presence is unconfirmed' }
   if ($attachment.Present) {
     if ($attachment.Bytes -isnot [byte[]] -or ($null -ne $AttachmentBytes -and
@@ -405,16 +409,16 @@ function Assert-CrgRetentionAttachment {
   if ($null -eq $AttachmentBytes -or (Get-CrgRetentionDigest -Bytes $AttachmentBytes) -cne $Fields['attachment-sha256']) { throw 'retained receipt attachment bytes differ or are absent' }
   $parseAttachment = Get-CrgRetentionCommand -Module private-governance -Name Read-CrgAttachmentBytes
   $parsed = & $parseAttachment -Bytes $AttachmentBytes
-  if ($parsed.ProjectId -cne $ProjectContext.Status.ProjectId -or $parsed.RuntimeStore -cne $runtime.Store -or
-      $parsed.PrivateGitDir -cne $ProjectContext.Domains.private.GitDir -or $parsed.PublicRef -cne $ProjectContext.Domains.public.Ref -or
-      $parsed.PrivateRef -cne $ProjectContext.Domains.private.Ref) { throw 'retention attachment differs from the exact captured association or runtime store' }
+  if (-not [string]::Equals($parsed.ProjectId, $ProjectContext.Status.ProjectId, [StringComparison]::Ordinal) -or -not [string]::Equals($parsed.RuntimeStore, $runtime.Store, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($parsed.PrivateGitDir, $ProjectContext.Domains.private.GitDir, [StringComparison]::Ordinal) -or -not [string]::Equals($parsed.PublicRef, $ProjectContext.Domains.public.Ref, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($parsed.PrivateRef, $ProjectContext.Domains.private.Ref, [StringComparison]::Ordinal)) { throw 'retention attachment differs from the exact captured association or runtime store' }
 }
 
 function Read-CrgRetentionDomainResult {
   param([object]$ProjectContext, [string]$Domain, [System.Collections.IDictionary]$Fields, [string]$Origin)
   $parent = $null
-  if ($Fields[$Domain + '-parent'] -ceq 'absent') {
-    if ($Origin -cne 'first-attachment-v1' -or $Domain -cne 'private') { throw 'only initial private ancestry admits absent parent' }
+  if ([string]::Equals($Fields[$Domain + '-parent'], 'absent', [StringComparison]::Ordinal)) {
+    if (-not [string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -or -not [string]::Equals($Domain, 'private', [StringComparison]::Ordinal)) { throw 'only initial private ancestry admits absent parent' }
     $result = Read-CrgRetentionCommit -ProjectContext $ProjectContext -Domain $Domain -Oid $Fields[$Domain + '-result']
     if ($result.Parents.Count -ne 0 -or (Get-CrgRetentionDigest -Bytes $result.MessageBytes) -cne $Fields['message-sha256']) { throw 'new private result must be an actual root commit with the exact agreed message' }
   } else {
@@ -434,18 +438,18 @@ function Read-CrgRetentionDomainResult {
 function Get-CrgRetentionPayload {
   param([object]$ProjectContext, [byte[]]$ReceiptBytes, [byte[]]$DescriptorBytes,
     [System.Collections.IDictionary]$Buffers, [System.Collections.IDictionary]$TreeBytes, [object[]]$ReviewAttempts,
-    [ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin = 'paired-v1', [byte[]]$AttachmentBytes)
+    [ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin = 'paired-v1', [byte[]]$AttachmentBytes)
   $formats = @{ PublicObjectFormat = $ProjectContext.Domains.public.ObjectFormat; PrivateObjectFormat = $ProjectContext.Domains.private.ObjectFormat }
   $originCommands = Get-CrgRetentionOriginCommands -Origin $Origin
   $readReceipt = Get-CrgRetentionCommand -Module paired-governance -Name $originCommands.Receipt
   $receipt = & $readReceipt -Bytes $ReceiptBytes @formats
   $fields = $receipt.Fields; $runtime = $ProjectContext.Runtime
   $templateName = 'scripts/codex/review-prompt-template.md'
-  if ($runtime.Id -cne $fields['runtime-manifest-sha256'] -or $runtime.Payloads[$templateName].Bytes -isnot [byte[]]) { throw 'retention requires the exact recorded retained runtime and template' }
+  if (-not [string]::Equals($runtime.Id, $fields['runtime-manifest-sha256'], [StringComparison]::Ordinal) -or $runtime.Payloads[$templateName].Bytes -isnot [byte[]]) { throw 'retention requires the exact recorded retained runtime and template' }
   $expected = @{ 'public-worktree' = $ProjectContext.Root; 'public-git-dir' = $ProjectContext.Domains.public.GitDir
     'public-common-dir' = $ProjectContext.Domains.public.CommonDir; 'private-git-dir' = $ProjectContext.Domains.private.GitDir
     'public-ref' = $ProjectContext.Domains.public.Ref; 'private-ref' = $ProjectContext.Domains.private.Ref; 'project-id' = $ProjectContext.Status.ProjectId }
-  foreach ($name in $expected.Keys) { if ($fields[$name] -cne $expected[$name]) { throw "retained receipt association differs at '$name'" } }
+  foreach ($name in $expected.Keys) { if (-not [string]::Equals($fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "retained receipt association differs at '$name'" } }
   Assert-CrgRetentionAttachment -ProjectContext $ProjectContext -Fields $fields -Origin $Origin -AttachmentBytes $AttachmentBytes
   if ($null -eq $Buffers -or $null -eq $TreeBytes -or $TreeBytes.Count -ne 2 -or
       $TreeBytes['public'] -isnot [byte[]] -or $TreeBytes['private'] -isnot [byte[]] -or
@@ -498,7 +502,7 @@ function Get-CrgRetentionPayload {
   $newPreparation = Get-CrgRetentionCommand -Module project-preparation -Name New-CrgProjectPreparationBytes
   $sources = [ordered]@{}
   foreach ($kind in @('governing', 'candidate')) {
-    if ($Origin -ceq 'first-attachment-v1' -and $kind -ceq 'governing') {
+    if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -and [string]::Equals($kind, 'governing', [StringComparison]::Ordinal)) {
       $newBootstrap = Get-CrgRetentionCommand -Module project-preparation -Name New-CrgBootstrapProjectPreparationBytes
       $readBootstrap = Get-CrgRetentionCommand -Module project-preparation -Name Read-CrgBootstrapProjectPreparationBytes
       $compiled = & $newBootstrap -RuntimeSha256 $runtime.Id -TemplateBytes $runtime.Payloads[$templateName].Bytes
@@ -511,7 +515,7 @@ function Get-CrgRetentionPayload {
     if ((Get-CrgRetentionDigest -Bytes $compiled) -cne $fields[$kind + '-preparation-sha256']) { throw 'retained preparation differs from exact recorded-domain source compilation' }
     $sources.Add($kind, $source)
   }
-  if ($Origin -ceq 'first-attachment-v1') {
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
     $emptyTree = Get-CrgRetentionDigest -Bytes ([byte[]]@()) -ObjectFormat $formats.PrivateObjectFormat -Type tree
     if ($fields['private-baseline-tree'] -cne $emptyTree) { throw 'initial private evidence requires the independently computed empty tree' }
     $null = Read-CrgRetentionObject -ProjectContext $ProjectContext -Domain private -Oid $emptyTree -Type tree -Maximum 0
@@ -530,11 +534,11 @@ function Get-CrgRetentionPayload {
   $descriptorSha = Get-CrgRetentionDigest -Bytes $DescriptorBytes
   $metadata = & $readBundle -DescriptorBytes $DescriptorBytes -ExpectedDescriptorSha256 $descriptorSha -Buffers $Buffers -GoverningConfigBytes $sources.governing.ConfigBytes -CandidateConfigBytes $sources.candidate.ConfigBytes -PublicTreeBytes $TreeBytes.public -PrivateTreeBytes $TreeBytes.private -RuntimeTemplateBytes $runtime.Payloads[$templateName].Bytes -ContextBlobBuffers $contextBlobs
   if (@($receipt.ReviewAttempts | Where-Object { $_.ActualProvider -ceq 'grok' }).Count -gt 0 -and
-      $metadata.Descriptor.GoverningConfig.ReviewerPolicy -cne 'grok-fallback') { throw 'retained Grok review was not enabled by the governing private configuration' }
+      -not [string]::Equals($metadata.Descriptor.GoverningConfig.ReviewerPolicy, 'grok-fallback', [StringComparison]::Ordinal)) { throw 'retained Grok review was not enabled by the governing private configuration' }
   if ($metadata.ReviewUnit.ReviewUnitSha256 -cne $fields['review-unit-sha256'] -or
-      $metadata.Descriptor.Fields['public-object-format'] -cne $formats.PublicObjectFormat -or
-      $metadata.Descriptor.Fields['private-object-format'] -cne $formats.PrivateObjectFormat) { throw 'retention bundle differs from the receipt unit or domain formats' }
-  if ($Origin -ceq 'first-attachment-v1' -and $metadata.ReviewUnit.RequiresReview -ne $true) { throw 'initial retention cannot omit mandatory review for unchanged adoption' }
+      -not [string]::Equals($metadata.Descriptor.Fields['public-object-format'], $formats.PublicObjectFormat, [StringComparison]::Ordinal) -or
+      -not [string]::Equals($metadata.Descriptor.Fields['private-object-format'], $formats.PrivateObjectFormat, [StringComparison]::Ordinal)) { throw 'retention bundle differs from the receipt unit or domain formats' }
+  if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal) -and $metadata.ReviewUnit.RequiresReview -ne $true) { throw 'initial retention cannot omit mandatory review for unchanged adoption' }
   $message = Read-CrgRetentionObject -ProjectContext $ProjectContext -Domain private -Oid $fields['message-private-blob'] -Type blob -Maximum 1048576
   if ((Get-CrgRetentionDigest -Bytes $message) -cne $fields['message-sha256']) { throw 'retained private message differs from the receipt digest' }
   $pins = @{ ReviewUnitBytes = $Buffers['review-unit.txt']; DescriptorSha256 = $descriptorSha
@@ -550,7 +554,15 @@ function Get-CrgRetentionPayload {
     }
     if ($record.ObservedExit -eq 0) {
       $readArtifact = Get-CrgRetentionCommand -Module paired-governance -Name $originCommands.SuccessfulArtifact
-      $null = & $readArtifact -Bytes $attempt.VerdictBytes @pins -ExpectedBackend $record.ActualProvider -ScheduledPassCount $record.ScheduledPassCount
+      $successful = & $readArtifact -Bytes $attempt.VerdictBytes @pins -ExpectedBackend $record.ActualProvider -ScheduledPassCount $record.ScheduledPassCount
+      # Retention runs only under the recorded runtime (checked above), whose
+      # table the live session already bound exactly. The allowed set applied
+      # here is the one push guards later apply to this pair under newer
+      # releases, so evidence retained now stays revalidatable then.
+      if ($record.ActualProvider -ceq 'grok') {
+        $allowed = @(& (Get-CrgRetentionCommand -Module private-governance -Name Get-CrgGrokAllowedIdentities) -Config $metadata.Descriptor.GoverningConfig)
+        if (-not [System.Linq.Enumerable]::Contains([string[]]@($allowed), [string]($successful.RequestedModel + '|' + $successful.Effort), [StringComparer]::Ordinal)) { throw 'retained Grok model and effort differ from every identity the governing selection could have run' }
+      }
     } else {
       if ($record.ActualProvider -ceq 'codex' -and $null -eq $attempt.VerdictBytes) { throw 'retained Codex exhaustion requires its forensic verdict' }
       if ($null -ne $attempt.VerdictBytes) {
@@ -561,10 +573,10 @@ function Get-CrgRetentionPayload {
       $null = & $readExhaustion -Bytes $attempt.ExhaustionBytes @pins -ExpectedBackend $record.ActualProvider -ScheduledPassCount $record.ScheduledPassCount
     }
   }
-  if ($Origin -ceq 'paired-v1') {
+  if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) {
     $previous = Read-CrgRetentionRecord -ProjectContext $ProjectContext -ReceiptSha256 $fields['previous-pair']
     foreach ($name in @('project-id', 'attachment-sha256', 'public-ref', 'private-ref', 'public-worktree', 'public-git-dir', 'public-common-dir', 'private-git-dir')) {
-      if ($previous.Receipt.Fields[$name] -cne $fields[$name]) { throw 'preceding retention belongs to a different association' }
+      if (-not [string]::Equals($previous.Receipt.Fields[$name], $fields[$name], [StringComparison]::Ordinal)) { throw 'preceding retention belongs to a different association' }
     }
     foreach ($domain in @('public', 'private')) {
       if ($previous.Receipt.Fields[$domain + '-result'] -cne $fields[$domain + '-parent'] -or
@@ -579,7 +591,7 @@ function Read-CrgRetentionCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
     [Parameter(Mandatory = $true)][string]$ReceiptSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
     [byte[]]$AttachmentBytes)
   $custody = Open-CrgRetentionContext -ProjectContext $ProjectContext -Origin $Origin
   try {
@@ -609,7 +621,7 @@ function Read-CrgRetentionCore {
     $publicRef = 'refs/crg-results/' + $record.Receipt.Fields['public-result']
     if ((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref $publicRef) -cne $record.Receipt.Fields['public-result'] -or
         (Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain private -Ref $record.Ref) -cne $record.CommitOid) { throw 'pair retention references failed exact final reread' }
-    $validation = if ($Origin -ceq 'paired-v1') { 'retained-ordinary-pair-identity' } else { 'retained-first-attachment-identity' }
+    $validation = if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) { 'retained-ordinary-pair-identity' } else { 'retained-first-attachment-identity' }
     $result = [pscustomobject]@{ Origin = $Origin; ReceiptSha256 = $ReceiptSha256; ReceiptBytes = $record.ReceiptBytes; Receipt = $record.Receipt
       PrivateRef = $record.Ref; PrivateCommitOid = $record.CommitOid; PrivateTreeOid = $record.TreeOid; PublicRef = $publicRef
       Files = $files; Metadata = $payload.Metadata; ContextBlobBuffers = $payload.ContextBlobBuffers
@@ -625,7 +637,7 @@ function Write-CrgRetentionCore {
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$ReceiptBytes,
     [Parameter(Mandatory = $true)][object]$CapturedInput,
     [Parameter(Mandatory = $true)][object[]]$ReviewAttempts,
-    [Parameter(Mandatory = $true)][ValidateSet('paired-v1', 'first-attachment-v1')][string]$Origin,
+    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
     [byte[]]$AttachmentBytes)
   $custody = Open-CrgRetentionContext -ProjectContext $ProjectContext -Origin $Origin
   $preserveCustody = $false
@@ -633,12 +645,13 @@ function Write-CrgRetentionCore {
     if ($null -eq $CapturedInput -or $null -eq $CapturedInput.Bundle -or $CapturedInput.Bundle.DescriptorBytes -isnot [byte[]] -or
         $CapturedInput.Bundle.Buffers -isnot [System.Collections.IDictionary] -or $CapturedInput.Indexes -isnot [System.Collections.IDictionary]) { throw 'retention requires the captured fixed bundle and domain listings' }
     $payload = Get-CrgRetentionPayload -ProjectContext $ProjectContext -ReceiptBytes $ReceiptBytes -DescriptorBytes $CapturedInput.Bundle.DescriptorBytes -Buffers $CapturedInput.Bundle.Buffers -TreeBytes @{ public = $CapturedInput.Indexes.public.TreeBytes; private = $CapturedInput.Indexes.private.TreeBytes } -ReviewAttempts $ReviewAttempts -Origin $Origin -AttachmentBytes $AttachmentBytes
-    if ($Origin -ceq 'first-attachment-v1') {
+    if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
       foreach ($domain in @('public', 'private')) {
         $parent = $payload.Receipt.Fields[$domain + '-parent']
-        if ($parent -cne $ProjectContext.Domains[$domain].Parent) { throw 'initial receipt parent differs from the actual captured ancestry' }
+        if (-not [string]::Equals($parent, $ProjectContext.Domains[$domain].Parent, [StringComparison]::Ordinal)) { throw 'initial receipt parent differs from the actual captured ancestry' }
         $actual = Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain $domain -Ref $ProjectContext.Domains[$domain].Ref
-        if (($parent -ceq 'absent' -and $null -ne $actual) -or ($parent -cne 'absent' -and $actual -cne $parent)) { throw 'initial retention requires the exact actual branch parent or positively absent private branch' }
+        if (([string]::Equals($parent, 'absent', [StringComparison]::Ordinal) -and $null -ne $actual) -or
+            (-not [string]::Equals($parent, 'absent', [StringComparison]::Ordinal) -and -not [string]::Equals($actual, $parent, [StringComparison]::Ordinal))) { throw 'initial retention requires the exact actual branch parent or positively absent private branch' }
       }
     }
     $receipt = $payload.Receipt; $ref = 'refs/crg-pairs/' + $receipt.ReceiptSha256
@@ -652,7 +665,7 @@ function Write-CrgRetentionCore {
       foreach ($name in $names) {
         $bytes = $payload.Files[$name]
         $oid = Get-CrgRetentionGitLine -ProjectContext $ProjectContext -Domain private -Arguments @('hash-object', '-w', '-t', 'blob', '--no-filters', '--stdin') -InputBytes $bytes
-        if ($oid -cne (Get-CrgRetentionDigest -Bytes $bytes -ObjectFormat $ProjectContext.Domains.private.ObjectFormat -Type blob)) { throw 'private retention blob write differs from its exact bytes' }
+        if (-not [string]::Equals($oid, (Get-CrgRetentionDigest -Bytes $bytes -ObjectFormat $ProjectContext.Domains.private.ObjectFormat -Type blob), [StringComparison]::Ordinal)) { throw 'private retention blob write differs from its exact bytes' }
         [void]$lines.Append('100644 blob ' + $oid + "`t" + $name + [char]0)
       }
       $tree = Get-CrgRetentionGitLine -ProjectContext $ProjectContext -Domain private -Arguments @('mktree', '-z') -InputBytes ([Text.Encoding]::ASCII.GetBytes($lines.ToString()))
@@ -743,7 +756,7 @@ function Read-CrgCompletedPairRetention {
     [AllowNull()][AllowEmptyCollection()][byte[]]$AttachmentBytes)
   $readPointer = Get-CrgRetentionCommand -Module paired-governance -Name Read-CrgCompletedPairPointerBytes
   $pointer = & $readPointer -Bytes $PointerBytes
-  if ($pointer.Origin -ceq 'paired-v1' -and $null -ne $AttachmentBytes) { throw 'ordinary completed retention cannot use proposed attachment bytes' }
+  if ([string]::Equals($pointer.Origin, 'paired-v1', [StringComparison]::Ordinal) -and $null -ne $AttachmentBytes) { throw 'ordinary completed retention cannot use proposed attachment bytes' }
   $result = Read-CrgRetentionCore -ProjectContext $ProjectContext -ReceiptSha256 $pointer.ReceiptSha256 -Origin $pointer.Origin -AttachmentBytes $AttachmentBytes
   $readReceipt = Get-CrgRetentionCommand -Module paired-governance -Name Read-CrgCompletedPairReceiptBytes
   $null = & $readReceipt -Bytes $result.ReceiptBytes -PointerBytes $PointerBytes -PublicObjectFormat $ProjectContext.Domains.public.ObjectFormat -PrivateObjectFormat $ProjectContext.Domains.private.ObjectFormat

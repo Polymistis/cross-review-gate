@@ -114,12 +114,55 @@ session memory recurs in the next session.
 
 10. **Code unit-test ban.** Do not author, maintain, restore, or run code unit
     tests or unit-test-only support under another name. Remove existing code
-    unit tests through the authorized reviewed workflow. Integration,
-    end-to-end, smoke, performance, manual, live, and other functional testing
-    remain permitted and important. Preserve production validation and use
-    source inspection, static parsing, builds, ordinary program operation, and
-    applicable functional testing for verification. A missing code unit test is
+    unit tests through the authorized reviewed workflow. Live testing, manual
+    checks, ordinary program runs, and functional validation remain permitted
+    and important. Preserve production validation and use source inspection,
+    static parsing, builds, ordinary program operation, and functional
+    validation for verification. A missing code unit test is
     never a finding.
+
+11. **Comparisons of data are ordinal and exact.** Windows PowerShell 5.1
+    compares strings by culture in `-eq`/`-ceq` and the other comparison
+    operators, `switch`, `ValidateSet` (even with `IgnoreCase = $false`),
+    `@{}` keys, `Sort-Object`/`-Unique`/`Group-Object`, and the one-argument
+    `StartsWith`/`EndsWith`/`IndexOf(string)`; a culture compare ignores
+    characters such as U+00AD (soft hyphen), so `'.' -ceq ('.' + [char]0xAD)`
+    is true. Any comparison an outside value (a path, a Git field, file or
+    reviewer text, a parameter) can reach uses `[string]::Equals` or a
+    collection built with `[System.StringComparer]::Ordinal`, or
+    `OrdinalIgnoreCase` where letter case must not matter; a parameter's
+    accepted set is a `ValidatePattern('\A(?:a|b)\z', Options = 'None')`.
+    Case-insensitive matching is not "equals its upper case": `(?i)` and
+    OrdinalIgnoreCase disagree on U+212A (Kelvin sign) and U+017F (long s),
+    so name the exact accepted values. `[string]::Equals($null, '')` is
+    true while an Ordinal comparer's `Equals($null, '')` is false; test
+    emptiness with `.Length` or `IsNullOrEmpty` on purpose. The LEFT
+    operand's type decides an operator comparison (the right one is
+    converted to it): `$s -ceq [char]'x'` with a string `$s` is still a
+    culture string comparison, while `[char]$s[$i] -ceq 'x'` compares
+    characters; for `-contains` the left collection's elements decide, for
+    `-in` the right one's. Replace by operation: equality with
+    `[string]::Equals`, ordering with `[string]::CompareOrdinal(a, b)`
+    against 0, membership with an ordinal `Contains`, and a
+    case-insensitive `-like` with `-clike` (which matches characters
+    exactly) or an `OrdinalIgnoreCase` `StartsWith`/`EndsWith`. To sort items
+    by ordinal keys, sort an `[int[]]` index array with the keys
+    (`[Array]::Sort($keys, $index, [System.StringComparer]::Ordinal)`):
+    an `object[]` items array is passed to `[Array]::Sort` as a converted
+    copy, so the keys sort and the items stay as they were. Mirrored
+    copies change together, byte for byte. author-lint's ADVISORY
+    CULTURE-COMPARE rule reads added PowerShell lines with PowerShell's
+    parser and points at a `-c`/`-i` operator, or one with a quoted,
+    `[string]` or `[char]` operand, unless the deciding operand is a
+    `[char]`, other numeric cast or a number; a case-insensitive `-like`;
+    `StartsWith`/`EndsWith`, and `IndexOf` on a quoted string, without a
+    written-out `Ordinal` or `OrdinalIgnoreCase` comparison last;
+    `ValidateSet`; and `-Unique`/`Get-Unique`. It is a pointer, not a
+    gate: the syntax does not give an operand's run-time type, so it can
+    miss a comparison or name an exact one, and this walk is what keeps
+    comparisons exact. `switch`, `@{}`, `Sort-Object`, `Group-Object`, an
+    `IndexOf` whose argument type is not written, and a plain operator
+    between two operands of unstated type are never pointed at.
 
 ## Operational rules (bind the rounds, not the code)
 
@@ -135,6 +178,13 @@ session memory recurs in the next session.
   violates, re-derive the mechanism against it, land one round.
 - **Round-budget tripwire**: two consecutive blocked rounds on one
   commit force a step-back derivation, never a third instance fix.
+- **Enforced at the commit gate**: a retry of a blocked staged change is
+  refused before review until its remediation record gives each prior
+  BLOCKER it is asked to cover (bounded as section 5 states) a block
+  naming the invariant, the sweep and the
+  sites, plus an approach line after two blocked rounds (section 5 of
+  `docs/review-feedback-v1.md`). Write the record from the sweep actually
+  made; the reviewer checks it against the diff.
 - **Recurrence escalation (campaign level)**: the tripwire above is
   scoped to one commit, and that scope is a known blind spot — a
   slice can burn many rounds without ever tripping it twice in a row,

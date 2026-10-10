@@ -134,15 +134,63 @@ role PLAN.md | Requirements and acceptance
 
 The example is an editable shape, not a declaration of an actual project.
 `reviewer-policy default` retains compatible Codex/Claude routing with Grok
-disabled. Optional `reviewer-policy grok-fallback` requires exactly one of
-`grok-provider api grok-4.6 xhigh environment-key` or
-`grok-provider cli grok-4.6 xhigh local-login` immediately after
-`consistency-document`, before inventory records. These are fixed transport/auth
-pairs; no other model, effort, endpoint, credential source or priority is accepted.
-Default policy refuses a provider record. Installation, a saved CLI login or an
-API key alone never enables Grok.
-Reviewed governing configuration selects the route; operator authorization for
-xAI transfer and selected account usage is required before enablement. Candidate
+disabled. Optional `reviewer-policy grok-fallback` enables the Grok fallback
+reviewer with a central profile (operator ruling 2026-09-23). A project names at
+most a profile, never a model, effort or transport: an optional record
+`grok-profile <recommended|strong|fast>` immediately after
+`consistency-document`, before inventory records. Without that record the
+profile is `recommended`. The runtime release owns the profile table
+(`Get-CrgGrokProfileTable` in `scripts/private-governance.psm1`), so a model or
+effort change is one reviewed release and one central activation, never an edit
+in each attached project. The 2.4.0 table:
+
+| Profile | Model | Effort | Transport / authentication |
+|---|---|---|---|
+| `recommended` | `grok-4.7` | `xhigh` | `cli` / `local-login` |
+| `strong` | `grok-4.7` | `high` | `cli` / `local-login` |
+| `fast` | `grok-4.7-build-fast` | `high` | `cli` / `local-login` |
+
+A legacy record `grok-provider <api|cli> <grok-4.6|grok-4.7> xhigh
+<environment-key|local-login>` from releases before 2.4.0 still parses forever,
+because push guards and completed-pair reads re-parse historical configuration.
+Its model and effort are superseded by the `recommended` profile (operator
+ruling 2026-09-23: the central runtime owns the model), but it keeps its own
+transport and authentication, so the account route that carries review material
+never changes without a reviewed record change. Review-input capture refuses a
+new or changed legacy record (a first attachment always refuses one); an
+unchanged one may remain until the project replaces it. Replacing a CLI
+`local-login` record with nothing or with `grok-profile recommended` changes
+nothing under the 2.4.0 table; replacing an API record moves the route to the
+table's transport. Releases before 2.4.0 reject a `grok-profile`
+record and a `grok-fallback` policy without a provider record, and their push
+guards require a Grok review's model to equal the governing record's own model,
+so they also reject a 2.4.0 review that ran `grok-4.7` under an unchanged
+`grok-4.6` record. Push guards revalidate the whole retained completed-pair
+chain, so the restriction follows history, not current configuration: activate
+2.4.0 before any project uses either new shape, and once any attached project's
+retained history holds either shape or a Grok review run under 2.4.0 or later,
+do not roll back below 2.4.0, even after its configuration changes back.
+
+Grok artifacts record the requested model and effort. Live acceptance (adapter
+self-check, review session, follow-up promotion) requires both to equal the
+current table entry for the governing profile. Historical validation (retention,
+push guards) requires governing `grok-fallback` enablement and a model and
+effort the governing selection could have run (`Get-CrgGrokAllowedIdentities`):
+any mapping of the governing profile in the append-only profile history
+(`Get-CrgGrokProfileHistory`), plus, for a legacy record, its own model at
+`xhigh`, which releases before 2.4.0 requested. Each review unit records the
+runtime manifest ID, which identifies the release whose table ran it, and
+retention runs only under that exact runtime. Push guards instead revalidate
+retained history under the current release without loading retained releases,
+so an old review may match any historical mapping of its own profile, never
+another profile's. Default policy refuses a profile or
+provider record. Installation, a saved CLI login or an API key alone never
+enables Grok.
+Reviewed governing configuration selects the route. Enabling
+`reviewer-policy grok-fallback` in that configuration is the operator's
+authorization for xAI to receive the review material and for the selected
+account usage; no further per-review consent applies, and live calls that test
+the Grok reviewer are part of the gate's operation. Candidate
 configuration cannot enable the current review. API credentials remain external
 in `XAI_API_KEY`; CLI credentials remain owned by Grok Build's existing local
 login and are never read or copied by the gate. Authentication failure does not
@@ -157,6 +205,30 @@ requirements can use `consistency-document public docs/requirements.md` without
 moving those requirements into private history. The declared scope must match
 the private-path inventory; the parser rejects a contradictory declaration,
 while later snapshot validation proves actual blob presence and shape.
+
+Optional `unit-tests` records loosen the operator's code unit-test ban for one
+project (operator ruling 2026-10-07: the ban stays the default and only reviewed
+configuration loosens it). They follow `consistency-document` and any Grok
+record, before inventory records, in one canonical order: at most one
+`unit-tests allowed-in-mode prototype`, then zero or more
+`unit-tests allowed-path <folder>` (at most 64; a folder is a canonical path as
+defined below, without a trailing slash, whose folder names use only letters,
+digits, `.`, `_` and `-` because the compiled review policy quotes them
+verbatim; no duplicates, and the shared spelling audit rejects Windows case
+aliases against every other configuration reference and the captured tree). No record means the ban, and no record spells the ban explicitly. The
+mode allowance permits code unit tests anywhere while the governing
+`PROJECT-MODE.md` validly declares `mode: prototype`; an absent or malformed
+declaration runs shipped defaults and never loosens. A path allowance permits
+them in files under the named folders in every mode. Only the governing
+configuration and mode select the scope, and the compiled review prompt carries
+it ([project preparation](project-preparation-v1.md)); a candidate that adds or
+widens the records is reviewed under the preceding scope. The records loosen
+review only: authoring sessions also follow the operator's global instruction
+files, which a project's own instructions must reconcile. Releases before 2.5.0
+reject these records, and push guards re-parse retained configuration under the
+active release, so once any attached project's retained history holds one, do
+not roll back below 2.5.0.
+
 Next come one or more `private-directory` records,
 three or more `private-file` records, then zero or more `role` records. There
 are at most 256 path records and 128 roles. `.crg-project` and the three root
@@ -189,7 +261,9 @@ The selected private blob supplies those bytes. `PROJECT-MODE.md` retains the
 existing declaration grammar and shipped fallback for positive absence or
 positive malformed input. An unreadable/missing private repository is not an
 absent declaration and refuses. Prototype remains review context, not a work
-permit. Commit and merge wrappers never reinterpret mode as mutation permission.
+permit; it changes the code unit-test scope only under a configured
+`unit-tests allowed-in-mode prototype` record. Commit and merge wrappers never
+reinterpret mode as mutation permission.
 
 ## Instruction discovery and preparation
 
@@ -209,8 +283,9 @@ The installed launcher remains discoverable from either tool's ordinary root
 instructions. Runtime activation leaves project instructions/configuration alone.
 
 Before review, prepare immutable prompt/configuration buffers from the retained
-release and exact private Git blobs. Render only existing values slots and the
-declared document-role input; preserve exact bytes outside those surfaces.
+release and exact private Git blobs. Render only existing values slots, the
+declared document-role input and the configured code unit-test scope; preserve
+exact bytes outside those surfaces.
 Record the governing and candidate preparation digests separately. Candidate
 configuration, values, instructions, and mode are review data; the last completed
 private state governs the current review. No loose-file reread can change review
@@ -485,7 +560,12 @@ out-of-order publication. `-Resume` handles only
 the recorded transaction. After process loss, the persisted record and receipt
 prove identity only: every resumable state requires a fresh current-run review
 of that exact pair under the retained preceding governance/runtime, including
-the both-new state. No new candidate staging occurs while a handoff exists.
+the both-new state. Ordinary candidate staging refuses an existing handoff.
+The narrowly scoped published instruction correction in `first-attachment-v1.md`
+is the exception: an unactivated first-origin transaction with both result refs
+present and no completed pointer can stage root-instruction-only corrections,
+then obtain fresh first-attachment review through Attach under the active release.
+No old receipt or PASS grants publication credit, and Resume remains immutable.
 Central activation during interruption does not silently substitute a new runtime;
 the verified retained release named by the handoff finishes that transaction.
 Missing required old release/state refuses. A process crash can leave unreachable
@@ -530,4 +610,5 @@ authorization, retained-object verification and publication plumbing remain pend
 Existing checks for ordinary software/private/
 paired work, interrupted handoff, discovery and public exclusion supply bounded
 acceptance; no new code unit-test framework or broadened verification campaign is
-specified. Applicable functional testing is not prohibited merely by category.
+specified. Live testing, manual checks, ordinary program runs, and functional
+validation remain permitted.

@@ -232,5 +232,6 @@ review routing, and recovery contracts remain unchanged. This unit adds no live
 dispatcher, consumer attachment, private-governance enforcement, or provider path.
 Completion requires focused evidence for exact source/package publication,
 idempotence and mismatch refusal, activation/rollback, and retained selection
-across a central switch. No new code unit-test framework is included; applicable
-functional testing is not prohibited merely by category.
+across a central switch. No new code unit-test framework is included; live
+testing, manual checks, ordinary program runs, and functional validation remain
+permitted.

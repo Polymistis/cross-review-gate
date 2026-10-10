@@ -6,17 +6,18 @@ function Get-CrgInstructionCommand {
   $relative = 'scripts/' + $Module + '.psm1'
   $commands = @(Get-Command -Name $Name -Module $Module -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($null -eq $Runtime -or $Runtime.Payloads -isnot [Collections.IDictionary] -or
-      $relative -cnotin @($Runtime.Payloads.Keys) -or $commands.Count -ne 1 -or
+      -not [System.Linq.Enumerable]::Contains([string[]]@($Runtime.Payloads.Keys), [string]$relative, [System.StringComparer]::Ordinal) -or $commands.Count -ne 1 -or
       -not [string]::Equals($commands[0].Module.Path, $Runtime.Payloads[$relative].Path, [StringComparison]::OrdinalIgnoreCase)) { throw "instructions require retained '$Module/$Name'" }
   return $commands[0]
 }
 
 function Get-CrgInstructionDigest {
   param([byte[]]$Bytes, [string]$ObjectFormat)
-  $sha = if ($ObjectFormat -ceq 'sha1') { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
+  # Ordinal: -ceq/-cne compare by culture and ignore characters such as U+00AD.
+  $sha = if ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { [Security.Cryptography.SHA1]::Create() } else { [Security.Cryptography.SHA256]::Create() }
   try {
     if (-not [string]::IsNullOrEmpty($ObjectFormat)) {
-      if ($ObjectFormat -cnotin @('sha1', 'sha256')) { throw 'instruction object format is invalid' }
+      if (-not ([string]::Equals($ObjectFormat, 'sha1', [StringComparison]::Ordinal) -or [string]::Equals($ObjectFormat, 'sha256', [StringComparison]::Ordinal))) { throw 'instruction object format is invalid' }
       $header = [Text.Encoding]::ASCII.GetBytes('blob ' + $Bytes.Length + [char]0)
       $null = $sha.TransformBlock($header, 0, $header.Length, $header, 0)
       $null = $sha.TransformFinalBlock($Bytes, 0, $Bytes.Length)
@@ -39,7 +40,7 @@ function New-CrgCentralInstructionDiscoveryBytes {
     Assert-CrgGovernancePath -Path $Plan
     Assert-CrgGovernancePath -Path $History
   } $RuntimeStore $PlanPath $HistoryPath
-  if ([IO.Path]::GetFullPath($RuntimeStore) -cne $RuntimeStore -or $PlanPath -ceq $HistoryPath) { throw 'discovery requires canonical store and distinct explicit plan/history paths' }
+  if (-not [string]::Equals([IO.Path]::GetFullPath($RuntimeStore), $RuntimeStore, [StringComparison]::Ordinal) -or [string]::Equals($PlanPath, $HistoryPath, [StringComparison]::Ordinal)) { throw 'discovery requires canonical store and distinct explicit plan/history paths' }
   $lines = @('<!-- crg-central-discovery v1 BEGIN -->', '## Central cross-review gate',
     ('Runtime launcher: ' + (Join-Path $RuntimeStore 'launcher.ps1')),
     'Project configuration: .crg-project/project.conf', ('Private plan: ' + $PlanPath), ('Private history: ' + $HistoryPath),
@@ -69,13 +70,14 @@ function Read-CrgInstructionDiscovery {
   if ($plan.Count -ne 1 -or $history.Count -ne 1) { throw 'discovery lacks explicit plan/history records' }
   $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $history[0].Groups[1].Value
   $actual = [Text.UTF8Encoding]::new($false, $true).GetBytes($section)
-  if ((Get-CrgInstructionDigest -Bytes $actual) -cne (Get-CrgInstructionDigest -Bytes $expected)) { throw 'discovery section differs from the selected stable launcher contract' }
+  if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $actual), (Get-CrgInstructionDigest -Bytes $expected), [StringComparison]::Ordinal)) { throw 'discovery section differs from the selected stable launcher contract' }
   return [pscustomobject]@{ Bytes = $expected; PlanPath = $plan[0].Groups[1].Value; HistoryPath = $history[0].Groups[1].Value }
 }
 
 function Assert-CrgCentralInstructionDiscovery {
   [CmdletBinding()]
-  param([Parameter(Mandatory = $true)][object]$Operation, [Parameter(Mandatory = $true)][object]$CapturedInput)
+  param([Parameter(Mandatory = $true)][object]$Operation, [Parameter(Mandatory = $true)][object]$CapturedInput,
+    [switch]$RequireWorkingBytes)
   $runtime = $Operation.Runtime; $project = $Operation.ProjectContext
   $parseTree = Get-CrgInstructionCommand -Runtime $runtime -Module paired-tree -Name Read-CrgGitTreeBytes
   $readConfig = Get-CrgInstructionCommand -Runtime $runtime -Module private-governance -Name Read-CrgProjectConfigBytes
@@ -85,17 +87,28 @@ function Assert-CrgCentralInstructionDiscovery {
   $config = & $readConfig -Bytes $CapturedInput.PreparationSources.candidate.ConfigBytes
   $first = $null
   foreach ($name in @('AGENTS.md', 'CLAUDE.md')) {
-    $entry = @($entries | Where-Object { $_.Path -ceq $name })
-    if ($entry.Count -ne 1 -or $entry[0].Mode -cnotin @('100644', '100755') -or
+    $entry = @($entries | Where-Object { [string]::Equals($_.Path, $name, [StringComparison]::Ordinal) })
+    if ($entry.Count -ne 1 -or -not ([string]::Equals($entry[0].Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($entry[0].Mode, '100755', [StringComparison]::Ordinal)) -or
         $CapturedInput.ContextBlobBuffers[$name] -isnot [byte[]]) { throw "candidate private instructions '$name' are absent or nonregular" }
     $bytes = $CapturedInput.ContextBlobBuffers[$name]
-    if ((Get-CrgInstructionDigest -Bytes $bytes -ObjectFormat $project.Domains.private.ObjectFormat) -cne $entry[0].Oid) { throw 'instruction buffer differs from the actual captured private blob' }
+    if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $bytes -ObjectFormat $project.Domains.private.ObjectFormat), $entry[0].Oid, [StringComparison]::Ordinal)) { throw 'instruction buffer differs from the actual captured private blob' }
+    if ($RequireWorkingBytes) {
+      # Activation already requires exact bytes. Check before paid review as well:
+      # Git clean conversion can leave a text-equivalent CRLF working file whose
+      # LF candidate would otherwise publish refs and then fail activation.
+      $working = & $runtime.ReadFile -Path (Join-Path $project.Root $name) -Maximum 16777216 -AllowAbsent
+      if (-not $working.Present -or $working.Bytes -isnot [byte[]] -or
+          -not [string]::Equals((Get-CrgInstructionDigest -Bytes $working.Bytes), (Get-CrgInstructionDigest -Bytes $bytes), [StringComparison]::Ordinal)) {
+        throw "first attachment requires working '$name' to match the captured private blob byte-for-byte before review; preserve edits and reconcile candidate bytes, including line endings, before retrying"
+      }
+    }
     $section = Read-CrgInstructionDiscovery -Bytes $bytes -RuntimeStore $runtime.Store
-    if ($null -ne $first -and (Get-CrgInstructionDigest -Bytes $first.Bytes) -cne (Get-CrgInstructionDigest -Bytes $section.Bytes)) { throw 'AGENTS.md and CLAUDE.md must contain the same reviewed discovery section' }
+    if ($null -ne $first -and -not [string]::Equals((Get-CrgInstructionDigest -Bytes $first.Bytes), (Get-CrgInstructionDigest -Bytes $section.Bytes), [StringComparison]::Ordinal)) { throw 'AGENTS.md and CLAUDE.md must contain the same reviewed discovery section' }
     foreach ($path in @($section.PlanPath, $section.HistoryPath)) {
-      $document = @($entries | Where-Object { $_.Path -ceq $path })
-      $role = @($config.Roles | Where-Object { $_.Path -ceq $path })
-      if ($document.Count -ne 1 -or $document[0].Mode -cnotin @('100644', '100755') -or $role.Count -ne 1) { throw "discovery path '$path' must be an existing private document with an explicit configured role" }
+      $document = @($entries | Where-Object { [string]::Equals($_.Path, $path, [StringComparison]::Ordinal) })
+      $role = @($config.Roles | Where-Object { [string]::Equals($_.Path, $path, [StringComparison]::Ordinal) })
+      if ($document.Count -ne 1 -or -not ([string]::Equals($document[0].Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($document[0].Mode, '100755', [StringComparison]::Ordinal)) -or
+          $role.Count -ne 1) { throw "discovery path '$path' must be an existing private document with an explicit configured role" }
     }
     $first = $section
   }
@@ -107,7 +120,7 @@ function Read-CrgMaterializedBytes {
   if ($null -eq $Bytes -or $Bytes.Length -gt 1024) { throw 'materialization record is absent or oversized' }
   $text = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
   $pattern = '\Acrg-materialized v1\nattachment-sha256 ([0-9a-f]{64})\nAGENTS\.md (paired-v1|first-attachment-v1) ([0-9a-f]{64})\nCLAUDE\.md (paired-v1|first-attachment-v1) ([0-9a-f]{64})\n\z'
-  if ($text -cnotmatch $pattern -or $Matches[1] -cne $AttachmentSha256) { throw 'materialization record has an invalid shape or attachment identity' }
+  if ($text -cnotmatch $pattern -or -not [string]::Equals($Matches[1], $AttachmentSha256, [StringComparison]::Ordinal)) { throw 'materialization record has an invalid shape or attachment identity' }
   return [ordered]@{
     'AGENTS.md' = [pscustomobject]@{ Origin = $Matches[2]; ReceiptSha256 = $Matches[3] }
     'CLAUDE.md' = [pscustomobject]@{ Origin = $Matches[4]; ReceiptSha256 = $Matches[5] }
@@ -130,7 +143,7 @@ function Get-CrgInstructionApprovedState {
   foreach ($pair in @(@('attachment-sha256', (Get-CrgInstructionDigest -Bytes $Operation.AttachmentBytes)),
       @('public-worktree', $project.Root), @('public-git-dir', $project.Domains.public.GitDir),
       @('private-git-dir', $project.Domains.private.GitDir), @('private-ref', $project.Domains.private.Ref))) {
-    if ($fields[$pair[0]] -cne $pair[1]) { throw 'materialization receipt differs from the current project association' }
+    if (-not [string]::Equals($fields[$pair[0]], $pair[1], [StringComparison]::Ordinal)) { throw 'materialization receipt differs from the current project association' }
   }
   $tree = Get-CrgInstructionCommand -Runtime $runtime -Module central-context -Name Read-CrgCentralTreeBytes
   $parse = Get-CrgInstructionCommand -Runtime $runtime -Module paired-tree -Name Read-CrgGitTreeBytes
@@ -139,8 +152,8 @@ function Get-CrgInstructionApprovedState {
   $entries = & $parse -Bytes $treeBytes -ObjectFormat $project.Domains.private.ObjectFormat
   $files = [ordered]@{}
   foreach ($name in @('AGENTS.md', 'CLAUDE.md', '.crg-project/project.conf')) {
-    $entry = @($entries | Where-Object { $_.Path -ceq $name })
-    if ($entry.Count -ne 1 -or $entry[0].Mode -cnotin @('100644', '100755')) { throw 'approved private instruction or configuration blob is missing' }
+    $entry = @($entries | Where-Object { [string]::Equals($_.Path, $name, [StringComparison]::Ordinal) })
+    if ($entry.Count -ne 1 -or -not ([string]::Equals($entry[0].Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($entry[0].Mode, '100755', [StringComparison]::Ordinal))) { throw 'approved private instruction or configuration blob is missing' }
     $maximum = if ($name -ceq '.crg-project/project.conf') { 65536 } else { 16777216 }
     $bytes = & $blob -ProjectContext $project -Domain private -BlobOid $entry[0].Oid -Maximum $maximum
     $files[$name] = [pscustomobject]@{ Bytes = $bytes; Entry = $entry[0] }
@@ -165,12 +178,12 @@ function Sync-CrgCentralInstructions {
   if ($Initial) {
     $readReceipt = Get-CrgInstructionCommand -Runtime $runtime -Module paired-governance -Name Read-CrgFirstAttachmentReceiptBytes
     $receipt = & $readReceipt -Bytes $ReceiptBytes -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
-    if ($receipt.Fields['private-tree'] -cne $CapturedInput.Indexes.private.TreeOid -or
-        $receipt.Fields['review-unit-sha256'] -cne $CapturedInput.Bundle.Metadata.ReviewUnit.ReviewUnitSha256) { throw 'initial materialization receipt differs from the captured reviewed candidate' }
+    if (-not [string]::Equals($receipt.Fields['private-tree'], $CapturedInput.Indexes.private.TreeOid, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($receipt.Fields['review-unit-sha256'], $CapturedInput.Bundle.Metadata.ReviewUnit.ReviewUnitSha256, [StringComparison]::Ordinal)) { throw 'initial materialization receipt differs from the captured reviewed candidate' }
     $origin = 'first-attachment-v1'
     $null = Assert-CrgCentralInstructionDiscovery -Operation $Operation -CapturedInput $CapturedInput
   } else {
-    if ($Operation.ValidationState -cne 'held-project-and-preceding-pair') { throw 'Open materialization requires the current completed-pair owner' }
+    if (-not [string]::Equals($Operation.ValidationState, 'held-project-and-preceding-pair', [StringComparison]::Ordinal)) { throw 'Open materialization requires the current completed-pair owner' }
     $receipt = $Operation.PreviousReceipt
     $readPointer = Get-CrgInstructionCommand -Runtime $runtime -Module paired-governance -Name Read-CrgCompletedPairPointerBytes
     $origin = (& $readPointer -Bytes $Operation.PointerBytes).Origin
@@ -194,12 +207,13 @@ function Sync-CrgCentralInstructions {
   $next = [ordered]@{}
   $results = New-Object 'System.Collections.Generic.List[object]'
   $writes = New-Object 'System.Collections.Generic.List[object]'
-  $cache = @{}
+  $cache = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
   foreach ($name in @('AGENTS.md', 'CLAUDE.md')) {
     $desired = $approved.Files[$name]; $actual = $working[$name]
-    $staged = @($index | Where-Object { $_.Path -ceq $name })
-    $indexMatches = $staged.Count -eq 1 -and $staged[0].Mode -ceq $desired.Entry.Mode -and $staged[0].Oid -ceq $desired.Entry.Oid
-    $workingMatches = $actual.Present -and (Get-CrgInstructionDigest -Bytes $actual.Bytes) -ceq (Get-CrgInstructionDigest -Bytes $desired.Bytes)
+    $staged = @($index | Where-Object { [string]::Equals($_.Path, $name, [StringComparison]::Ordinal) })
+    $indexMatches = $staged.Count -eq 1 -and [string]::Equals($staged[0].Mode, $desired.Entry.Mode, [StringComparison]::Ordinal) -and
+      [string]::Equals($staged[0].Oid, $desired.Entry.Oid, [StringComparison]::Ordinal)
+    $workingMatches = $actual.Present -and [string]::Equals((Get-CrgInstructionDigest -Bytes $actual.Bytes), (Get-CrgInstructionDigest -Bytes $desired.Bytes), [StringComparison]::Ordinal)
     if ($Initial) {
       if (-not $indexMatches -or -not $workingMatches) { throw "initial attachment preserves conflicting/staged/deleted '$name'; exact reviewed bytes must be present before activation" }
       $next[$name] = [pscustomobject]@{ Origin = $origin; ReceiptSha256 = $receipt.ReceiptSha256 }
@@ -219,7 +233,7 @@ function Sync-CrgCentralInstructions {
       }
       $baseline = $cache[$cacheKey].Files[$name].Bytes
       if ($workingMatches) { $state = 'approved-bytes'; $next[$name] = [pscustomobject]@{ Origin = $origin; ReceiptSha256 = $receipt.ReceiptSha256 } }
-      elseif ((Get-CrgInstructionDigest -Bytes $actual.Bytes) -ceq (Get-CrgInstructionDigest -Bytes $baseline)) {
+      elseif ([string]::Equals((Get-CrgInstructionDigest -Bytes $actual.Bytes), (Get-CrgInstructionDigest -Bytes $baseline), [StringComparison]::Ordinal)) {
         $writes.Add([pscustomobject]@{ Name = $name; Expected = [byte[]]$actual.Bytes.Clone(); Bytes = $desired.Bytes })
         $state = 'advanced-clean'; $next[$name] = [pscustomobject]@{ Origin = $origin; ReceiptSha256 = $receipt.ReceiptSha256 }
       } else { $state = 'working-edits-preserved' }
@@ -239,11 +253,11 @@ function Sync-CrgCentralInstructions {
     # file leases. A staged edit cannot enter between classification and write.
     $phase = & $openReads -Runtime $runtime.OriginalRuntime -OperationLock $Operation.OperationLock -ProjectRoots @($project.Root, $project.Domains.public.GitDir) -ExecutableReads @($Operation.GitExecutableOwner)
     $heldIndex = & $phase.Runtime.ReadFile -Path $project.Domains.private.IndexPath -Maximum 67108864
-    if ((Get-CrgInstructionDigest -Bytes $heldIndex.Bytes) -cne (Get-CrgInstructionDigest -Bytes $fixedIndex.Bytes)) { throw 'private staging changed before instruction materialization' }
+    if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $heldIndex.Bytes), (Get-CrgInstructionDigest -Bytes $fixedIndex.Bytes), [StringComparison]::Ordinal)) { throw 'private staging changed before instruction materialization' }
     if ($Initial) {
       foreach ($name in @('AGENTS.md', 'CLAUDE.md')) {
         $held = & $phase.Runtime.ReadFile -Path (Join-Path $project.Root $name) -Maximum 16777216
-        if ((Get-CrgInstructionDigest -Bytes $held.Bytes) -cne (Get-CrgInstructionDigest -Bytes $approved.Files[$name].Bytes)) { throw 'initial approved instructions changed before baseline publication' }
+        if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $held.Bytes), (Get-CrgInstructionDigest -Bytes $approved.Files[$name].Bytes), [StringComparison]::Ordinal)) { throw 'initial approved instructions changed before baseline publication' }
       }
     }
     # Exact expected-root validation remains inside the DELETE-capable native
@@ -252,18 +266,18 @@ function Sync-CrgCentralInstructions {
       & $release -Owner $Operation.ReadOwner -Paths @((Join-Path $project.Root $write.Name))
       $null = & $writeRoot -ProjectContext $project -OperationLock $Operation.OperationLock -Name $write.Name -ExpectedBytes $write.Expected -Bytes $write.Bytes
       $readback = & $runtime.ReadFile -Path (Join-Path $project.Root $write.Name) -Maximum 16777216
-      if ((Get-CrgInstructionDigest -Bytes $readback.Bytes) -cne (Get-CrgInstructionDigest -Bytes $write.Bytes)) { throw 'materialized instruction failed exact approved-byte readback' }
+      if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $readback.Bytes), (Get-CrgInstructionDigest -Bytes $write.Bytes), [StringComparison]::Ordinal)) { throw 'materialized instruction failed exact approved-byte readback' }
     }
-    if ($null -eq $expectedRecord -or (Get-CrgInstructionDigest -Bytes $expectedRecord) -cne (Get-CrgInstructionDigest -Bytes $nextBytes)) {
+    if ($null -eq $expectedRecord -or -not [string]::Equals((Get-CrgInstructionDigest -Bytes $expectedRecord), (Get-CrgInstructionDigest -Bytes $nextBytes), [StringComparison]::Ordinal)) {
       & $release -Owner $Operation.ReadOwner -Paths @((Join-Path $project.Domains.public.GitDir 'crg-materialized'))
       $null = & $writeState -ProjectContext $project -OperationLock $Operation.OperationLock -Leaf crg-materialized -ExpectedBytes $expectedRecord -Bytes $nextBytes
       $readback = & $runtime.ReadFile -Path (Join-Path $project.Domains.public.GitDir 'crg-materialized') -Maximum 1024
-      if ((Get-CrgInstructionDigest -Bytes $readback.Bytes) -cne (Get-CrgInstructionDigest -Bytes $nextBytes)) { throw 'materialization baseline failed exact readback' }
+      if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $readback.Bytes), (Get-CrgInstructionDigest -Bytes $nextBytes), [StringComparison]::Ordinal)) { throw 'materialization baseline failed exact readback' }
     }
     foreach ($result in $results) {
       if ($result.State -cnotin @('approved-bytes', 'advanced-clean')) { continue }
       $readback = & $runtime.ReadFile -Path (Join-Path $project.Root $result.Path) -Maximum 16777216
-      if ((Get-CrgInstructionDigest -Bytes $readback.Bytes) -cne (Get-CrgInstructionDigest -Bytes $approved.Files[$result.Path].Bytes)) { throw 'approved instruction changed before materialization completion' }
+      if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $readback.Bytes), (Get-CrgInstructionDigest -Bytes $approved.Files[$result.Path].Bytes), [StringComparison]::Ordinal)) { throw 'approved instruction changed before materialization completion' }
     }
     & $assertReads -Owner $phase
     if ($Initial) {

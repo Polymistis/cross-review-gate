@@ -2069,6 +2069,8 @@ scripts/claude/commit.ps1
 scripts/git-hooks/pre-commit
 scripts/run-gate.sh
 scripts/render-project-values.ps1
+scripts/review-liveness.psm1
+scripts/review-common.ps1
 docs/AGENTS.md.template
 docs/audit-protocol.md'
 if [ "$CROSS_REVIEW_ALLOW_GATE_UNTRACK" != "1" ]; then
@@ -3032,6 +3034,78 @@ crg_register_trusted_dir() {
   return 0
 }
 
+# Shared modules every review wrapper imports from its own scripts/ parent.
+# They are review infrastructure exactly like the wrappers: a candidate edit
+# to one must not run as the reviewer of that edit, so they take the same
+# trusted-copy path and always sit in the same directory tree as the wrapper
+# that imports them. Keep in step with $reviewInfra in
+# scripts/shared/auto-merge.ps1 and the bootstrap install inventory.
+REVIEW_MODULES='scripts/review-liveness.psm1 scripts/review-common.ps1'
+
+# Prints the REVIEW_MODULES entries that wrapper file $1 names, which are the
+# ones it imports. The requirement follows the wrapper that will actually run,
+# never the module list alone: a trusted wrapper from before a module existed
+# never names it and must keep running on a base that lacks it (merge-panel
+# BLOCKER 2026-10-07). A name in a comment also counts; over-requiring can
+# only refuse. rc 1 when the wrapper cannot be read.
+crg_review_modules_for() {
+  _crg_rm_out=''
+  for _crg_rm_m in $REVIEW_MODULES; do
+    grep -F -q -- "${_crg_rm_m##*/}" "$1" 2>/dev/null; _crg_rm_rc=$?
+    case "$_crg_rm_rc" in
+      0) _crg_rm_out="$_crg_rm_out $_crg_rm_m" ;;
+      1) ;;
+      *) return 1 ;;
+    esac
+  done
+  printf '%s' "$_crg_rm_out"
+}
+
+# Allocates and registers $TRUSTED_DIR, the one directory a backend's review
+# set runs from. Per-backend cleanup uses a quoted fixed slot so multi-backend
+# runs and a space-bearing TMPDIR cannot fragment or alias one another.
+crg_new_review_dir() {
+  TRUSTED_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t "crg-pre-commit-$BACKEND_NAME")
+  if [ -z "$TRUSTED_DIR" ] || [ ! -d "$TRUSTED_DIR" ]; then
+    echo "[pre-commit:$BACKEND_NAME] ERROR: could not create tempdir for trusted review infra" >&2
+    return 1
+  fi
+  if ! crg_register_trusted_dir "$TRUSTED_DIR"; then
+    echo "[pre-commit:$BACKEND_NAME] ERROR: trusted review-infrastructure cleanup capacity was exceeded" >&2
+    rmdir "$TRUSTED_DIR" 2>/dev/null
+    return 1
+  fi
+}
+
+# Copies review component $1 into $TRUSTED_DIR from HEAD, or admits it as a
+# manifest-verified LOCAL snapshot (appended to TB_LOCAL) when HEAD positively
+# lacks it. The snapshot is copied FIRST and hashed AS the snapshot, so the
+# admitted bytes are exactly the verified bytes. rc 2: absent from HEAD and
+# not admissible as LOCAL (the snapshot helper printed why); rc 1: any other
+# refusal, with a diagnostic.
+# Each component creates its own parent: the parents differ (the Claude wrapper
+# reuses the prompt under scripts/codex/), and a missing parent once aborted the
+# trusted-base bootstrap.
+crg_trusted_copy_component() {
+  mkdir -p "$TRUSTED_DIR/$(dirname "$1")"
+  case "$(crg_head_state "$1")" in
+    present)
+      if ! git show "HEAD:$1" > "$TRUSTED_DIR/$1" 2>/dev/null; then
+        echo "[pre-commit:$BACKEND_NAME] ERROR: git show HEAD:$1 failed" >&2
+        return 1
+      fi
+      ;;
+    absent)
+      crg_local_install_snapshot "$1" "$TRUSTED_DIR/$1" || return 2
+      TB_LOCAL="$TB_LOCAL $1"
+      ;;
+    *)
+      echo "[pre-commit:$BACKEND_NAME] ERROR: HEAD-state probe for $1 failed (the HEAD listing did not succeed; indeterminate refuses)." >&2
+      return 1
+      ;;
+  esac
+}
+
 # Run one backend's review gate. Args:
 #   $1 = backend name (codex|claude)
 #   $2 = wrapper path relative to repo (scripts/<x>/auto-review.ps1)
@@ -3042,7 +3116,7 @@ run_backend() {
   BACKEND_NAME="$1"
   WRAPPER_REL="$2"
   PROMPT_REL="$3"
-  REVIEW_INFRA="$WRAPPER_REL $PROMPT_REL scripts/git-hooks/pre-commit"
+  REVIEW_INFRA="$WRAPPER_REL $PROMPT_REL $REVIEW_MODULES scripts/git-hooks/pre-commit"
 
   # Refuse if backend infra has unstaged changes (running version would
   # differ from staged version).
@@ -3077,8 +3151,8 @@ run_backend() {
       1) INFRA_STAGED=1; break ;;
       *)
         # TRI-STATE: an indeterminate probe must not read as "infra
-        # unchanged" (which would run the working-tree wrapper instead of
-        # the trusted HEAD copy).
+        # unchanged" (which would skip the staged-infra trusted-base
+        # handling).
         echo "[pre-commit:$BACKEND_NAME] ERROR: the staged-state probe for review infra $f failed (git diff --cached exited $CRG_IS_RC; indeterminate refuses). Aborting commit." >&2
         return 1
         ;;
@@ -3116,46 +3190,20 @@ run_backend() {
         return 1
       fi
     done
-    TRUSTED_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t crg-pre-commit-$BACKEND_NAME)
-    if [ -z "$TRUSTED_DIR" ] || [ ! -d "$TRUSTED_DIR" ]; then
-      echo "[pre-commit:$BACKEND_NAME] ERROR: could not create tempdir for trusted review infra" >&2
-      return 1
-    fi
-    # Per-backend cleanup uses a quoted fixed slot so multi-backend runs and a
-    # space-bearing TMPDIR cannot fragment or alias one another.
-    if ! crg_register_trusted_dir "$TRUSTED_DIR"; then
-      echo "[pre-commit:$BACKEND_NAME] ERROR: trusted review-infrastructure cleanup capacity was exceeded" >&2
-      rmdir "$TRUSTED_DIR" 2>/dev/null
-      return 1
-    fi
-    # Create parent directories for BOTH the wrapper and the prompt
-    # (their parents can differ -- e.g., Claude backend has the wrapper
-    # under scripts/claude/ but reuses the prompt at scripts/codex/).
-    # Without creating BOTH, the second extraction redirect lands in a
-    # nonexistent directory and the trusted-base bootstrap aborts the
-    # gate. (Historical regression.)
+    crg_new_review_dir || return 1
     TB_LOCAL=""
     for f in $WRAPPER_REL $PROMPT_REL; do
-      mkdir -p "$TRUSTED_DIR/$(dirname "$f")"
-      crg_tx_head=$(crg_head_state "$f")
-      if [ "$crg_tx_head" = error ]; then
-        echo "[pre-commit:$BACKEND_NAME] ERROR: HEAD-state probe for $f failed (the HEAD listing did not succeed; indeterminate refuses)." >&2
-        return 1
-      fi
-      if [ "$crg_tx_head" = present ]; then
-        if ! git show "HEAD:$f" > "$TRUSTED_DIR/$f" 2>/dev/null; then
-          echo "[pre-commit:$BACKEND_NAME] ERROR: git show HEAD:$f failed" >&2
-          return 1
-        fi
-      else
-        # The snapshot is copied FIRST and hashed AS the snapshot, so
-        # the admitted bytes are exactly the verified bytes.
-        if ! crg_local_install_snapshot "$f" "$TRUSTED_DIR/$f"; then
-          echo "[pre-commit:$BACKEND_NAME] ERROR: could not admit $f as a manifest-verified local snapshot" >&2
-          return 1
-        fi
-        TB_LOCAL="$TB_LOCAL $f"
-      fi
+      crg_trusted_copy_component "$f" || return 1
+    done
+    if ! TB_MODULES=$(crg_review_modules_for "$TRUSTED_DIR/$WRAPPER_REL"); then
+      echo "[pre-commit:$BACKEND_NAME] ERROR: could not read the trusted wrapper to resolve the shared modules it imports. Aborting commit." >&2
+      return 1
+    fi
+    for f in $TB_MODULES; do
+      crg_trusted_copy_component "$f"; crg_tm_rc=$?
+      [ "$crg_tm_rc" -eq 0 ] && continue
+      [ "$crg_tm_rc" -eq 2 ] && echo "[pre-commit:$BACKEND_NAME] ERROR: the trusted wrapper imports $f, which is neither in HEAD nor a manifest-verified local component. Aborting commit." >&2
+      return 1
     done
     WRAPPER_PATH="$TRUSTED_DIR/$WRAPPER_REL"
     PROMPT_PATH="$TRUSTED_DIR/$PROMPT_REL"
@@ -3164,63 +3212,53 @@ run_backend() {
       echo "[pre-commit:$BACKEND_NAME] (manifest-verified LOCAL components admitted into the trusted copy:$TB_LOCAL - docs/local-install-v1.md section 1)"
     fi
   else
-    # No staged change to infra. Require the wrapper + prompt to be
-    # TRACKED in HEAD before running the working-tree copy. Without this
-    # check, an untracked working-tree wrapper/prompt (e.g. just dropped
-    # in by bootstrap.ps1, never committed) would run as the gate with
-    # NO trusted baseline -- the user could ship arbitrary wrapper code
-    # in untracked form and the gate would approve any commit using it.
-    UNTRACKED_INFRA=""
+    # No staged change to infra. Every component must be TRACKED in HEAD
+    # or a manifest-verified LOCAL component. Without this check, an
+    # untracked working-tree wrapper/prompt (e.g. just dropped in by
+    # bootstrap.ps1, never committed) would run as the gate with NO
+    # trusted baseline -- the user could ship arbitrary wrapper code in
+    # untracked form and the gate would approve any commit using it.
     # An unborn HEAD (fresh repo) reads as absent for every path: all
     # review infra is untracked by definition, and the only safe escape is
     # CROSS_REVIEW_SKIP=1 for the initial bootstrap commit. A failed probe
     # is neither present nor absent and refuses.
+    #
+    # The set runs from ONE captured directory, like the staged path: each
+    # tracked component is copied from HEAD (the dirty and staged probes
+    # above proved worktree == index == HEAD), and each LOCAL component is a
+    # manifest-verified snapshot (docs/local-install-v1.md). A wrapper imports
+    # the shared modules from beside itself, and the modules required are read
+    # from the captured wrapper bytes that will execute, never the live file
+    # (fix-round BLOCKER 2026-10-07: a live-file read let a concurrent edit
+    # drop a LOCAL module from verification).
+    crg_new_review_dir || return 1
+    TB_LOCAL=""
+    UNTRACKED_INFRA=""
     for f in $WRAPPER_REL $PROMPT_REL; do
-      case "$(crg_head_state "$f")" in
-        present) ;;
-        absent) UNTRACKED_INFRA="$UNTRACKED_INFRA $f" ;;
-        *)
-          echo "[pre-commit:$BACKEND_NAME] ERROR: HEAD-state probe for $f failed (the HEAD listing did not succeed; indeterminate refuses)." >&2
-          return 1
-          ;;
+      crg_trusted_copy_component "$f"; crg_tc_rc=$?
+      case "$crg_tc_rc" in
+        0) ;;
+        2) UNTRACKED_INFRA="$UNTRACKED_INFRA $f" ;;
+        *) return 1 ;;
       esac
     done
-    WRAPPER_LOCAL=''
-    PROMPT_LOCAL=''
-    if [ -n "$UNTRACKED_INFRA" ]; then
-      # Local install shape (docs/local-install-v1.md): untracked,
-      # deliberately ignored infra runs from manifest-verified SNAPSHOTS
-      # -- there is no HEAD copy to extract, and snapshotting before
-      # hashing closes the verify-then-consume race. Any unverified
-      # path keeps the refusal below.
-      LOCAL_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t crg-pre-commit-local)
-      LOCAL_INFRA_OK=yes
-      if [ -z "$LOCAL_DIR" ] || [ ! -d "$LOCAL_DIR" ]; then
-        crg_local_diagnostic SNAPSHOT-CREATE "$UNTRACKED_INFRA" 'Cannot allocate the LOCAL review snapshots; restore temporary-directory access and retry.'
-        LOCAL_INFRA_OK=no
-      elif ! crg_register_trusted_dir "$LOCAL_DIR"; then
-        crg_local_diagnostic SNAPSHOT-CREATE "$UNTRACKED_INFRA" 'Cannot register LOCAL review snapshot cleanup; retry the commit with available cleanup capacity.'
-        rmdir "$LOCAL_DIR" 2>/dev/null
-        LOCAL_DIR=""
-        LOCAL_INFRA_OK=no
-      else
-        for f in $UNTRACKED_INFRA; do
-          mkdir -p "$LOCAL_DIR/$(dirname "$f")"
-          if crg_local_install_snapshot "$f" "$LOCAL_DIR/$f"; then
-            case "$f" in
-              "$WRAPPER_REL") WRAPPER_LOCAL="$LOCAL_DIR/$f" ;;
-              "$PROMPT_REL")  PROMPT_LOCAL="$LOCAL_DIR/$f" ;;
-            esac
-          else
-            LOCAL_INFRA_OK=no
-          fi
+    case " $UNTRACKED_INFRA " in
+      *" $WRAPPER_REL "*) ;;
+      *)
+        if ! RUN_MODULES=$(crg_review_modules_for "$TRUSTED_DIR/$WRAPPER_REL"); then
+          echo "[pre-commit:$BACKEND_NAME] ERROR: could not read the captured wrapper to resolve the shared modules it imports. Aborting commit." >&2
+          return 1
+        fi
+        for f in $RUN_MODULES; do
+          crg_trusted_copy_component "$f"; crg_tc_rc=$?
+          case "$crg_tc_rc" in
+            0) ;;
+            2) UNTRACKED_INFRA="$UNTRACKED_INFRA $f" ;;
+            *) return 1 ;;
+          esac
         done
-      fi
-      if [ "$LOCAL_INFRA_OK" = "yes" ]; then
-        echo "[pre-commit:$BACKEND_NAME] local install shape: review infra manifest-verified snapshots (docs/local-install-v1.md)"
-        UNTRACKED_INFRA=""
-      fi
-    fi
+        ;;
+    esac
     if [ -n "$UNTRACKED_INFRA" ]; then
       echo "[pre-commit:$BACKEND_NAME] ERROR: review infrastructure is not tracked in HEAD:" >&2
       for f in $UNTRACKED_INFRA; do
@@ -3331,12 +3369,11 @@ run_backend() {
       echo "[pre-commit:$BACKEND_NAME] Then retry the current commit normally. Aborting." >&2
       return 1
     fi
-    WRAPPER_PATH="$REPO_ROOT/$WRAPPER_REL"
-    PROMPT_PATH="$REPO_ROOT/$PROMPT_REL"
-    # Local-shape files run from their verified snapshots; a TRACKED
-    # unstaged file keeps the working-tree path exactly as before.
-    [ -n "$WRAPPER_LOCAL" ] && WRAPPER_PATH="$WRAPPER_LOCAL"
-    [ -n "$PROMPT_LOCAL" ] && PROMPT_PATH="$PROMPT_LOCAL"
+    WRAPPER_PATH="$TRUSTED_DIR/$WRAPPER_REL"
+    PROMPT_PATH="$TRUSTED_DIR/$PROMPT_REL"
+    if [ -n "$TB_LOCAL" ]; then
+      echo "[pre-commit:$BACKEND_NAME] local install shape: manifest-verified review snapshots:$TB_LOCAL (docs/local-install-v1.md)"
+    fi
   fi
 
   if [ ! -f "$WRAPPER_PATH" ]; then
@@ -3489,7 +3526,7 @@ run_backend() {
   #     fail closed, never a silent pass.
   case "$REVIEW_EXIT" in
     0)
-      echo "[pre-commit:$BACKEND_NAME] PASS"
+      echo "[pre-commit:$BACKEND_NAME] PASS - $CRG_PASS_COVERAGE"
       return 0
       ;;
     2)
@@ -3875,6 +3912,67 @@ crg_success_projection_cleanup() {
   fi
 }
 
+# Review-feedback status (Write-ReviewFeedbackStatus in scripts/review-common.ps1)
+# for a passed commit: without it a passed gate hid task counts and feedback
+# work left undone (merge review, 2026-10-09). Kept apart from the strict
+# projection above on purpose, and run only after every write a commit
+# depends on (the projection display and the follow-up append), straight to
+# the console with no file of its own: no step of it can fail the gate or
+# take space or time a required step needs, and the identity check after it
+# still covers its console writes. It reads EVERY launched invocation's raw
+# transcript, not only the accepted ones, because an exhausted leg or one
+# whose provider was replaced may still have written records or staged
+# follow-ups; those raw transcripts are Windows PowerShell output, so a
+# line's CR is removed before its form is checked. A line it cannot show
+# becomes a fixed notice instead of a refusal. (Earlier forms were
+# dropped the same day: checking these lines inside the strict projection
+# read only accepted transcripts and could refuse a passed gate; adding them
+# to the projection file tied their bytes to its required write.) The
+# writer's messages name no provider and stay well under 4096 bytes in any
+# output encoding; the tag naming the wrapper is removed. At most 32
+# distinct warnings are shown, the rest counted. The task count is the last
+# count line of the last accepted transcript, read after every leg added its
+# tasks.
+crg_feedback_status() {
+  _crg_fs_counts="$1"
+  _crg_fs_tag='[pre-commit] review result: '
+  _crg_fs_bad=0
+  set --
+  for _crg_fs_t in "$REVIEW_TRANSCRIPT_1" "$REVIEW_TRANSCRIPT_2" "$REVIEW_TRANSCRIPT_3" "$REVIEW_TRANSCRIPT_4"; do
+    # A set slot was made by mktemp before its launch, so only an empty slot
+    # means no invocation; an unreadable or missing file gets a notice.
+    [ -n "$_crg_fs_t" ] || continue
+    if [ -f "$_crg_fs_t" ] && [ -r "$_crg_fs_t" ]; then set -- "$@" "$_crg_fs_t"; else _crg_fs_bad=1; fi
+  done
+  # awk with no file operand would read the hook's stdin.
+  if [ "$#" -gt 0 ] || [ "$_crg_fs_bad" -eq 1 ]; then
+    [ "$#" -gt 0 ] || set -- /dev/null
+    LC_ALL=C awk -v tag="$_crg_fs_tag" -v bad="$_crg_fs_bad" '
+      function add(l) { if (l in seen) return; seen[l] = 1; n++; if (n <= 32) print tag l }
+      BEGIN { if (bad) add("review-feedback WARN: the review-feedback lines of one review invocation could not be read") }
+      /^\[auto-review(:claude)?\] review-feedback WARN: / {
+        line = $0; sub(/\r$/, "", line); sub(/^\[auto-review(:claude)?\] /, "", line)
+        if (length(line) > 4096 || line ~ /[[:cntrl:]]/ || line !~ /^review-feedback WARN: [^[:space:]](.*[^[:space:]])?$/) line = "review-feedback WARN: a review-feedback line was not in the expected form and is not shown"
+        add(line)
+      }
+      END { if (n > 32) print tag "review-feedback WARN: " (n - 32) " further review-feedback warnings are not shown" }
+    ' "$@" 2>/dev/null ||
+      printf '%s\n' "${_crg_fs_tag}review-feedback WARN: the review-feedback warnings could not be collected" 2>/dev/null
+  fi
+  _crg_fs_none='review-feedback: open review tasks in TASKS.md: could not be counted'
+  if [ -n "$_crg_fs_counts" ] && [ -f "$_crg_fs_counts" ] && [ -r "$_crg_fs_counts" ]; then
+    LC_ALL=C awk -v tag="$_crg_fs_tag" -v none="$_crg_fs_none" '
+      { sub(/\r$/, "") }
+      /^\[auto-review(:claude)?\] review-feedback: open review tasks in TASKS\.md: (QUALITY=[0-9]+ NOTE=[0-9]+|could not be counted)$/ { last = $0; sub(/^\[auto-review(:claude)?\] /, "", last) }
+      END { print tag (last != "" ? last : none) }
+    ' "$_crg_fs_counts" 2>/dev/null ||
+      printf '%s\n' "$_crg_fs_tag$_crg_fs_none" 2>/dev/null
+  else
+    printf '%s\n' "$_crg_fs_tag$_crg_fs_none" 2>/dev/null
+  fi
+  return 0
+}
+
 prepare_success_projection() {
   _crg_pp_count="$1"
   _crg_pp_destination="$2"
@@ -4007,6 +4105,37 @@ run_leg() {
   return 1
 }
 
+# The logs folder, chosen as Get-FollowupIndexDir chooses it:
+# the Git common directory's parent, or a submodule's own working tree, whose
+# common directory sits under the superproject's .git/modules. Prints nothing
+# when Git cannot say.
+crg_followup_logs_dir() {
+  _crg_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  if [ -z "$_crg_common" ]; then
+    _crg_raw=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$_crg_raw" ] && [ -d "$_crg_raw" ]; then
+      _crg_common=$(cd "$_crg_raw" 2>/dev/null && pwd)
+    fi
+  fi
+  [ -n "$_crg_common" ] || return 0
+  case "$_crg_common" in
+    */.git/modules/*)
+      _crg_top=$(git rev-parse --show-toplevel 2>/dev/null)
+      [ -n "$_crg_top" ] && printf '%s\n' "$_crg_top/logs"
+      ;;
+    *) printf '%s\n' "$(dirname "$_crg_common")/logs" ;;
+  esac
+  return 0
+}
+
+# What a PASS covers (docs/review-feedback-v1.md section 4). The open
+# TASKS.md task counts come from the review wrapper's review-feedback line,
+# which crg_feedback_status carries to the passed gate's output,
+# not from a count here: a count must read TASKS.md through
+# a held no-follow handle, which a shell cannot do, and a second counter in
+# this hook once disagreed with the PowerShell one (review, 2026-10-09).
+CRG_PASS_COVERAGE='covers this source diff only, not target execution or deployment readiness'
+
 # Prepare the append-only follow-up transaction while every review is known to
 # have succeeded, but do not publish a byte yet. The shared index lock is held
 # from the state read through the eventual single append, so another compliant
@@ -4023,23 +4152,8 @@ prepare_followup_promotion() {
   done
   [ "$PROMO_ANY" -eq 1 ] || return 0
 
-  PROMO_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-  if [ -z "$PROMO_COMMON_DIR" ]; then
-    PROMO_RAW=$(git rev-parse --git-common-dir 2>/dev/null)
-    if [ -n "$PROMO_RAW" ] && [ -d "$PROMO_RAW" ]; then
-      PROMO_COMMON_DIR=$(cd "$PROMO_RAW" 2>/dev/null && pwd)
-    fi
-  fi
-  PROMO_LOGS_DIR="logs"
-  if [ -n "$PROMO_COMMON_DIR" ]; then
-    case "$PROMO_COMMON_DIR" in
-      */.git/modules/*)
-        PROMO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)
-        [ -n "$PROMO_TOP" ] && PROMO_LOGS_DIR="$PROMO_TOP/logs"
-        ;;
-      *) PROMO_LOGS_DIR="$(dirname "$PROMO_COMMON_DIR")/logs" ;;
-    esac
-  fi
+  PROMO_LOGS_DIR=$(crg_followup_logs_dir)
+  [ -n "$PROMO_LOGS_DIR" ] || PROMO_LOGS_DIR="logs"
   if ! mkdir -p "$PROMO_LOGS_DIR" 2>/dev/null; then
     echo "[pre-commit] WARN: could not create the follow-up index directory at $PROMO_LOGS_DIR - records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
     return 0
@@ -4505,8 +4619,8 @@ fi
 # the follow-up index describe reviewed candidate findings, not proof that a
 # commit landed. Authorization still fails and no semantic projection or PASS
 # is emitted. A fourth equality check below closes the separate interval created
-# while the bounded provider-neutral projection is written to a possibly slow
-# console sink.
+# while the bounded provider-neutral projection and review-feedback status are
+# written to a possibly slow console sink.
 if [ "$OVERALL_EXIT" -eq 0 ] && ! recheck_pinned_review_tree; then
   echo "[pre-commit] ERROR: the staged tree changed at the terminal success boundary, or could not be re-read exactly - commit ABORTED (fail closed)." >&2
   if [ "$PROMO_PUBLISHED" -eq 1 ]; then
@@ -4531,6 +4645,8 @@ else
   cat <&9 2>/dev/null || :
   exec 9<&-
   SUCCESS_PROJECTION_FD_OPEN=0
+  eval "_crg_fs_last=\${ACCEPTED_TRANSCRIPT_$ACCEPTED_REVIEW_COUNT}"
+  crg_feedback_status "$_crg_fs_last" || :
   if ! recheck_pinned_review_tree; then
     echo "[pre-commit] ERROR: the staged tree changed while successful review evidence was being displayed, or could not be re-read exactly - commit ABORTED at the terminal identity boundary (fail closed)." >&2
     if [ "$PROMO_PUBLISHED" -eq 1 ]; then
@@ -4553,7 +4669,7 @@ else
       # PASS describes the completed adversarial review of the pinned candidate;
       # only the equality check after this potentially blocking write authorizes
       # Git to continue with that candidate.
-      echo "[pre-commit] adversarial review PASS" || :
+      echo "[pre-commit] adversarial review PASS - $CRG_PASS_COVERAGE" || :
       if ! recheck_pinned_review_tree; then
         echo "[pre-commit] ERROR: the staged tree no longer matched the pinned review identity after the pinned-candidate review PASS was displayed, or could not be re-read exactly - commit authorization REFUSED at the final identity boundary (fail closed)." >&2
         echo "[pre-commit] NOTE: the displayed PASS described the adversarial-review verdict for the pinned candidate; it did not authorize or prove that a commit landed." >&2

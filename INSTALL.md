@@ -97,10 +97,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/cross-review-gate/boot
 
 The bootstrap does the following:
 - Verifies `-TargetRepo` is a git working tree
-- Copies `scripts/codex/`, `scripts/claude/`, `scripts/git-hooks/`,
-  `scripts/run-gate.sh`, and the backend-neutral
-  `scripts/render-project-values.ps1` into the target repo's `scripts/`
-  directory
+- Copies `scripts/codex/`, `scripts/claude/`, `scripts/shared/`,
+  `scripts/git-hooks/`, `scripts/run-gate.sh`, the backend-neutral
+  `scripts/render-project-values.ps1`, the shared reviewer-liveness module
+  `scripts/review-liveness.psm1` and the shared follow-up functions
+  `scripts/review-common.ps1` into the target repo's `scripts/` directory
 - Copies `docs/audit-protocol.md` and the rendered
   `docs/AGENTS.md.template` into the target repo's `docs/` directory
   (creating `docs/` if missing)
@@ -318,8 +319,13 @@ for every changed path among:
 - `.gitattributes`, when the candidate LF checkout contract changes;
 - `scripts/git-hooks/pre-commit`;
 - `scripts/codex/auto-review.ps1`;
-- `scripts/claude/auto-review.ps1`; and
-- `scripts/codex/review-prompt-template.md`.
+- `scripts/claude/auto-review.ps1`;
+- `scripts/codex/review-prompt-template.md`;
+- `scripts/review-liveness.psm1`, the shared module those wrappers import; and
+- `scripts/review-common.ps1`, the shared follow-up, verdict, project-mode,
+  prompt-assembly, git, tree-path, commit-log evidence, codex-effort,
+  argument-quoting, PATH, replacement-suppression, attribute-neutral Git and
+  fix-on-fix advisory functions those wrappers dot-source.
 
 The set is derived from the installed bytes and the target repository's Git
 attributes; no fixed path-list assumption applies. A self-host install also
@@ -588,12 +594,13 @@ Minimum required `~/.codex/config.toml` contents (configure once on
 the machine):
 
 ```toml
-model = "gpt-5.5"
+model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 ```
 
-(Adjust `model` / effort as needed; `gpt-5.5` is the model the gate
-was tuned against, `xhigh` is the recommended effort for adversarial
+(Adjust `model` / effort as needed; the gate was originally tuned
+against `gpt-5.5`. With a ChatGPT account, `gpt-6-sol` requires Codex
+CLI 0.156 or later; 0.154 rejects it with HTTP 400. `xhigh` is the recommended effort for adversarial
 review.)
 
 Do NOT add sandbox or approval pinning here — the wrapper supplies
@@ -623,8 +630,8 @@ see the "Claude reviewer auth setup" section in
 
 Code unit tests are banned. Do not create temporary code-unit-test commits or
 run a historical SelfTest command when that command executes code unit tests.
-Integration, end-to-end, smoke, performance, manual, live, and other functional
-testing remain permitted and important. Merge the code-unit-test-ban policy from `docs/AGENTS.md.template`
+Live testing, manual checks, ordinary program runs, and functional validation
+remain permitted and important. Merge the code-unit-test-ban policy from `docs/AGENTS.md.template`
 into both project `AGENTS.md` and `CLAUDE.md` so future sessions and agents
 receive the same instruction.
 
@@ -677,7 +684,7 @@ Drop any path the bootstrap's line omits.
 PowerShell:
 
 ```powershell
-git add CROSS-REVIEW-VALUES.md scripts/codex scripts/claude scripts/git-hooks scripts/run-gate.sh scripts/render-project-values.ps1 docs/audit-protocol.md docs/AGENTS.md.template .gitignore .gitattributes
+git add CROSS-REVIEW-VALUES.md scripts/codex scripts/claude scripts/shared scripts/git-hooks scripts/run-gate.sh scripts/render-project-values.ps1 scripts/review-liveness.psm1 scripts/review-common.ps1 docs/audit-protocol.md docs/AGENTS.md.template .gitignore .gitattributes
 $env:CROSS_REVIEW_SKIP = '1'
 try { git commit -m "cross-review-gate: install" }
 finally { Remove-Item Env:CROSS_REVIEW_SKIP -ErrorAction SilentlyContinue }
@@ -686,7 +693,7 @@ finally { Remove-Item Env:CROSS_REVIEW_SKIP -ErrorAction SilentlyContinue }
 bash / sh:
 
 ```sh
-git add CROSS-REVIEW-VALUES.md scripts/codex scripts/claude scripts/git-hooks scripts/run-gate.sh scripts/render-project-values.ps1 docs/audit-protocol.md docs/AGENTS.md.template .gitignore .gitattributes
+git add CROSS-REVIEW-VALUES.md scripts/codex scripts/claude scripts/shared scripts/git-hooks scripts/run-gate.sh scripts/render-project-values.ps1 scripts/review-liveness.psm1 scripts/review-common.ps1 docs/audit-protocol.md docs/AGENTS.md.template .gitignore .gitattributes
 CROSS_REVIEW_SKIP=1 git commit -m "cross-review-gate: install"
 ```
 
@@ -805,8 +812,8 @@ Review rules:
 
 The gate weighs EXECUTION evidence, not authored artifacts — test files being
 added counts for nothing by itself toward a completion claim. Every cited run
-(build, ordinary operation through the launched interface, or applicable
-functional-test execution) carries,
+(build, ordinary operation through the launched interface, or functional
+validation) carries,
 at minimum: the DATE, the COMMAND or script exercised, the OBSERVED
 OUTPUT (pasted, or pointing at content the reviewer can actually read
 during the review), and the REVISION the run was performed on, named as
@@ -851,14 +858,32 @@ The wrappers respect these env vars:
   run and remove the value afterward. This remains an operator act by design —
   an agent must never set the sanction.
 
-- `CROSS_REVIEW_PRUNE_TOOL` — path to a custom delete tool used for
-  auto-pruning old review log files. Receives file paths as positional
-  arguments. If unset, the wrappers fall back to `Remove-Item -Force`.
-  If SET but the path does not exist, auto-prune is SKIPPED for that
-  run with a WARN line (instead of silently falling back to direct
-  deletion, which would defeat the audit policy the variable exists
-  to enforce). Set this if your project has its own safe-delete script
-  (e.g., one that routes through the Recycle Bin):
+- `CROSS_REVIEW_PRUNE_TOOL` — path (absolute, or relative to the wrapper's
+  current location) to a custom delete-tool script file used for
+  auto-pruning old review log files, with surrounding whitespace trimmed.
+  When PowerShell resolves the value to an existing file (relative, drive
+  letter, FileSystem PowerShell drive, or `~`), bash receives that file's
+  path converted by its own converter (`cygpath` in Git bash, `wslpath` in
+  WSL); a bash with neither converter fails the check and skips the prune.
+  Otherwise bash receives the value as written, for paths in bash's own
+  namespace; a relative value is read as `./value`, so a name such as `-` is
+  always a file. bash then requires a regular file and runs it as a bash
+  script with the log file paths as positional arguments. The log paths are
+  always Windows-form absolute paths (for example `E:\repo\logs\...`); a tool
+  running under WSL bash must convert them itself. A value containing a
+  double quote that PowerShell cannot resolve is refused, because Windows
+  PowerShell 5.1 cannot pass it to bash intact. If unset, auto-prune is OFF
+  and nothing is deleted. The wrappers never delete review logs directly (no
+  `Remove-Item` or built-in Recycle Bin fallback). The variable is evaluated
+  only on runs where old log files are eligible: an unset variable then
+  prints one line naming the eligible file count; a whitespace-only value, a
+  refused double-quote value, a value bash cannot find as a regular file, or
+  a missing `bash` SKIPS the prune with a WARN line. Runs with no eligible files print neither. A batch
+  counts as pruned only when the tool exits 0; a nonzero exit or launch
+  failure is reported in a WARN line (files in that batch may be partially
+  deleted) and never stops the review. Set this
+  to a safe-delete script that routes through the Recycle Bin to enable
+  pruning:
   ```powershell
   $env:CROSS_REVIEW_PRUNE_TOOL = 'C:\path\to\safe-delete.sh'
   ```
@@ -970,6 +995,98 @@ The wrappers respect these env vars:
   inside the gate, within the current invocation; successful caller output remains
   provider-neutral, no environment state persists, and no provider-skip
   switch is part of the interface.
+
+## Review tasks and findings files
+
+A passing Codex or Claude review (not a paired review) records its QUALITY
+and NOTE findings (`docs/review-feedback-v1.md`):
+
+- `logs/review-findings/<backend>-review-<UTC time written>-<12 hex>.findings`:
+  the repository, severity, citations (the opening one and every other
+  `path:line` naming a file of the reviewed tree or of the change), digest
+  and escaped, quoted text of each finding (a submodule writes them to
+  `crg-review-findings` inside its common Git directory instead, one place
+  for all of its checkouts, and still reads its working tree's own
+  `logs/review-findings`). The
+  next review of any cited file in the same repository is
+  shown that text in `CARRIED-FINDINGS.txt`. The gate
+  never deletes these files (the review-log prune tool does not cover them);
+  files older than 14 days are no longer carried, and old ones can be sent
+  to the Recycle Bin by hand (a task line naming a removed file then leads
+  nowhere).
+- `TASKS.md` at the main checkout's root: one task line per severity and
+  citation, naming the findings file that holds the finding's text (no
+  finding prose in `TASKS.md`), under a QUALITY and a NOTE heading (created as the first and the last section
+  when missing; existing sections stay where they are). `TASKS.md` is
+  per-user work tracking and is never committed: the gate adds `/TASKS.md`
+  to the repository's `info/exclude`, writes only once Git confirms it is
+  ignored, and leaves a tracked `TASKS.md` untouched (with a warning), as it
+  does a `TASKS.md` that is a link, has several links, or is stored under
+  another letter case such as `tasks.md` (rename it to `TASKS.md`). The gate
+  only adds lines; check tasks off or delete them by hand.
+  The final tracking check and the write run under the main checkout's
+  Git index lock, which the gate takes for that moment (a Git command run
+  there meanwhile fails with `index.lock: File exists`; run it again). A
+  review that finds the lock already held (for example under
+  `git commit -a` or a partial `git commit <paths>` in the main checkout)
+  adds no tasks, with a warning; its findings file is still written and
+  carried.
+  If a write to `TASKS.md` (including its creation) is interrupted, its
+  recovery copy stays in the Git directory as `crg-tasks-recovery.md` (for
+  example `.git/crg-tasks-recovery.md`) and the gate adds no tasks, and
+  creates no `TASKS.md`, until it is gone: compare it with `TASKS.md`,
+  restore `TASKS.md` from it if needed, then delete it. An interrupted
+  append to `info/exclude` leaves `crg-exclude-recovery` (the exclude
+  file's original content) in the Git directory the same way; restore the
+  exclude file from it if needed, then delete it. A `.partial` file beside
+  either copy is most likely an incomplete copy from a run that stopped
+  before changing anything; the gate keeps it and adds no tasks, with a
+  warning, until it is checked and deleted (when no review is running).
+  The merge gate's fast-forward refuses, rather than overwrites, an ignored
+  local file such as `TASKS.md` when the incoming tree tracks the same path
+  (`git merge --no-overwrite-ignore`); move the local file aside and merge
+  again.
+
+A staged review (the commit gate's) that blocks records its BLOCKER findings
+as a blocked round in the same folder, keyed to the working tree and its
+HEAD. Before the next review of that change runs, the gate requires a
+remediation record, `crg-remediation.txt` in the working tree's own Git
+directory (for example `.git/crg-remediation.txt`, or
+`.git/worktrees/<name>/crg-remediation.txt` in a linked worktree), with one
+block per defect class:
+
+    finding <digest> [<digest> ...]
+    invariant <the rule every instance broke>
+    sweep <where and how every instance was searched for>
+    sites <every place changed, or why none needed to change>
+
+(a `finding` line holds at most 63 digests; a larger class continues on
+further `finding` lines) and, once the change has blocked twice, a final
+`approach <why the approach is right, or how it was re-derived>` line.
+Until each prior BLOCKER digest it is asked to cover is in a block (those
+of the blocked rounds of the last 14 days, the newest 20 rounds, up to 256
+newest first, which always fit in one record; more also require the
+approach line) the commit is refused without a review; the refusal names
+up to 100 missing digests with their round files, and counts the rest,
+which those round files hold.
+The reviewer is then shown the prior findings and the record
+(`PRIOR-BLOCKERS.txt`) and checks the class across the whole change. The
+record can be kept across rounds; a digest that is not one of this
+change's prior findings is ignored. Rules: section 5 of
+`docs/review-feedback-v1.md`.
+
+Every PASS line states what the review covers (the source diff only, not
+target execution or deployment readiness); the merge gate's PASS line also
+gives the open task counts in `TASKS.md` (and goes on with its ff-merge
+note). A passed commit or merge also prints `review result: review-feedback`
+lines: the commit gate's task counts (`review-feedback: open review tasks in
+TASKS.md: QUALITY=<q> NOTE=<n>`) and a `review-feedback WARN:` line for each
+feedback step left undone (tasks not added and why, a recovery copy or
+`.partial` file left, a findings file not written, findings files skipped,
+carried findings or QUALITY follow-ups unavailable), so a passing review
+never hides them. The warnings are gathered from every review invocation
+the gate launched, at most 32 shown and the rest counted, and gathering them
+never fails a passed gate.
 
 ## Legacy-index seal (capture doctrine v6) — REQUIRED before pruning resumes
 

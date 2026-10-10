@@ -13,7 +13,9 @@ historical PASS to force initial attachment through this ordinary-pair ABI.
 
 ## Shared preparation boundary
 
-`scripts/review-preparation.psm1` exports exactly these existing Codex helpers:
+`scripts/review-preparation.psm1` exports exactly these helpers, which it
+dot-sources from `scripts/review-common.ps1`, the same implementation the review
+wrappers use:
 
 | Function | Responsibility |
 |---|---|
@@ -27,23 +29,18 @@ historical PASS to force initial attachment through this ordinary-pair ABI.
 | `Format-ProjectModeBlock` | Existing governing/candidate mode presentation. |
 | `Join-ReviewPromptAssembly` | Existing prompt assembly separators/order. |
 
-Function bodies retain `scripts/codex/auto-review.ps1` at `d1bfbda` verbatim,
-apart from line-ending representation and one intentional compatibility change:
-`ConvertFrom-ProjectModeDeclaration` uses unlimited split count `0` rather than
-`-1`, preserving the intended declaration grammar on both PowerShell 5.1 and 7.
-Legacy wrappers retain the older engine-dependent line. Import performs no
-Git/provider I/O and does not load an executable wrapper, extract an AST, or
-discover ambient policy.
-Legacy embedded helpers remain: existing TRACKED/LOCAL trusted extraction ships
-self-contained hosts. Neither legacy wrappers nor the frozen 17-file inventory
-change in this unit. The new central runtime must explicitly inventory and pin
-the module before an integrated host imports the module from that runtime.
+`ConvertFrom-ProjectModeDeclaration` uses unlimited split count `0`, which
+preserves the declaration grammar on both PowerShell 5.1 and 7 (a negative count
+is right-limited on PowerShell 7). `Format-ProjectModeBlock -ConfiguredUnitTestPolicy`
+is central-only; the wrappers never pass it. Import performs no Git/provider I/O
+and does not load an executable wrapper, extract an AST, or discover ambient
+policy. The central runtime inventories and pins both the module and
+`scripts/review-common.ps1` before a host imports the module from that runtime.
 
 These helpers do not establish descriptor custody, repository identity, object
-availability, mode acquisition, review success, or commit authority. Existing
-semantics otherwise remain unchanged; no wider compatibility sweep accompanies
-the declared single-line correction. The central compiler/reader must validate
-explicit inputs and call the helpers only after the applicable acquisition checks.
+availability, mode acquisition, review success, or commit authority. The
+central compiler/reader must validate explicit inputs and call the helpers only
+after the applicable acquisition checks.
 
 ## Internal PreparedPair invocation
 
@@ -628,9 +625,9 @@ observed current child exit remain separate duties. These pure functions
 perform no file I/O or provider calls and cannot enable paired review alone.
 
 `Read-CrgSuccessfulPairArtifactBytes` takes the same reader parameters plus
-the live caller's ScheduledPassCount. Reuse the existing pure
-Get-VerdictExitCode body from auto-merge without changing category, severity or
-VERDICT precedence. Claude requires one unframed successful body. Codex requires
+the live caller's ScheduledPassCount. Classify with the shared pure
+Get-VerdictExitCode in scripts/review-common.ps1, the same classifier the review
+wrappers use, without changing category, severity or VERDICT precedence. Claude requires one unframed successful body. Codex requires
 the exact producer pass separators, ordered contiguous pass numbers, matching
 denominators/count and complete successful bodies. Unknown/malformed separators,
 leading content, failed-closed envelopes or any unsuccessful body refuse.
@@ -728,7 +725,7 @@ HTTP status alone proves account exhaustion. Grok remains inactive on default
 consumer configuration; no API call is required merely to install the adapter.
 
 The operator code unit-test ban applies to this integration. Source inspection,
-static parse, native compilation, ordinary operation, applicable functional
-testing, and mandatory review provide verification. Older fixture or suite
-references remain historical; no testing category beyond code unit tests is
-prohibited merely by category.
+static parse, native compilation, ordinary operation, functional validation,
+and mandatory review provide verification. Older fixture or suite references
+remain historical; live testing, manual checks, ordinary program runs, and
+functional validation remain permitted.

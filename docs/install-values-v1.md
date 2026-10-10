@@ -743,8 +743,9 @@ Bootstrap and the standalone renderer must call one parser and renderer
 implementation. If bootstrap's single-file boundary requires an embedded
 copy, byte-exact source identity is a release invariant checked by source
 inspection. Similar-looking implementations with divergent marked cores are
-not conforming. Code unit-test authoring and execution are prohibited; other
-testing categories are not prohibited merely by category.
+not conforming. Code unit-test authoring and execution are prohibited; live
+testing, manual checks, ordinary program runs, and functional validation remain
+permitted.
 
 No rendering mode edits a root `AGENTS.md` or `CLAUDE.md`. No commit, review,
 merge, hook, or dispatcher path invokes the renderer implicitly.
@@ -912,14 +913,18 @@ seal-then-replace recovery path. Eligibility is exact and non-fallback:
 1. The v1 values source satisfies LOCAL authority, and the shared core parses
    the source and every retained slot-bearing input and produces complete
    candidate outputs. Only candidate-versus-installed byte equality may fail.
-2. The present inventory contains every non-retired path in either the current
-   shared-layout `Get-CrgSealRecoveryFileList` or the frozen
+2. The present inventory contains every non-retired path in one of, in order,
+   the current shared-layout `Get-CrgSealRecoveryFileList`, the frozen
+   pre-2.6.0 `Get-CrgPreCommonRecoveryFileList`, the frozen pre-2.4.4
+   `Get-CrgPreLivenessRecoveryFileList` or the frozen
    `Get-CrgPreRelocationRecoveryFileList`, including
-   `scripts/render-project-values.ps1` and `docs/AGENTS.md.template`. The
-   pre-relocation v2.1/v2.2 shape also requires every shared-only path to be
-   positively absent. A partial shared layout cannot fall back to the old shape.
-   The current catalog preserves current installation order; the frozen catalog
-   preserves pre-relocation authorization-marker order. Each present
+   `scripts/render-project-values.ps1` and `docs/AGENTS.md.template`. A frozen
+   shape also requires every current path it lacks (such as
+   `scripts/review-common.ps1`, `scripts/review-liveness.psm1`, or the
+   shared-only paths for v2.1/v2.2) to
+   be positively absent. A partial upgrade cannot fall back to an older shape.
+   The current catalog preserves current installation order; each frozen
+   catalog preserves its own authorization-marker order. Each present
    retired path from the selected historical inventory also enters the ordinary
    seal custody. With a strict prior manifest, only retired paths named by that
    manifest join the replacement baseline; surviving files omitted by a completed
@@ -1087,8 +1092,7 @@ The package repository's own `CROSS-REVIEW-VALUES.md` is project-owned
 self-check input, not distributable target configuration. The release archive
 excludes that file. The archive includes the raw slot-bearing templates,
 renderer and installer under the package-root prefix; code-unit-test-only assets
-are not package payload. Other testing categories are not excluded merely by
-category.
+are not package payload.
 
 An extracted archive must support ordinary consumer installation and renderer
 `-Check` without package `.git` metadata. Package source provenance may
@@ -1106,8 +1110,8 @@ consumer fallback.
 Code unit-test creation and execution are prohibited, including unit-test
 fixtures, SelfTest modes that execute code unit tests, and code unit tests renamed
 as ad-hoc assertion scripts or synthetic failure or process-termination cases.
-Integration, end-to-end, smoke, performance, manual, live, and other functional
-testing remain permitted and important. Mandatory cross-review and every
+Live testing, manual checks, ordinary program runs, and functional validation
+remain permitted and important. Mandatory cross-review and every
 production validation, custody, publication, and recovery requirement above
 remain binding.
 
