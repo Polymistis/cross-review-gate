@@ -200,6 +200,17 @@ $pairedSnapshot = $null
 
 # UTF-8 for native command pipes so git diff/show output is not mojibaked
 # by Windows-1252 default. Same pattern as scripts/shared/auto-merge.ps1.
+# The console code pages belong to the console window this script shares with
+# the invoking shell, so the finally at the end of the script puts back the
+# values saved here.
+try {
+  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+} catch {
+  Write-Host "[auto-review:claude] ERROR: the console code pages could not be read ($($_.Exception.Message)) - failing closed."
+  exit 3
+}
+try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -487,7 +498,14 @@ function Test-ClaudeExhaustionEnvelope {
   if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
   $t = $Text.Trim()
   if ($t.Length -gt 400) { return $false }
-  if ($t -match '(?im)^\s*(VERDICT|BLOCKER|QUALITY|NON-BLOCKER|NOTE|PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT):') { return $false }
+  # Review-shaped lines are recognized through ConvertTo-CrgStructureFold, not
+  # a culture `(?i)` match, which under tr-TR missed `quality:` and let such a
+  # payload reach the fallback (staged review, 2026-10-10). The signatures
+  # below match case-insensitively in the invariant culture for the same reason.
+  foreach ($payloadLine in ($t -split "`n")) {
+    $payloadFold = ConvertTo-CrgStructureFold -Line $payloadLine
+    if ($null -eq $payloadFold -or $payloadFold -cmatch '\A\s*(VERDICT|BLOCKER|QUALITY|NON-BLOCKER|NOTE|PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT)\s*:') { return $false }
+  }
   $limitSignatures = @(
     'you.{0,2}ve hit your (monthly spend|weekly|session|usage|extra usage) limit\b',
     'claude ai usage limit reached\b',
@@ -500,7 +518,8 @@ function Test-ClaudeExhaustionEnvelope {
     '(your |the )?(usage |credit |extra usage )?allocation (is |has been )?disabled\b'
   )
   foreach ($sig in $limitSignatures) {
-    if ($t -match "(?im)^\s*(?:[a-z ]{0,20}error:?\s*)?$sig") { return $true }
+    if ([regex]::IsMatch($t, "^\s*(?:[a-z ]{0,20}error:?\s*)?$sig", ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+          [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant))) { return $true }
   }
   return $false
 }
@@ -1075,7 +1094,6 @@ $captureCentralExpected = Resolve-CaptureCentralExpected -OutDirAbs $outDirAbs `
 # describe different repos: the root IS the parent of the resolved index dir.
 $captureGitContext = Resolve-FollowupGitContext
 $captureLocatorRoot = if ($captureGitContext.Ok) { $captureGitContext.Root } else { '' }
-$captureIndexPath = if ($captureGitContext.Ok) { Join-Path $captureGitContext.LogsDir 'review-followups.md' } else { '' }
 
 # ---------------------------------------------------------------------------
 # Auto-prune old per-review log files. Same shape as Codex wrapper, including
@@ -1089,18 +1107,25 @@ $captureIndexPath = if ($captureGitContext.Ok) { Join-Path $captureGitContext.Lo
 # unset means the prune is OFF. The Codex wrapper records why no direct
 # (Remove-Item or built-in Recycle Bin) fallback may be reintroduced.
 # ---------------------------------------------------------------------------
-$pruneLock = Enter-PruneIndexLock -IndexPath $captureIndexPath -LogTag 'auto-review:claude'
+$pruneHeld = New-Object 'System.Collections.Generic.List[object]'
+$pruneLock = Enter-PruneIndexLock -GitContext $captureGitContext -Held $pruneHeld -LogTag 'auto-review:claude'
 try {
 $prunePlan = if ($pruneLock.Locked) {
-  Resolve-PruneExemptionPlan -IndexPath $captureIndexPath -Backend 'claude' -RepoRoot $captureLocatorRoot
+  Resolve-PruneExemptionPlan -Binding $pruneLock.Binding -Backend 'claude' -RepoRoot $captureLocatorRoot
 } else {
-  @{ PruneAllowed = $false; Reason = 'the follow-up index lock is held elsewhere, so its exemption state cannot be pinned across the deletions'; Keys = @(); Stems = @(); Unresolved = @() }
+  @{ PruneAllowed = $false; Reason = $pruneLock.Reason; Keys = @(); Stems = @(); Unresolved = @() }
 }
+# Housekeeping status lines carry the Codex wrapper's fixed text, so a passing
+# gate reads the same whichever provider reviewed.
 if (-not $prunePlan.PruneAllowed) {
   Write-Host "[auto-review:claude] WARN: SKIPPING the review-log prune this run - $($prunePlan.Reason)."
+  Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text 'the review-log age-prune was skipped this run: the follow-up index could not be locked, read or validated, or does not allow pruning yet; review logs are kept until a run can prune'
 }
 foreach ($pruneWarn in $prunePlan.Unresolved) {
-  Write-Host "[auto-review:claude] WARN: the follow-up index carries $pruneWarn - the prune is disabled while a protected artifact cannot be identified."
+  Write-Host "[auto-review:claude] WARN: the follow-up index carries $pruneWarn - the prune stays off until that entry is resolved."
+}
+if (@($prunePlan.Unresolved).Count -gt 0) {
+  Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text 'the follow-up index carries entries the age-prune cannot resolve or validate, so the review-log age-prune is off'
 }
 $jsonlCutoff = (Get-Date).AddDays(-7)
 $mdCutoff    = (Get-Date).AddDays(-90)
@@ -1113,11 +1138,15 @@ if ($prunePlan.PruneAllowed) {
     }
   }
   $pruneEnumWarn = Get-PruneEnumerationWarning -ErrorRecords $pruneEnumErr -Directory $outDirAbs
-  if ($pruneEnumWarn) { Write-Host "[auto-review:claude] WARN: $pruneEnumWarn" }
+  if ($pruneEnumWarn) {
+    Write-Host "[auto-review:claude] WARN: $pruneEnumWarn"
+    Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text 'the review-log folder could not be fully listed, so this run considers only the files it could list for pruning'
+  }
 }
 if ($pruneTargets.Count -gt 0) {
   $batchSize = 30
   $pruned = 0
+  $pruneToolUnusable = 'CROSS_REVIEW_PRUNE_TOOL is set but could not be used, so old review logs were not pruned this run'
   # Trim the env value, and DISTINGUISH "unset" from "set-but-empty-after-trim"
   # (same as the Codex wrapper): only a SET value that bash itself confirms
   # names a regular file, with bash on PATH, proceeds; every other state skips
@@ -1132,6 +1161,7 @@ if ($pruneTargets.Count -gt 0) {
     $pruneTargets.Clear()
   } elseif ($pruneToolSetButEmpty) {
     Write-Host "[auto-review:claude] WARN: CROSS_REVIEW_PRUNE_TOOL is set to a whitespace-only value; skipping auto-prune (pruning is housekeeping, not a gate). Set it to a valid tool path."
+    Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text $pruneToolUnusable
     $pruneTargets.Clear()
   } else {
     # Same contract, two-mode resolution and bash script text as the Codex
@@ -1150,14 +1180,17 @@ if ($pruneTargets.Count -gt 0) {
     $pruneBash = @(Get-Command -Name bash -CommandType Application -ErrorAction SilentlyContinue)
     if ($pruneToolMode -ceq 'raw' -and $pruneTool.Contains('"')) {
       Write-Host "[auto-review:claude] WARN: CROSS_REVIEW_PRUNE_TOOL is set to '$pruneTool', which contains a double quote that Windows PowerShell 5.1 cannot pass to bash intact; skipping auto-prune (pruning is housekeeping, not a gate). Fix the env var."
+      Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text $pruneToolUnusable
       $pruneTargets.Clear()
     } elseif ($pruneBash.Count -eq 0) {
       Write-Host "[auto-review:claude] WARN: CROSS_REVIEW_PRUNE_TOOL is set but bash is not on PATH to run it; skipping auto-prune (pruning is housekeeping, not a gate)."
+      Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text $pruneToolUnusable
       $pruneTargets.Clear()
     } else {
       $pruneCheck = Invoke-PruneBash -Bash $pruneBash[0].Source -Arguments @('-c', $pruneToolCheck, 'prune-check', $pruneToolMode, $pruneToolArg)
       if ($pruneCheck.Exit -ne 0) {
         Write-Host "[auto-review:claude] WARN: the bash check of CROSS_REVIEW_PRUNE_TOOL '$pruneTool' failed ($($pruneCheck.Reason); exit 126 means no regular file at that path or no cygpath/wslpath converter for a Windows path); skipping auto-prune (pruning is housekeeping, not a gate)."
+        Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text $pruneToolUnusable
         $pruneTargets.Clear()
       }
     }
@@ -1176,11 +1209,13 @@ if ($pruneTargets.Count -gt 0) {
       $pruneFailureSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
       $pruneFailureUnique = @($pruneFailures | Where-Object { $pruneFailureSeen.Add($_) })
       Write-Host "[auto-review:claude] WARN: $($pruneFailures.Count) prune batch(es) reported failure; files in those batches may be partially deleted: $($pruneFailureUnique -join '; ')"
+      Write-ReviewFeedbackStatus -LogTag 'auto-review:claude' -Housekeeping -Text 'the prune tool reported failure for some batches, so some old review logs may be partly deleted'
     }
   }
 }
 } finally {
-  if ($pruneLock.Token) { [void](Exit-FollowupIndexLock -IndexPath $captureIndexPath -Token $pruneLock.Token -LogTag 'auto-review:claude') }
+  [void](Exit-FollowupIndexLock -Lock $pruneLock.Lock -LogTag 'auto-review:claude')
+  Exit-CrgHeldDirectories -Held $pruneHeld
 }
 }
 
@@ -1974,4 +2009,12 @@ finally {
     Remove-Item -LiteralPath $work -ErrorAction SilentlyContinue
   }
   if (-not $cleanupWork) { exit 3 }
+}
+} finally {
+  try {
+    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+  try {
+    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
 }

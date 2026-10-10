@@ -1,5 +1,36 @@
 # Immutable closed-origin storage only. No branch, handoff or completed-pair activation.
 
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
 function Get-CrgRetentionCommand {
   param([string]$Module, [string]$Name)
   $commands = @(Get-Command -Name $Name -Module $Module -CommandType Function -ListImported -ErrorAction SilentlyContinue)
@@ -89,7 +120,7 @@ function Invoke-CrgRetentionGit {
     # Match the existing capture transport's PS5 no-preamble binary stdin rule.
     $priorEncoding = $null
     if ($null -ne $InputBytes -and $null -eq $start.PSObject.Properties['StandardInputEncoding']) {
-      $priorEncoding = [Console]::InputEncoding; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+      $priorEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
     } elseif ($null -ne $InputBytes) { $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false) }
     try { $started = $process.Start() } finally { if ($null -ne $priorEncoding) { [Console]::InputEncoding = $priorEncoding } }
     if (-not $started) { throw 'retention Git launch failed' }

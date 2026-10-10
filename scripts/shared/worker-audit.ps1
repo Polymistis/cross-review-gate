@@ -181,7 +181,7 @@
 #     * $verdictNameRe -- the `review-<YYYYMMDD>-<HHMMSS>-<scope>.md` filename
 #       shape guard, BYTE-IDENTICAL to analyze-blocker-trends.ps1 / dispatch-
 #       checklist.ps1.
-#     * Get-ArtifactBackend (+ its $abCandidateRe / $abEffortByBackend) -- the
+#     * Get-ArtifactBackend (+ its $abCandidatePattern / $abEffortByBackend) -- the
 #       producer identity reader: the artifact's OWN validated header block,
 #       graded as the wrappers' exact ordered header eras, BYTE-IDENTICAL to the
 #       analyzer's. A directory name is caller spelling, never provenance.
@@ -348,9 +348,52 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
 # Force UTF-8 for native `git` output captured via `&` (default $OutputEncoding is
 # ASCII on Windows PowerShell 5.1, which mojibakes multi-byte glyphs in commit
 # subjects). Same defect class fixed in auto-merge.ps1 / auto-review.ps1.
+# The console code pages belong to the console window this script shares with
+# the invoking shell, so the finally at the end of the script puts back the
+# values saved here.
+try {
+  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+} catch {
+  Write-Host "[worker-audit] ERROR: [class:operational] the console code pages could not be read ($($_.Exception.Message))."
+  exit 1
+}
+try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 
@@ -401,11 +444,11 @@ $script:CatNamesAll = @('PLAN-DRIFT', 'SILENT-FAILURE', 'TOMBSTONE-OR-SHIM', 'CR
 # excludes prompt-template examples and other stray markdown. (Mirror contract.)
 $script:VerdictNameRe = [regex]'^review-[0-9]{8}-[0-9]{6}-.+\.md$'
 # The VERDICT line regex, IDENTICAL to the analyzer's $verdictLineRe -- its
-# `(?<v>)` group yields the well-formed verdict WORD. Case-INSENSITIVE like the
-# wrappers' own `-match '^VERDICT:'` + case-insensitive word compare (a
-# wrapper-accepted `verdict: clean` is a valid artifact, never suspect).
+# `(?<v>)` group yields the well-formed verdict WORD. Exact, as the wrappers
+# compare the line, less trailing whitespace, ordinally (`verdict: clean` is
+# wrapper-rejected).
 # Shared by the suspect check and the union classifier so they cannot drift.
-$script:VerdictLineRe = [regex]'(?im)^VERDICT:\s*(?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
+$script:VerdictLineRe = [regex]'(?m)^VERDICT: (?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
 # Filename-tip resolutions that matched MORE THAN ONE branch commit (an
 # abbreviated tip that is a prefix of several full SHAs): never resolved by
 # enumeration order -- quarantined as ambiguous and listed in the report.
@@ -427,15 +470,19 @@ $script:StatusReadMaxBytes = 1MB
 # alias distinct from its target, and a reviews dir supplied twice through
 # an alias would be scanned twice (duplicate merge rounds; same-tree passing
 # evidence folded into ambiguous attempts). The handle is opened with backup
-# semantics (directories) and no access rights (identity only).
-if (-not ('CrgWorkerAudit.FinalPath' -as [type])) {
+# semantics (directories) and no access rights (identity only). The type name
+# is VERSIONED: a type name, once loaded, can never be redefined in a
+# PowerShell process, so an unversioned guard would accept an older copy's
+# definition whenever two versions run in one process. A new method set gets
+# a new suffix.
+if (-not ('CrgWorkerAudit.FinalPathV1' -as [type])) {
   Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 namespace CrgWorkerAudit {
-  public static class FinalPath {
+  public static class FinalPathV1 {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -497,8 +544,10 @@ namespace CrgWorkerAudit {
 # malformed provenance: never prose, never `legacy` (it would contaminate
 # the legacy bucket), never the first plausible value. `legacy` is reserved
 # for a region with NO header-shaped line at all (the wrappers predating
-# the header).
-$abCandidateRe = [regex]'(?i)^\s*(DIFF-SHA256|REVIEW-TREE-OID|REVIEW-BACKEND|REVIEW-EFFORT|REVIEW-SEVERITY-CONTRACT|REVIEW-DURATION-SECS)\b'
+# the header). A header-shaped line is recognized through
+# ConvertTo-CrgStructureFold, so its case and look-alike spellings are caught
+# in every culture; a line that cannot be normalized counts as header-shaped.
+$abCandidatePattern = '\A\s*(DIFF-SHA256|REVIEW-TREE-OID|REVIEW-BACKEND|REVIEW-EFFORT|REVIEW-SEVERITY-CONTRACT|REVIEW-DURATION-SECS)\b'
 $abEffortByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 $abEffortByBackend['codex']  = '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$'
 $abEffortByBackend['claude'] = '^REVIEW-EFFORT: n/a$'
@@ -510,7 +559,8 @@ function Get-ArtifactBackend {
   foreach ($abLine in $abLines) {
     if ($abLine.Length -eq 0) { break }
     $abRegion.Add($abLine)
-    if ($abCandidateRe.IsMatch($abLine)) { $abHeaderShaped = $true }
+    $abFold = ConvertTo-CrgStructureFold -Line $abLine
+    if ($null -eq $abFold -or $abFold -cmatch $abCandidatePattern) { $abHeaderShaped = $true }
   }
   if (-not $abHeaderShaped) { return @{ Backend = 'legacy'; Reason = $null } }
   $abBad = { param($abWhat) return @{ Backend = $null; Reason = "a header-bearing identity region that is not a producer header era ($abWhat) -- malformed provenance cannot be trusted (and is never legacy)" } }
@@ -593,6 +643,59 @@ function Read-VerdictArtifactText {
 # check and the classifier share ONE regex.
 # ---------------------------------------------------------------------------
 
+# A line folded so that every spelling a reader could take for a
+# verdict-structure name (VERDICT, a severity prefix, a header name, the
+# fail-closed banner) reads as that name in every culture. A culture `(?i)`
+# match does not do this: under tr-TR it does not fold ASCII `i` onto `I`, and
+# the invariant culture folds neither U+212A nor U+0130 (both checked
+# 2026-10-10). Compatibility decomposition turns full-width forms and U+212A
+# into ASCII and splits U+0130 into I plus a combining dot. After it, only
+# printable ASCII, tab, LF and CR survive, upper-cased: dash punctuation
+# reads as `-`, U+0131 reads as `I` (invariant upper-casing keeps it), and
+# every other character -- ASCII control characters such as U+0000 and every
+# other non-ASCII character -- is dropped. Space, tab, LF and CR are kept,
+# including the spaces decomposition maps to U+0020 (U+00A0, U+2009), so a
+# name split by one stays split, as it reads; other whitespace (U+0085,
+# U+1680, U+2028, U+2029) is non-ASCII after decomposition, so it is dropped
+# and joins what it separated. Letters of other scripts that merely look
+# Latin (Cyrillic А) have no such mapping and are dropped like any other.
+# Callers only widen what they refuse with the fold; acceptance stays exact.
+# $null means the line could not be normalized (an unpaired surrogate) and
+# must be refused.
+# The WHOLE line is folded. Folding only a bounded head was tried and dropped
+# (staged review, 2026-10-10): padding before the colon (`BLOCKER`, a hundred
+# spaces, `:`) or before a header name pushed the delimiter past the cut, and
+# the line escaped recognition. Dropping only nonspacing marks and format
+# characters was also tried and dropped (merge review, 2026-10-10): a
+# per-UTF-16-unit loop classified the halves of U+E0100 as surrogates and kept
+# them, and invisible characters of other categories (the Hangul fillers are
+# letters; unassigned code points) pass any category list. Characters are
+# classified whole, a surrogate pair at once, through CharUnicodeInfo, not
+# regex `\p{...}` classes: the regex engine's tables put U+00AD under dash
+# punctuation, not format, so a regex-based fold read `BLOC<U+00AD>KER:` as
+# `BLOC-KER:` and missed it (checked 2026-10-10).
+# scripts/review-common.ps1 and the log readers
+# (scripts/shared/analyze-blocker-trends.ps1, dispatch-checklist.ps1,
+# worker-audit.ps1) carry byte-identical copies of this function.
+function ConvertTo-CrgStructureFold {
+  param([string]$Line)
+  if ($Line -cnotmatch '[^\x09\x0A\x0D\x20-\x7E]') { return $Line.ToUpperInvariant() }
+  try { $decomposed = $Line.Normalize([System.Text.NormalizationForm]::FormKD) } catch { return $null }
+  $fold = New-Object System.Text.StringBuilder ($decomposed.Length)
+  for ($i = 0; $i -lt $decomposed.Length; $i++) {
+    $c = $decomposed[$i]
+    $code = [int]$c
+    if ($code -lt 0x80) {
+      if (($code -ge 0x20 -and $code -lt 0x7F) -or $code -eq 9 -or $code -eq 10 -or $code -eq 13) { [void]$fold.Append([char]::ToUpperInvariant($c)) }
+      continue
+    }
+    if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($decomposed, $i) -eq [System.Globalization.UnicodeCategory]::DashPunctuation) { [void]$fold.Append('-') }
+    elseif ($code -eq 0x131) { [void]$fold.Append('I') }
+    if ([char]::IsHighSurrogate($c) -and $i + 1 -lt $decomposed.Length -and [char]::IsLowSurrogate($decomposed[$i + 1])) { $i++ }
+  }
+  return $fold.ToString()
+}
+
 # Classify a category line's tail as none|count|invalid by the wrapper's
 # category value grammar. The log consumers must classify tails identically, or
 # they disagree on which verdict files are trustworthy evidence.
@@ -613,35 +716,38 @@ function Get-CategoryTailKind {
 }
 function Get-VerdictSuspectReason {
   param([string]$Content, [regex]$VerdictWordRe)
-  # Case policy MIRRORS the wrappers (and dispatch-checklist), which is ASYMMETRIC:
-  #  - The VERDICT line + word and the GATE FAILED CLOSED banner are matched CASE-
-  #    INSENSITIVELY. The wrappers detect the verdict with `-match '^VERDICT:'` and
-  #    compare the word with case-insensitive `-ne` (Get-VerdictExitCode in
-  #    scripts/review-common.ps1), so `verdict: clean` is an ACCEPTED clean verdict --
-  #    quarantining it here would wrongly diverge from a wrapper-accepted log.
-  #  - SEVERITY prefixes and CATEGORY lines / `none` are matched CASE-SENSITIVELY
-  #    (the wrapper counts `^BLOCKER:` and `^<CAT>:` rows case-sensitively);
-  #    a WRONG-CASE severity prefix is quarantined by the scan below as a finding
-  #    the case-sensitive parser would silently under-count.
-  if ($Content -match '(?m)^=====\s*GATE FAILED CLOSED\s*=====') {
+  # Case policy MIRRORS the wrappers (and dispatch-checklist):
+  #  - Acceptance is exact. The verdict word, SEVERITY prefixes and CATEGORY
+  #    lines / `none` are matched case-sensitively, as Get-VerdictExitCode in
+  #    scripts/review-common.ps1 matches them, so `verdict: clean` is
+  #    wrapper-rejected evidence.
+  #  - Loose matches only widen what is refused, and they go through
+  #    ConvertTo-CrgStructureFold, never a culture `(?i)` match, which under
+  #    tr-TR does not fold ASCII `i` onto `I`: a VERDICT line in any spelling
+  #    counts toward the one-line requirement, as the wrapper counts it, and a
+  #    near-miss severity prefix is quarantined by the scan below.
+  $structureLines = @($Content -split "`n")
+  $structureFolds = @(foreach ($structureLine in $structureLines) { ConvertTo-CrgStructureFold -Line $structureLine })
+  for ($i = 0; $i -lt $structureLines.Count; $i++) {
+    if ($null -eq $structureFolds[$i]) { return 'a line could not be normalized for the verdict-structure checks -- untrustworthy evidence' }
+  }
+  if (@($structureFolds | Where-Object { $_ -cmatch '\A=====\s*GATE FAILED CLOSED\s*=====' }).Count -gt 0) {
     return 'GATE FAILED CLOSED banner (fail-closed evidence)'
   }
-  if ($Content -notmatch '(?m)^VERDICT:') {
+  if (@($structureFolds | Where-Object { $_ -cmatch '\AVERDICT\s*:' }).Count -eq 0) {
     return 'no VERDICT: line (truncated / missing verdict -- the wrapper and dispatch-checklist fail closed)'
   }
-  # Reject WRONG-CASE severity prefixes anywhere: a column-0 line like `blocker:` /
-  # `Quality:` matches a severity NAME case-insensitively but NOT the exact-case
+  # Reject NEAR-MISS severity prefixes anywhere: a column-0 line like `blocker:`
+  # / `Quality:` / `NOTE :` folds to a severity NAME but is NOT the exact
   # `^(BLOCKER|QUALITY|NON-BLOCKER|NOTE):` that the wrapper and this analyzer's
   # $severityRe count with, so it is INVISIBLE to finding-counting -- a real finding
-  # written (or corrupted) in the wrong case would leave a `VERDICT: CLEAN` verdict
+  # written (or corrupted) that way would leave a `VERDICT: CLEAN` verdict
   # falsely clean AND pollute the corpus with an uncounted finding. Fail closed on
   # any such line rather than trust a block the case-sensitive parser under-counts.
-  foreach ($sm in ([regex]'(?im)^(?<sev>BLOCKER|QUALITY|NON-BLOCKER|NOTE):').Matches($Content)) {
-    $sev = $sm.Groups['sev'].Value
-    # Exact names, not "equals its upper case": (?i) also matches U+212A
-    # (Kelvin sign) for K, which ToUpperInvariant leaves as it is.
-    if ($sev -cnotmatch '\A(?:BLOCKER|QUALITY|NON-BLOCKER|NOTE)\z') {
-      return "a severity-prefix line uses non-uppercase '$sev`:' -- the wrapper's case-sensitive parser under-counts it, so a real finding could hide under a falsely-clean verdict (untrustworthy)"
+  for ($i = 0; $i -lt $structureLines.Count; $i++) {
+    $sm = [regex]::Match($structureFolds[$i], '\A(BLOCKER|QUALITY|NON-BLOCKER|NOTE)\s*:')
+    if ($sm.Success -and -not $structureLines[$i].StartsWith("$($sm.Groups[1].Value):", [System.StringComparison]::Ordinal)) {
+      return "a severity-prefix line spells $($sm.Groups[1].Value) in a non-canonical form -- the wrapper refuses it, and an exact-name parser would under-count it, so a real finding could hide under a falsely-clean verdict (untrustworthy)"
     }
   }
   # Every `=====` marker must be a well-formed REVIEW PASS marker (the banner is
@@ -714,7 +820,7 @@ function Get-VerdictSuspectReason {
   foreach ($durLn in ($Content -split "`r?`n")) {
     if ($durLeading -and [string]::IsNullOrWhiteSpace($durLn)) { $durLeading = $false; continue }
     if ($durLeading) {
-      if ($durLn -match '^\s*REVIEW-DURATION-SECS\b') {
+      if ((ConvertTo-CrgStructureFold -Line $durLn) -cmatch '\A\s*REVIEW-DURATION-SECS\b') {
         if ($durLn -cnotmatch '^REVIEW-DURATION-SECS: (0|[1-9][0-9]*)$') {
           return 'a leading-region REVIEW-DURATION-SECS line violates its declared shape (exact-case name, one non-negative unpadded base-10 integer) -- malformed duration metadata, regardless of artifact shape'
         }
@@ -730,7 +836,6 @@ function Get-VerdictSuspectReason {
   if ($durStamps -gt 1) {
     return 'more than one REVIEW-DURATION-SECS stamp -- conflicting duration metadata is malformed evidence'
   }
-  $lineVerdictRe = [regex]'(?im)^VERDICT:[^\r\n]*'   # case-INSENSITIVE, mirroring the wrappers' `-match '^VERDICT:'`
   # Category-block validation is UNCONDITIONAL: every verdict-shaped artifact
   # counted here must carry the complete eight-category block, because the
   # wrapper rejects a categoryless verdict (exit 3). There is NO pre-category
@@ -761,7 +866,8 @@ function Get-VerdictSuspectReason {
       }
       continue
     }
-    $verdictLines = $lineVerdictRe.Matches($blk)
+    # Any spelling counts, as the wrapper counts it (ConvertTo-CrgStructureFold).
+    $verdictLines = @($blk -split "`n" | Where-Object { $verdictFold = ConvertTo-CrgStructureFold -Line $_; $null -eq $verdictFold -or $verdictFold -cmatch '\AVERDICT\s*:' })
     if ($verdictLines.Count -ne 1) {
       return "a review-pass block has $($verdictLines.Count) VERDICT: line(s) (exactly one required -- the wrapper and dispatch-checklist fail closed on zero or duplicate)"
     }
@@ -783,10 +889,10 @@ function Get-VerdictSuspectReason {
       $vwm = $VerdictWordRe.Match($blk)
       if ($vwm.Success) { $vw = $vwm.Groups['v'].Value }
       if (($blk -cmatch '(?m)^QUALITY:') -or ($blk -cmatch '(?m)^NON-BLOCKER:') -or ($blk -cmatch '(?m)^NOTE:')) {
-        if (-not [string]::Equals($vw, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not [string]::Equals($vw, 'NON-BLOCKING', [System.StringComparison]::Ordinal)) {
           return 'a review-pass block has QUALITY/NON-BLOCKER/NOTE findings but its VERDICT is not NON-BLOCKING (wrapper-rejected incoherence)'
         }
-      } elseif (-not [string]::Equals($vw, 'CLEAN', [System.StringComparison]::OrdinalIgnoreCase)) {
+      } elseif (-not [string]::Equals($vw, 'CLEAN', [System.StringComparison]::Ordinal)) {
         return 'a review-pass block has zero findings but its VERDICT is not CLEAN (wrapper-rejected incoherence)'
       }
     }
@@ -896,8 +1002,8 @@ function Get-VerdictSuspectReason {
 function Get-VerdictUnionClass {
   param([string]$Content)
   $vAll = @($script:VerdictLineRe.Matches($Content) | ForEach-Object { $_.Groups['v'].Value })
-  if (($Content -match '(?m)^BLOCKER:') -or (@($vAll | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0)) { return 'BLOCKED' }
-  if (($Content -match '(?m)^QUALITY:') -or ($Content -match '(?m)^NON-BLOCKER:')) { return 'QUALITY' }
+  if (($Content -cmatch '(?m)^BLOCKER:') -or (@($vAll | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::Ordinal) }).Count -gt 0)) { return 'BLOCKED' }
+  if (($Content -cmatch '(?m)^QUALITY:') -or ($Content -cmatch '(?m)^NON-BLOCKER:')) { return 'QUALITY' }
   return 'PASS'
 }
 
@@ -924,7 +1030,7 @@ function Test-VerdictContractStamp {
   $headerish = [regex]'^(DIFF-SHA256:|REVIEW-TREE-OID:|REVIEW-BACKEND:|REVIEW-EFFORT:|REVIEW-SEVERITY-CONTRACT:)'
   foreach ($ln in ($Content -split "`r?`n")) {
     if ($ln.Trim().Length -eq 0) { break }
-    if ($ln -match '^REVIEW-SEVERITY-CONTRACT:\s*blocker-only\s*$') { return $true }
+    if ($ln -cmatch '^REVIEW-SEVERITY-CONTRACT:\s*blocker-only\s*$') { return $true }
     if (-not $headerish.IsMatch($ln)) { return $false }
   }
   return $false
@@ -2562,11 +2668,11 @@ foreach ($dirRaw in $ReviewsDir) {
   $abs = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $dir).Path)
   # Identity is the FINAL path behind a directory handle: a junction or
   # symlink alias of a dir already scanned is the SAME dir (see the
-  # CrgWorkerAudit.FinalPath rationale). An unresolvable final path is an
+  # CrgWorkerAudit.FinalPathV1 rationale). An unresolvable final path is an
   # indeterminate identity: an explicit entry refuses by name, a default is
   # skipped by name.
   $absFinalErr = 0
-  $absFinal = [CrgWorkerAudit.FinalPath]::Resolve($abs, [ref]$absFinalErr)
+  $absFinal = [CrgWorkerAudit.FinalPathV1]::Resolve($abs, [ref]$absFinalErr)
   if ([string]::IsNullOrWhiteSpace($absFinal)) {
     if ($reviewsDirExplicit) {
       Write-Host "[worker-audit] ERROR: [class:operational] could not resolve the final path of explicit reviews directory $dir (Win32 error $absFinalErr) -- its identity is indeterminate; aborting rather than risk scanning one directory twice."
@@ -4047,3 +4153,11 @@ Write-Host "[worker-audit] wrote report to $outAbs$unreliableTag"
 Write-Host "[worker-audit]   commits=$($commits.Count)  AUTHORITATIVE: $($mergeRounds.Count) tip-matched branch-scope merge rounds (branch provenance; gate under normal op, see report caveat); TREE-MATCHED: $passingTotal commit-gate passing (exact tree, not branch-scoped -- shared-log same-tree ambiguity)$incompleteTag; aborted ($abortedBoundWord): $tightAbortedTotal tight + $looseAbortedTotal loose$unreliableTag"
 Write-Host "[worker-audit]   first-attempt-CLEAN (best-effort)=$firstAttemptCleanTight/$tightDenom tight OID-matched; repeat categories (best-effort, tight): $repeatNote$unreliableTag$incompleteTag"
 exit 0
+} finally {
+  try {
+    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "worker-audit.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+  try {
+    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "worker-audit.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+}

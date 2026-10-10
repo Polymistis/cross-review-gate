@@ -62,7 +62,11 @@ if ($PushCheck) {
 if (-not [string]::Equals([IO.Path]::GetFileName($PSCommandPath), 'launcher.ps1', [StringComparison]::Ordinal)) { throw 'Invoke the operator-installed <runtime-store>/launcher.ps1, not a source checkout.' }
 
 # Read-only subset of bootstrap's handle-relative boundary: no mutation,
-# rename, disposition, or general rooted-I/O registry.
+# rename, disposition, or general rooted-I/O registry. The type name is
+# VERSIONED: a type name, once loaded, can never be redefined in a PowerShell
+# process, so an unversioned guard would accept an older launcher's
+# definition whenever two versions run in one process. A new method set gets
+# a new suffix.
 if (-not ('CrgCentralLaunch.ReadLeaseV1' -as [type])) {
   Add-Type -Namespace 'CrgCentralLaunch' -Name 'ReadLeaseV1' -MemberDefinition @'
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]

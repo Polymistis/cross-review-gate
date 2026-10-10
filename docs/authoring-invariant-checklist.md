@@ -130,11 +130,14 @@ session memory recurs in the next session.
     is true. Any comparison an outside value (a path, a Git field, file or
     reviewer text, a parameter) can reach uses `[string]::Equals` or a
     collection built with `[System.StringComparer]::Ordinal`, or
-    `OrdinalIgnoreCase` where letter case must not matter; a parameter's
-    accepted set is a `ValidatePattern('\A(?:a|b)\z', Options = 'None')`.
-    Case-insensitive matching is not "equals its upper case": `(?i)` and
-    OrdinalIgnoreCase disagree on U+212A (Kelvin sign) and U+017F (long s),
-    so name the exact accepted values. `[string]::Equals($null, '')` is
+    `OrdinalIgnoreCase` where letter case must not matter. A parameter's
+    accepted set is a `ValidatePattern('\A(?:a|b)\z', Options = 'None')`,
+    or, for a user-facing parameter that keeps tab completion, a
+    `ValidateSet` followed after binding by an ordinal mapping to the exact
+    listed spelling that refuses anything else (the review wrappers'
+    `-Scope`). Case-insensitive matching is not "equals its upper case":
+    `(?i)` matches U+212A (Kelvin sign) to `k` and OrdinalIgnoreCase does
+    not, so name the exact accepted values. `[string]::Equals($null, '')` is
     true while an Ordinal comparer's `Equals($null, '')` is false; test
     emptiness with `.Length` or `IsNullOrEmpty` on purpose. The LEFT
     operand's type decides an operator comparison (the right one is
@@ -154,15 +157,23 @@ session memory recurs in the next session.
     CULTURE-COMPARE rule reads added PowerShell lines with PowerShell's
     parser and points at a `-c`/`-i` operator, or one with a quoted,
     `[string]` or `[char]` operand, unless the deciding operand is a
-    `[char]`, other numeric cast or a number; a case-insensitive `-like`;
-    `StartsWith`/`EndsWith`, and `IndexOf` on a quoted string, without a
-    written-out `Ordinal` or `OrdinalIgnoreCase` comparison last;
-    `ValidateSet`; and `-Unique`/`Get-Unique`. It is a pointer, not a
-    gate: the syntax does not give an operand's run-time type, so it can
-    miss a comparison or name an exact one, and this walk is what keeps
-    comparisons exact. `switch`, `@{}`, `Sort-Object`, `Group-Object`, an
-    `IndexOf` whose argument type is not written, and a plain operator
-    between two operands of unstated type are never pointed at.
+    number or a cast to a type no string can be (not `[object]`,
+    `[psobject]`, an interface `String` implements such as
+    `[IComparable]`, or a collection other than an array; an array cast is
+    judged by its element type); a case-insensitive `-like`; `StartsWith`/`EndsWith`, and
+    `IndexOf` on a quoted string, without a written-out `Ordinal` or
+    `OrdinalIgnoreCase` comparison last; `ValidateSet`; a `switch` with a
+    quoted clause (unless `-CaseSensitive` with `-Regex` or `-Wildcard`);
+    `Sort-Object` and `Group-Object`; and `-Unique`/`Get-Unique`. It is a
+    pointer, not a gate: the syntax does not give an operand's run-time
+    type, so it can miss a comparison or name an exact one, and this walk
+    is what keeps comparisons exact. `@{}` keys, an `IndexOf` whose
+    argument type is not written, and a plain operator between two
+    operands of unstated type are never pointed at, because nearly every
+    hashtable and untyped comparison would be. It runs in the staged lint
+    only: parsing candidate text loads assemblies named in type literals
+    and searches for `using module` targets, which the in-process central
+    review must not do.
 
 ## Operational rules (bind the rounds, not the code)
 

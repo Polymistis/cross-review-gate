@@ -70,8 +70,13 @@ Within that boundary, the object a check approves is the object later used:
 - Before approval, the only resource consumed is the bounded input copy: the
   archive up to the runtime manifest's 256 MiB payload limit plus 32 MiB for
   operator documents and archive structure, a source bootstrap up to 16 MiB.
-- Every error stops the procedure. Run `Close-CrgPrivateWork` after the last
-  bootstrap command or after a failure; ending the PowerShell session also
+- In the preparation, publication, import, launcher and activation blocks,
+  every error stops the procedure: a PowerShell error through
+  `$ErrorActionPreference = 'Stop'`, and a failed bootstrap command through the
+  exit-code check after it. Outside those blocks, a native command with no
+  exit-code check after it (Git and the launcher's project operations)
+  reports failure only by its output and exit code. Run
+  `Close-CrgPrivateWork` after the last bootstrap command or after a failure; ending the PowerShell session also
   releases the directories. Private directories remain afterwards; send them to
   the Recycle Bin when no longer needed.
 
@@ -88,7 +93,17 @@ $CrgGitSelectors = @('GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GI
   'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
   'GIT_REFERENCE_BACKEND', 'GIT_ATTR_SOURCE', 'GIT_ATTR_NOSYSTEM', 'GIT_REPLACE_REF_BASE',
   'GIT_GRAFT_FILE', 'GIT_SHALLOW_FILE')
-$CrgIsGitSelector = { param($Name) $Name -in $CrgGitSelectors -or $Name -match '\AGIT_CONFIG_(KEY|VALUE)_[0-9]+\z' }
+# Names match without letter case, as Windows does, but ordinally: -in and -match
+# compare by culture, which ignores U+00AD and folds U+212A onto K, and would
+# clear a variable that is not a selector.
+$CrgIsGitSelector = {
+  param([string]$Name)
+  if ([Linq.Enumerable]::Contains([string[]]$CrgGitSelectors, $Name, [StringComparer]::OrdinalIgnoreCase)) { return $true }
+  foreach ($CrgPrefix in @('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_')) {
+    if ($Name.StartsWith($CrgPrefix, [StringComparison]::OrdinalIgnoreCase) -and $Name.Substring($CrgPrefix.Length) -cmatch '\A[0-9]+\z') { return $true }
+  }
+  return $false
+}
 foreach ($CrgName in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
   if (& $CrgIsGitSelector $CrgName) { [Environment]::SetEnvironmentVariable($CrgName, $null, 'Process') }
 }
@@ -185,7 +200,7 @@ $CrgApprovedSource = Read-Host 'Full approved source commit OID'
 if ($CrgApprovedBootstrapSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Approved bootstrap SHA256 must be 64 lowercase hexadecimal digits' }
 $CrgBootstrap = Join-Path (New-CrgPrivateWork 'publish') 'bootstrap.ps1'
 Copy-CrgIntoPrivate $CrgBootstrapSource $CrgBootstrap 16777216
-if ((Get-CrgFileSha256 $CrgBootstrap) -cne $CrgApprovedBootstrapSha256) { throw 'Bootstrap approval/hash mismatch' }
+if (-not [string]::Equals((Get-CrgFileSha256 $CrgBootstrap), $CrgApprovedBootstrapSha256, [StringComparison]::Ordinal)) { throw 'Bootstrap approval/hash mismatch' }
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -PublishRuntime -RuntimeStore $CrgStore -SourceRoot $CrgSource -ApprovedSourceCommit $CrgApprovedSource
 if ($LASTEXITCODE -ne 0) { throw 'Central source publication failed; no activation requested' }
 $CrgReleaseId = Read-Host 'Exact 64-character release ID reported by successful publication'
@@ -258,11 +273,11 @@ foreach ($CrgApproved in @($CrgApprovedArchiveSha256, $CrgApprovedBootstrapSha25
 $CrgImport = New-CrgPrivateWork 'import'
 $CrgArchiveCopy = Join-Path $CrgImport 'package.zip'
 Copy-CrgIntoPrivate $CrgArchive $CrgArchiveCopy 301989888
-if ((Get-CrgFileSha256 $CrgArchiveCopy) -cne $CrgApprovedArchiveSha256) { throw 'Archive approval/hash mismatch' }
+if (-not [string]::Equals((Get-CrgFileSha256 $CrgArchiveCopy), $CrgApprovedArchiveSha256, [StringComparison]::Ordinal)) { throw 'Archive approval/hash mismatch' }
 $CrgPackage = Join-Path $CrgImport 'package'
 [IO.Compression.ZipFile]::ExtractToDirectory($CrgArchiveCopy, $CrgPackage)
 $CrgBootstrap = Join-Path $CrgPackage 'bootstrap.ps1'
-if ((Get-CrgFileSha256 $CrgBootstrap) -cne $CrgApprovedBootstrapSha256) { throw 'Bootstrap approval/hash mismatch' }
+if (-not [string]::Equals((Get-CrgFileSha256 $CrgBootstrap), $CrgApprovedBootstrapSha256, [StringComparison]::Ordinal)) { throw 'Bootstrap approval/hash mismatch' }
 $CrgReleasePackage = Join-Path $CrgPackage 'release'
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -PublishRuntime -RuntimeStore $CrgStore -ReleasePackage $CrgReleasePackage -ApprovedManifestSha256 $CrgApprovedManifestSha256
 if ($LASTEXITCODE -ne 0) { throw 'Central package import failed; no activation requested' }

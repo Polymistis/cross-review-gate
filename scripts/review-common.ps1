@@ -2,8 +2,8 @@
 # classification, consistency-document, project-mode, prompt-assembly,
 # diff-identity, git, exhaustion-sidecar, commit-baseline, tree-path,
 # commit-log evidence, codex-effort, argument-quoting, PATH,
-# replacement-suppression, attribute-neutral Git and fix-on-fix advisory
-# functions for the review hosts.
+# replacement-suppression, attribute-neutral Git, console code-page and
+# fix-on-fix advisory functions for the review hosts.
 #
 # Dot-sourced, never imported as a module: these functions must run in the
 # loading script's own scope. A module function would not see that script's $ErrorActionPreference (the
@@ -11,6 +11,37 @@
 # state below would live in a separate module scope. paired-governance.psm1,
 # review-preparation.psm1 and paired-diff.psm1 dot-source this file too; there
 # it runs in that module's scope.
+
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
 
 # PURE path-selection for the default review-output dir: given an already-resolved
 # git common dir and (when known) the working-tree top-level, pick the
@@ -47,7 +78,8 @@ function Test-ReviewSubmoduleGitDir {
 # beside the verdict artifacts -- a submodule's common-dir parent is
 # `.git/modules`, NOT its working tree, and a common-dir-parent shortcut would
 # write the index where the batch-triage scan never looks. $null when the
-# helper fails safe (caller falls back to the cwd logs dir). Pure.
+# helper fails safe (Resolve-FollowupGitContext then reports Ok = $false and
+# no index is written). Pure.
 function Get-FollowupIndexDir {
   param([string]$CommonDir, [string]$TopLevel)
   $reviews = Get-ReviewLogDir -CommonDir $CommonDir -TopLevel $TopLevel -Backend 'x'
@@ -571,11 +603,11 @@ function Get-CaptureHeaderLocatorField {
 function Test-CaptureVerdictLeaf {
   param([string]$Name)
   if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-  return ($Name -match '^review-[0-9]{8}-[0-9]{6}-.+\.md$')
+  return ($Name -cmatch '^review-[0-9]{8}-[0-9]{6}-.+\.md$')
 }
 
 # Display form for workspace-controlled locator text that reaches a diagnostic.
-# ASCII WHITELIST and bounded, the same discipline Get-FollowupLockMarkerDisplay
+# ASCII WHITELIST and bounded, the same discipline Get-FollowupLockHolderDisplay
 # applies to another process's marker bytes, and for the same reason: a blacklist
 # keeps losing to the next character class nobody enumerated.
 #
@@ -988,42 +1020,52 @@ function Get-CapturePruneIndexText {
   return @{ Ok = $true; Text = $text; Reason = '' }
 }
 
-# I/O half of the decision. Only a CONFIRMED not-found authorizes pruning
-# without exemptions; a metadata error of any other kind (access denied, a
-# provider fault, a transient share violation) is an unknown state and preserves,
-# because "could not stat" and "is not there" are different facts and only one
-# of them is safe to delete against.
+# I/O half of the decision, on the index opened relative to the held logs
+# folder (Enter-PruneIndexLock's Binding). Only a CONFIRMED not-found
+# authorizes pruning without exemptions; an open error of any other kind
+# (access denied, a sharing violation, a link or a directory at the name) is
+# an unknown state and preserves, because "could not open" and "is not there"
+# are different facts and only one of them is safe to delete against.
 function Resolve-PruneExemptionPlan {
-  param([string]$IndexPath, [string]$Backend, [string]$RepoRoot)
+  param([hashtable]$Binding, [string]$Backend, [string]$RepoRoot)
   $stop = { param($why) @{ PruneAllowed = $false; Reason = $why; Keys = @(); Stems = @(); Unresolved = @(); IndexPresent = $false } }
   if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     return (& $stop 'the main repository root could not be resolved, so neither the follow-up index nor a relative locator can be located')
   }
-  if ([string]::IsNullOrWhiteSpace($IndexPath)) {
-    return (& $stop 'no follow-up index path could be resolved')
+  if ($null -eq $Binding -or -not $Binding.Ok) {
+    return (& $stop 'the follow-up index folder is not held')
   }
-  $item = $null
-  try {
-    $item = Get-Item -LiteralPath $IndexPath -ErrorAction Stop
-  } catch [System.Management.Automation.ItemNotFoundException] {
-    return @{ PruneAllowed = $true; Reason = ''; Keys = @(); Stems = @(); Unresolved = @(); IndexPresent = $false }
-  } catch [System.IO.FileNotFoundException] {
-    return @{ PruneAllowed = $true; Reason = ''; Keys = @(); Stems = @(); Unresolved = @(); IndexPresent = $false }
-  } catch [System.IO.DirectoryNotFoundException] {
-    return @{ PruneAllowed = $true; Reason = ''; Keys = @(); Stems = @(); Unresolved = @(); IndexPresent = $false }
-  } catch {
-    $plan = & $stop "could not read the metadata of '$IndexPath' ($($_.Exception.GetType().Name): $($_.Exception.Message))"
-    $plan.IndexPresent = $true
-    return $plan
-  }
-  if ($item.PSIsContainer) {
-    $plan = & $stop "'$IndexPath' is a directory, not the follow-up index"
+  $IndexPath = $Binding.IndexPath
+  $err = 0
+  $handle = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($Binding.Logs.Handle, (Get-FollowupIndexLeaf), 0, [ref]$err)
+  if ($handle.IsInvalid) {
+    $handle.Dispose()
+    if ($err -eq 2) { return @{ PruneAllowed = $true; Reason = ''; Keys = @(); Stems = @(); Unresolved = @(); IndexPresent = $false } }
+    $plan = & $stop "could not open '$IndexPath' (Win32 error $err)"
     $plan.IndexPresent = $true
     return $plan
   }
   $bytes = $null
-  try { $bytes = [System.IO.File]::ReadAllBytes($IndexPath) } catch {
-    $plan = & $stop "could not read '$IndexPath' ($($_.Exception.GetType().Name): $($_.Exception.Message))"
+  try {
+    if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinaryFile($handle)) {
+      $handle.Dispose()
+      $plan = & $stop "'$IndexPath' is a link or not a file, not the follow-up index"
+      $plan.IndexPresent = $true
+      return $plan
+    }
+    $fs = New-Object System.IO.FileStream($handle, [System.IO.FileAccess]::Read, 4096, $false)
+    try {
+      $bytes = New-Object byte[] $fs.Length
+      $read = 0
+      while ($read -lt $bytes.Length) {
+        $n = $fs.Read($bytes, $read, $bytes.Length - $read)
+        if ($n -le 0) { throw "a short read ($read of $($bytes.Length) bytes)" }
+        $read += $n
+      }
+    } finally { $fs.Dispose() }
+  } catch {
+    $handle.Dispose()
+    $plan = & $stop "could not read '$IndexPath' ($($_.Exception.Message))"
     $plan.IndexPresent = $true
     return $plan
   }
@@ -1188,8 +1230,9 @@ function Test-CaptureFindingDigest {
 # The follow-up index's capture doctrine, emitted verbatim by every writer of
 # that index, so a reader of the file sees one contract regardless of which gate
 # wrote it. The version and frame bytes must remain identical across writers.
-# Explicit `n concatenation, NOT a here-string: the sh writer emits the same
-# bytes via printf, and a here-string would embed this file's line endings.
+# Explicit `n concatenation, NOT a here-string: a here-string would embed this
+# file's line endings, and a 2.6.0 pre-commit hook, which may still write this
+# index, emits the same bytes via printf.
 #
 # FRAMED: a leading blank line + BEGIN marker (so an unterminated legacy file
 # cannot absorb the block onto its last line), and a VERSIONED terminal marker
@@ -1380,8 +1423,8 @@ function Get-FollowupIndexHeader {
 # Highest COMPLETE frame version present, plus the LAST complete frame at that
 # version -- the pair the monotonic rule decides on. A marker counts only as a
 # COMPLETE LINE: text before or after it means the line is prose mentioning the
-# marker, not a frame boundary (the sh writer scans line-oriented for the same
-# reason).
+# marker, not a frame boundary (a 2.6.0 hook's shell scan is line-oriented
+# for the same reason).
 function Get-FollowupDoctrineFrameState {
   param([string]$ExistingText)
   # WinnerIndex is the winning frame's BEGIN position: admissibility of a
@@ -1539,11 +1582,10 @@ function Format-ReviewFollowupBlock {
 }
 
 # The git context both the index location and the locator root are derived from,
-# probed ONCE per caller. Returns an EXPLICIT success flag: a failed probe is a
-# fact its callers must act on differently -- the follow-up WRITER may still
-# record under the cwd (losing a record is worse than misfiling one), while the
-# log PRUNE must not delete anything on a guessed root and a locator must stay
-# absolute rather than be made relative to a root nobody confirmed. Two-step
+# probed ONCE per caller. Returns an EXPLICIT success flag: on a failed probe
+# the follow-up writers drop their records (Enter-FollowupLogsBinding), the
+# log PRUNE deletes nothing, and a locator stays absolute rather than be made
+# relative to a root nobody confirmed. Two-step
 # common-dir probe as in Resolve-DefaultReviewOutDir: prefer the absolute form
 # (git >= 2.31), else the plain form + Resolve-Path (older git).
 function Resolve-FollowupGitContext {
@@ -1817,8 +1859,12 @@ function Get-CrgFolderIdentity {
 # path through unchecked (review, 2026-10-09). Only a full path (a drive
 # root or a share) is accepted: every caller passes Git's absolute output,
 # and a relative one would be resolved against whatever folder is current.
-# An extended-length `\\?\` path is refused here as well: Git reports drive
-# and share paths, and accepting the prefix would need its own exact rules.
+# An extended-length `\\?\` path is refused here as well, and the refusal
+# costs no working setup: Git for Windows reports such a location in its
+# ordinary spelling (a `\\?\E:\...` working folder or `-C` path came back as
+# `E:/...`, a `\\?\UNC\host\share\...` one as `//host/share/...`) and refused
+# an extended-length GIT_DIR outright (checked 2026-10-10). Accepting the
+# prefix would need its own exact rules for an input Git does not produce.
 # Enter-CrgHeldDirectory, which also takes paths from other sources,
 # accepts extended-length drive and UNC spellings; this refusal is only for
 # the Git-reported paths that pass through here.
@@ -1848,130 +1894,179 @@ function ConvertTo-CrgFullPathNoTrailing {
   return $full
 }
 
-# CROSS-WRITER APPEND LOCK, the same sidecar-directory protocol the pre-commit
-# hook uses (`<index>.lock`: a directory whose CREATION is the test-and-set).
-# The exclusive FileStream below still serializes THIS process's write; the lock
-# is what a POSIX-sh writer can also honor, so the atomicity unit -- the whole
-# transaction of header, doctrine frame and rows -- holds across every writer of
-# this index rather than only the .NET ones.
-# Acquisition writes an owner marker naming the holder; a lock that cannot be
-# taken within the retry budget DROPS this record with a WARN naming the lock,
-# its marker and its age. An operator clears crash residue; nothing reclaims it
-# automatically.
-#
-# NO AUTOMATIC TAKEOVER. Aging a lock out and reclaiming it -- by delete, and
-# later by atomic rename-aside plus ownership tokens -- was built here and taken
-# back out. The pre-commit hook is a co-equal writer of this index, and in
-# portable sh every step of a reclaim is a PATH check (`test`, `mkdir`, `mv`),
-# which reports what was true at some past instant, never what holds during the
-# write that follows. A holder that resumes mid-reclaim cannot be fenced there,
-# so the reclaim could let two writers append at once -- the exact interleaving
-# this lock exists to prevent. Since the runtimes must agree, .NET
-# does not reclaim either. Do not rebuild takeover without an OS-fenced primitive
-# every runtime can honor: an exclusive handle held across the whole critical
-# section, or a lease with a fencing token.
+# THE FOLLOW-UP INDEX FOLDER AND LOCK (docs/capture-doctrine-v6.md section 7).
+# The index, its lock and the seal's provenance records are reached only
+# through the logs folder held by Enter-FollowupLogsBinding: the folder's
+# parent is the root Git named when the context was resolved, checked by
+# identity, and every directory from the volume root down stays held (it
+# cannot be renamed or deleted) until the caller lets go. No path to the index
+# is resolved again after that; every open is by one name relative to the held
+# folder, without following a link, and classified on the handle it returns.
+# There is no current-folder fallback: a record misfiled under an unconfirmed
+# folder is worse than a dropped record, whose findings the verdict file keeps.
+function Get-FollowupIndexLeaf { return 'review-followups.md' }
 
-# The acquire is a DIRECT CreateDirectoryW, not New-Item and not `cmd /c mkdir`.
-# Both alternatives were measured and both are unusable here:
-#   * `New-Item -ItemType Directory` is NOT a test-and-set. Barriered
-#     PowerShell jobs racing the same absent path BOTH reported success in every
-#     round of the probe -- the provider raises "already exists" from a
-#     PRE-CHECK, while the underlying create is idempotent, so under contention
-#     it hands the lock to every contender at once.
-#   * `cmd /c mkdir` is atomic, but re-parses its argument as a COMMAND LINE: a
-#     lock path containing `&` ran the tail as a second command in the probe.
-# CreateDirectoryW has neither defect -- one syscall, no shell parsing, and
-# ERROR_ALREADY_EXISTS distinguishable from every other failure. It also refuses
-# to create missing parents (ERROR_PATH_NOT_FOUND), which is the behavior a lock
-# wants: the caller creates the index directory first.
-$script:CrgLockNativeState = ''
-function Initialize-CrgLockNative {
-  if ($script:CrgLockNativeState) { return $script:CrgLockNativeState }
-  if ('CrgLockNative' -as [type]) { $script:CrgLockNativeState = 'ok'; return 'ok' }
-  try {
-    Add-Type -Namespace '' -Name 'CrgLockNative' -ErrorAction Stop -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool CreateDirectory(string lpPathName, IntPtr lpSecurityAttributes);
-'@
-    $script:CrgLockNativeState = 'ok'
-  } catch {
-    $script:CrgLockNativeState = 'unavailable'
+# Returns Ok, Reason, Logs (the held logs folder: Path, Handle) and IndexPath
+# (for messages only), with the root and the logs folder held in Held. A
+# missing logs folder is created below the confirmed root.
+function Enter-FollowupLogsBinding {
+  param([hashtable]$GitContext, [System.Collections.Generic.List[object]]$Held)
+  $none = @{ Ok = $false; Reason = ''; Logs = $null; IndexPath = '' }
+  if ($null -eq $GitContext -or -not $GitContext.Ok -or [string]::IsNullOrEmpty($GitContext.Root) -or [string]::IsNullOrEmpty($GitContext.LogsDir)) {
+    $none.Reason = 'the logs folder could not be resolved from Git'
+    return $none
   }
-  return $script:CrgLockNativeState
+  $bind = Enter-CrgConfirmedFolders -Pairs @(, @($GitContext.Root, $GitContext.RootId)) -Held $Held
+  if (-not $bind.Ok) { $none.Reason = $bind.Reason; return $none }
+  $logs = Enter-CrgHeldDirectory -Path $GitContext.LogsDir -Held $Held -CreateUnder $GitContext.Root
+  if ($logs.State -cne 'ok') { $none.Reason = "$($GitContext.LogsDir) could not be held ($($logs.State): $($logs.Reason))"; return $none }
+  return @{ Ok = $true; Reason = ''; Logs = $logs.Record; IndexPath = (Join-Path $GitContext.LogsDir (Get-FollowupIndexLeaf)) }
 }
 
-# 'created' | 'exists' | 'unavailable' | 'error:<win32>'. Anything but 'created'
-# leaves the caller without the lock; only 'created' is exclusive ownership.
-function New-ExclusiveDirectory {
-  param([string]$Path)
-  if (-not [string]::Equals((Initialize-CrgLockNative), 'ok', [System.StringComparison]::Ordinal)) { return 'unavailable' }
-  if ([CrgLockNative]::CreateDirectory($Path, [IntPtr]::Zero)) { return 'created' }
-  $code = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-  # ERROR_ALREADY_EXISTS: someone else holds it, or a foreign object sits there.
-  if ($code -eq 183) { return 'exists' }
-  return "error:$code"
+# The lock is the sidecar directory `review-followups.md.lock` beside the
+# index, holding an `owner` marker; creating the directory is the
+# test-and-set. Name and marker bytes (`<unix-seconds> <tag>:<pid>:<seconds>`
+# and LF) are the ones 2.6.0 writers use, so a 2.6.0 pre-commit hook, which
+# takes the lock with `mkdir`, and this writer still exclude each other.
+# Here the directory is created new relative to the held logs folder with
+# DELETE access and delete sharing withheld, so no other process can rename or
+# delete it while it is held, and `owner` is created new through the
+# directory's handle. Release deletes both through the handles that created
+# them: a handle names only the object it created, so no marker comparison is
+# needed and a lock this writer does not hold can never be removed.
+# Failure states and outcomes:
+#   lock name taken            -> retried; then the holder WARN, no lock.
+#   owner create or write fails -> both deleted through their handles and the
+#                                 acquisition retried; when that delete fails
+#                                 the lock is left (WARN and housekeeping
+#                                 line) and no retry is made.
+#   process ends while holding -> the lock stays until removed by hand.
+#   release delete fails       -> the lock stays (WARN and housekeeping line).
+#
+# NO AUTOMATIC TAKEOVER. Aging a lock out and reclaiming it was built in
+# earlier versions and taken back out: a 2.6.0 hook holds the lock without any
+# handle, so nothing distinguishes its live lock from a crashed writer's
+# residue, and a reclaim could let two writers append at once -- the exact
+# interleaving this lock exists to prevent. Do not rebuild takeover while
+# such writers can exist.
+function Get-FollowupLockLeaf { return ((Get-FollowupIndexLeaf) + '.lock') }
+
+# Returns @{ Dir; Owner; Path } (the caller passes it to
+# Exit-FollowupIndexLock), or $null when the lock could not be taken.
+function Enter-FollowupIndexLock {
+  param([hashtable]$Binding, [int]$MaxTries = 10, [string]$LogTag = 'auto-review',
+        # What a caller LOSES when acquisition fails, in its own words: the
+        # append path drops a record, the age-prune only stays off. A single
+        # wording would misdescribe whichever caller it did not come from.
+        [string]$DropConsequence = 'dropping this follow-up record, the gate still passes')
+  $lockPath = "$($Binding.IndexPath).lock"
+  $self = "$LogTag`:$PID`:$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+  for ($i = 0; $i -lt $MaxTries; $i++) {
+    $err = 0
+    $dir = [CrgAttributeNeutral.NativeV1]::CreateOwnedDirectoryRelative($Binding.Logs.Handle, (Get-FollowupLockLeaf), [ref]$err)
+    if ($dir.IsInvalid) {
+      $dir.Dispose()
+      if ($err -ne 80 -and $err -ne 183) { Write-Host "[$LogTag] WARN: could not create $lockPath (Win32 error $err) - retrying" }
+      Start-Sleep -Milliseconds 200
+      continue
+    }
+    $mine = "$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $self"
+    $owner = [CrgAttributeNeutral.NativeV1]::CreatePublicationFileRelative($dir, 'owner', [ref]$err)
+    $written = $false
+    if (-not $owner.IsInvalid) { $written = [CrgAttributeNeutral.NativeV1]::WriteUtf8Exact($owner, "$mine`n", [ref]$err) }
+    if ($written) { return @{ Dir = $dir; Owner = $owner; Path = $lockPath } }
+    Write-Host "[$LogTag] WARN: could not write the owner marker in $lockPath (Win32 error $err) - releasing the markerless lock and retrying"
+    $gone = Remove-FollowupLockHandles -Dir $dir -Owner $owner
+    if (-not $gone.Ok) {
+      Write-Host "[$LogTag] WARN: could not remove $lockPath after a failed acquisition (Win32 error $($gone.Error)) - remove it by hand; $DropConsequence"
+      Write-FollowupLockLeftStatus -LockDir $lockPath -LogTag $LogTag
+      return $null
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  Write-Host "[$LogTag] WARN: could not take the follow-up index lock at $lockPath ($(Get-FollowupLockHolderDisplay -Logs $Binding.Logs)) - $DropConsequence. If no writer is alive, remove that directory by hand: nothing reclaims it automatically."
+  return $null
 }
 
-# The marker names the holder for diagnostics, and the release compares it
-# byte-for-byte against the token this writer wrote. That catches a release whose
-# token DIFFERS from the standing marker -- another process, or this one from a
-# different second -- and stops exactly there. The token is a tag, a PID and a
-# WHOLE-SECOND stamp, so one process reacquiring inside a single second writes
-# byte-identical bytes and the comparison cannot separate those generations; a
-# caller that held a token across its own release-and-reacquire would defeat it,
-# which is why no caller here keeps one past the release it was acquired for.
-# It is not an authenticity check and cannot be one: the marker sits at a
-# workspace-readable path and its bytes are deterministic, so any process that
-# can read it can reproduce it.
-#
-# The classification is CAUGHT and EXPLICIT. Under `$ErrorActionPreference =
-# 'Stop'` an uncaught probe aborts the whole review -- `Test-Path` on a path the
-# provider rejects throws ArgumentException -- and this runs inside a gate
-# acquisition. An explicit state also separates an absent marker from an
-# unreadable one, which deserve different diagnostics; a bare empty string
-# cannot.
-#
-# BOTH LEVELS ARE CLASSIFIED, the lock directory before the marker inside it. A
-# reparse point at `<index>.lock` redirects resolution before `owner` is ever
-# examined, and an external target then looks perfectly regular -- so checking the
-# leaf alone secures nothing. Non-regular nodes are refused before any open,
-# because a byte cap is no defence against a node that BLOCKS on open (a FIFO, a
-# device behind a reparse point).
-#
-# The refusal is NOT absolute: the classification and the open are separate calls,
-# so a node swapped between them is still opened. Closing that needs a no-follow
-# open whose descriptor type is validated afterwards, which neither runtime has
-# here. The POSIX writer refuses the same node classes at both levels, so the two
-# accept sets move together.
-function Read-FollowupLockMarker {
-  param([string]$LockDir)
-  $result = @{ State = 'unreadable'; Bytes = (New-Object byte[] 0); Count = 0 }
+# Deletes `owner` (when it was created) and then the lock directory through
+# the handles that created them, closing both. The directory delete is retried
+# briefly: a reader that opened `owner` with delete sharing keeps the deleted
+# name present, and the directory not yet empty, until that reader closes it.
+# Ok is true when the directory was deleted; Error is the last Win32 error.
+function Remove-FollowupLockHandles {
+  param($Dir, $Owner)
+  $err = 0
+  if ($null -ne $Owner) {
+    if (-not $Owner.IsInvalid) { [void][CrgAttributeNeutral.NativeV1]::DeleteHeldExact($Owner, $false, [ref]$err) }
+    $Owner.Dispose()
+  }
+  $last = 0
   try {
-    $markerPath = Join-Path $LockDir 'owner'
-    $lockAttrs = [System.IO.File]::GetAttributes($LockDir)
-    if ((($lockAttrs -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or
-        (($lockAttrs -band [System.IO.FileAttributes]::Directory) -eq 0)) {
-      $result.State = 'nonregular'
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+      if ([CrgAttributeNeutral.NativeV1]::DeleteHeldExact($Dir, $true, [ref]$err)) { return @{ Ok = $true; Error = 0 } }
+      $last = $err
+      Start-Sleep -Milliseconds 50
+    }
+    return @{ Ok = $false; Error = $last }
+  } finally { $Dir.Dispose() }
+}
+
+function Exit-FollowupIndexLock {
+  param($Lock, [string]$LogTag = 'auto-review')
+  if ($null -eq $Lock) { return $false }
+  $gone = Remove-FollowupLockHandles -Dir $Lock.Dir -Owner $Lock.Owner
+  if ($gone.Ok) { return $true }
+  Write-Host "[$LogTag] WARN: could not release the follow-up index lock at $($Lock.Path) (Win32 error $($gone.Error)) - appends stay blocked until it is removed by hand"
+  Write-FollowupLockLeftStatus -LockDir $Lock.Path -LogTag $LogTag
+  return $false
+}
+
+# A lock this writer leaves behind blocks every later append and age-prune
+# until an operator removes it, and on a passing gate the plain WARN beside it
+# is not shown when it comes from a review wrapper's captured output (the
+# promotion the hook and the merge gate run themselves prints both lines on
+# the console). The lock sits beside the shared follow-up index, so its path
+# reads the same whichever provider reviewed.
+function Write-FollowupLockLeftStatus {
+  param([string]$LockDir, [string]$LogTag)
+  Write-ReviewFeedbackStatus -LogTag $LogTag -Housekeeping -Text "the follow-up index lock $LockDir could not be removed and stays; follow-up appends and the review-log age-prune stay off until it is removed by hand"
+}
+
+# Another holder's marker, read for a diagnostic: the lock directory and
+# `owner` are opened relative to the held logs folder without following a
+# link and classified on their handles, with read, write and delete sharing so
+# the holder can delete the marker while it is read. The lock directory goes
+# only once no reader holds the marker open, so a read that outlasts the
+# holder's bounded removal retries leaves the lock behind (reported as left).
+# At most 512 bytes are read.
+# State: 'ok', 'missing', 'nonregular' (a link or not a directory or file) or
+# 'unreadable'.
+function Read-FollowupLockMarker {
+  param($Logs)
+  $result = @{ State = 'unreadable'; Bytes = (New-Object byte[] 0); Count = 0 }
+  $dir = $null
+  try {
+    $err = 0
+    $dir = [CrgAttributeNeutral.NativeV1]::OpenReadDirectoryRelative($Logs.Handle, (Get-FollowupLockLeaf), [ref]$err)
+    if ($dir.IsInvalid) {
+      $result.State = if ($err -eq 2 -or $err -eq 3) { 'missing' } elseif ($err -eq 267) { 'nonregular' } else { 'unreadable' }
       return $result
     }
-    $attrs = [System.IO.File]::GetAttributes($markerPath)
-    if ((($attrs -band [System.IO.FileAttributes]::Directory) -ne 0) -or
-        (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
-      $result.State = 'nonregular'
+    if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinaryDirectory($dir)) { $result.State = 'nonregular'; return $result }
+    $owner = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($dir, 'owner', 0, [ref]$err)
+    if ($owner.IsInvalid) {
+      $owner.Dispose()
+      $result.State = if ($err -eq 2 -or $err -eq 3) { 'missing' } else { 'unreadable' }
       return $result
     }
-    # FileShare must include Delete: without it this read DENIES the holder's own
-    # cleanup, so a diagnostic peek by any process could block the release that
-    # frees the index for everyone.
-    $fs = [System.IO.File]::Open($markerPath, [System.IO.FileMode]::Open,
-                                 [System.IO.FileAccess]::Read,
-                                 ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinaryFile($owner)) { $owner.Dispose(); $result.State = 'nonregular'; return $result }
+    $fs = New-Object System.IO.FileStream($owner, [System.IO.FileAccess]::Read, 1, $false)
     try {
       $buf = New-Object byte[] 512
       $read = 0
       while ($read -lt $buf.Length) {
-        # A short read is not end-of-file; treating it as one would report a slow
-        # writer's marker as truncated.
+        # A short read is not end-of-file; treating it as one would report a
+        # slow writer's marker as truncated.
         $n = $fs.Read($buf, $read, $buf.Length - $read)
         if ($n -le 0) { break }
         $read += $n
@@ -1981,76 +2076,28 @@ function Read-FollowupLockMarker {
       $result.State = 'ok'
     } finally { $fs.Dispose() }
   } catch {
-    # PowerShell wraps a .NET method fault in MethodInvocationException, so the
-    # innermost exception is what carries the distinction worth reporting.
-    $ex = $_.Exception
-    while ($ex.InnerException) { $ex = $ex.InnerException }
-    if ($ex -is [System.IO.FileNotFoundException] -or $ex -is [System.IO.DirectoryNotFoundException]) {
-      $result.State = 'missing'
-    } else {
-      $result.State = 'unreadable'
-    }
+    $result.State = 'unreadable'
+  } finally {
+    if ($null -ne $dir) { $dir.Dispose() }
   }
   return $result
 }
 
-function Get-FollowupLockMarkerText {
-  param([string]$LockDir)
-  $read = Read-FollowupLockMarker -LockDir $LockDir
-  if (-not [string]::Equals($read.State, 'ok', [System.StringComparison]::Ordinal) -or $read.Count -le 0) { return '' }
-  return [System.Text.Encoding]::UTF8.GetString($read.Bytes, 0, $read.Count)
-}
-
-# The release compares the WHOLE marker against what acquisition wrote: the token
-# plus its single LF terminator. A trimmed prefix would accept a marker whose tail
-# was rewritten, and the tail is what an editor of this workspace-writable path
-# controls. The bounded read is what makes an oversized marker a mismatch instead
-# of a passing prefix -- it returns more bytes than the token accounts for.
-# STATUS IS STRUCTURED, not collapsed to a boolean. A node this reader refuses
-# and a read it could not complete are NOT the claim "these bytes differ": only
-# the last one says anything about ownership. Folding them together made a
-# transient read fault present as another writer's lock, sending an operator
-# after a holder that was never there while the lock stood.
-function Get-FollowupLockMarkerMatch {
-  param([string]$LockDir, [string]$Token)
-  if ([string]::IsNullOrEmpty($Token)) { return 'mismatch' }
-  $expected = [System.Text.Encoding]::UTF8.GetBytes("$Token`n")
-  $read = Read-FollowupLockMarker -LockDir $LockDir
-  # An absent marker is a genuine non-match; every other non-ok state is a read
-  # this writer could not complete and must not describe as ownership.
-  if ($read.State -ceq 'missing') { return 'mismatch' }
-  if (-not [string]::Equals($read.State, 'ok', [System.StringComparison]::Ordinal)) { return $read.State }
-  # A token the bounded read cannot confirm -- one that reaches or passes the
-  # read's own size -- leaves no room to prove the marker has no tail behind it,
-  # so it is refused rather than compared against a truncation.
-  if ($expected.Length -ge $read.Bytes.Length) { return 'uncomparable' }
-  if ($read.Count -ne $expected.Length) { return 'mismatch' }
-  for ($i = 0; $i -lt $expected.Length; $i++) {
-    if ($read.Bytes[$i] -ne $expected[$i]) { return 'mismatch' }
-  }
-  return 'match'
-}
-
-function Test-FollowupLockMarkerMatches {
-  param([string]$LockDir, [string]$Token)
-  return ((Get-FollowupLockMarkerMatch -LockDir $LockDir -Token $Token) -ceq 'match')
-}
-
-# Display form, ASCII WHITELIST: printable ASCII passes through and EVERYTHING
-# else -- C1 controls, bidi overrides, line/paragraph separators, every
-# non-ASCII codepoint -- renders as an escape. Another process's bytes reach an
-# operator's terminal through here, and a blacklist keeps losing to the next
-# character class nobody enumerated.
-function Get-FollowupLockMarkerDisplay {
-  param([string]$LockDir)
-  $read = Read-FollowupLockMarker -LockDir $LockDir
-  # The non-regular wording matches what the POSIX writer prints, so an operator
-  # reading either runtime's WARN meets one phrase for one state. Unreadable is
-  # kept distinct from absent: reporting a marker nobody could read as 'no marker'
-  # would deny a holder that may well be there.
-  if ([string]::Equals($read.State, 'nonregular', [System.StringComparison]::Ordinal)) { return '[unreadable marker: not a regular file]' }
-  if ([string]::Equals($read.State, 'unreadable', [System.StringComparison]::Ordinal)) { return '[unreadable marker]' }
-  if ($read.Count -le 0) { return 'no marker' }
+# "holder: '<marker>', age <n>s" from one read of the marker. The display is
+# an ASCII WHITELIST: printable ASCII passes through and everything else --
+# C1 controls, bidi overrides, line separators, every non-ASCII codepoint --
+# renders as an escape, because another process's bytes reach an operator's
+# terminal here and a blacklist keeps losing to the next character class. The
+# age is taken from the marker's leading acquisition time, which every writer
+# version records; unreadable is kept distinct from absent, since reporting a
+# marker nobody could read as 'no marker' would deny a holder that may be
+# there.
+function Get-FollowupLockHolderDisplay {
+  param($Logs)
+  $read = Read-FollowupLockMarker -Logs $Logs
+  if ([string]::Equals($read.State, 'nonregular', [System.StringComparison]::Ordinal)) { return "holder: '[unreadable marker: not a regular file]', age unknown" }
+  if ([string]::Equals($read.State, 'unreadable', [System.StringComparison]::Ordinal)) { return "holder: '[unreadable marker]', age unknown" }
+  if ($read.Count -le 0) { return "holder: 'no marker', age unknown" }
   $raw = [System.Text.Encoding]::UTF8.GetString($read.Bytes, 0, $read.Count)
   $out = New-Object System.Text.StringBuilder
   foreach ($ch in $raw.ToCharArray()) {
@@ -2061,123 +2108,27 @@ function Get-FollowupLockMarkerDisplay {
     if ($out.Length + $piece.Length -gt 120) { break }
     [void]$out.Append($piece)
   }
-  if ($out.Length -eq 0) { return 'no marker' }
-  return $out.ToString()
+  $shown = if ($out.Length -eq 0) { 'no marker' } else { $out.ToString() }
+  $age = 'unknown'
+  $stamp = [regex]::Match($raw, '\A([0-9]{1,12}) ')
+  if ($stamp.Success) { $age = '{0}s' -f ([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$stamp.Groups[1].Value) }
+  return "holder: '$shown', age $age"
 }
 
-function Get-FollowupLockAgeDisplay {
-  param([string]$LockDir)
-  try {
-    $item = Get-Item -LiteralPath $LockDir -Force -ErrorAction Stop
-    return ('{0}s' -f [long]((Get-Date) - $item.CreationTime).TotalSeconds)
-  } catch { return 'unknown' }
-}
-
-# Returns the marker this writer wrote, or the empty string when the lock could
-# not be taken; the caller passes it back to the release so a writer cannot
-# remove a lock it does not hold.
-function Enter-FollowupIndexLock {
-  param([string]$IndexPath, [int]$MaxTries = 10, [string]$LogTag = 'auto-review',
-        # What a caller LOSES when acquisition fails, in its own words: the
-        # append path drops a record, the age-prune only stays off. A single
-        # wording would misdescribe whichever caller it did not come from.
-        [string]$DropConsequence = 'dropping this follow-up record, the gate still passes')
-  $lock = "$IndexPath.lock"
-  $markerPath = Join-Path $lock 'owner'
-  $self = "$LogTag`:$PID`:$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-  for ($i = 0; $i -lt $MaxTries; $i++) {
-    $made = New-ExclusiveDirectory -Path $lock
-    if ([string]::Equals($made, 'unavailable', [System.StringComparison]::Ordinal)) {
-      # A shim that would not compile says nothing about the lock directory: a
-      # POSIX writer or a crashed writer's residue can already be sitting there.
-      # The holder and age are therefore REPORTED rather than denied -- they come
-      # from reads this branch can still perform -- and only the arbitration
-      # itself is named as unavailable.
-      Write-Host "[$LogTag] WARN: this host cannot arbitrate the follow-up index lock at $lock - the CreateDirectory shim would not compile (Add-Type failed), so this writer cannot take the lock whatever its state (holder: '$(Get-FollowupLockMarkerDisplay -LockDir $lock)', age $(Get-FollowupLockAgeDisplay -LockDir $lock)); $DropConsequence. If that names a holder and no writer is alive, remove that directory by hand: nothing reclaims it automatically."
-      return ''
-    }
-    if ([string]::Equals($made, 'created', [System.StringComparison]::Ordinal)) {
-      $mine = "$([System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) $self"
-      # A marker the release could never verify must not be written: the
-      # comparison reads a bounded prefix, so an over-long LogTag would take a
-      # lock this writer could not afterwards give back.
-      if ([System.Text.Encoding]::UTF8.GetByteCount("$mine`n") -ge 512) {
-        Write-Host "[$LogTag] WARN: this log tag produces an owner marker the release cannot confirm inside its bounded read, so the lock could not be given back - $DropConsequence."
-        try { [System.IO.Directory]::Delete($lock) } catch {
-          Write-Host "[$LogTag] WARN: could not remove $lock after refusing to mark it - remove it by hand"
-        }
-        return ''
-      }
-      try {
-        [System.IO.File]::WriteAllText($markerPath, "$mine`n")
-        return $mine
-      } catch {
-        Write-Host "[$LogTag] WARN: could not write the owner marker in $lock - releasing the markerless lock and retrying"
-        try { [System.IO.File]::Delete($markerPath) } catch { }
-        try { [System.IO.Directory]::Delete($lock) } catch {
-          Write-Host "[$LogTag] WARN: could not remove $lock after a failed acquisition - remove it by hand"
-        }
-      }
-    } elseif (-not [string]::Equals($made, 'exists', [System.StringComparison]::Ordinal)) {
-      Write-Host "[$LogTag] WARN: could not create $lock ($made) - retrying"
-    }
-    Start-Sleep -Milliseconds 200
-  }
-  Write-Host "[$LogTag] WARN: could not take the follow-up index lock at $lock (holder: '$(Get-FollowupLockMarkerDisplay -LockDir $lock)', age $(Get-FollowupLockAgeDisplay -LockDir $lock)) - $DropConsequence. If no writer is alive, remove that directory by hand: nothing reclaims it automatically."
-  return ''
-}
-
-function Exit-FollowupIndexLock {
-  param([string]$IndexPath, [string]$Token, [string]$LogTag = 'auto-review')
-  $lock = "$IndexPath.lock"
-  if ([string]::IsNullOrEmpty($Token)) {
-    Write-Host "[$LogTag] WARN: release of $lock called without a marker - removing nothing"
-    return $false
-  }
-  # Only a byte MISMATCH licenses the ownership wording. A refused node or a
-  # failed read means this writer never learned whose lock it is, and saying
-  # otherwise sends an operator hunting a holder the reader never saw.
-  $markerState = Get-FollowupLockMarkerMatch -LockDir $lock -Token $Token
-  if ($markerState -cne 'match') {
-    if ($markerState -ceq 'mismatch') {
-      Write-Host "[$LogTag] WARN: $lock does not carry this writer's marker - removing nothing"
-    } else {
-      Write-Host "[$LogTag] WARN: the owner marker in $lock could not be read for comparison ($markerState) - removing nothing; the lock stays until a reader can confirm it or an operator clears it"
-    }
-    return $false
-  }
-  # The directory removal can fail transiently while another process still holds
-  # the marker open: where a deleted name survives until the last handle closes
-  # (the delete-pending window), the directory is not yet empty when the file
-  # delete has already succeeded. That window is host- and filesystem-dependent
-  # rather than universal, so the retry is here for the hosts that keep it and
-  # falls straight through on the hosts that do not. A failure that outlasts the
-  # retries is REPORTED, never swallowed.
-  $lastFailure = 'unknown'
-  for ($attempt = 0; $attempt -lt 20; $attempt++) {
-    try { [System.IO.File]::Delete((Join-Path $lock 'owner')) } catch { $lastFailure = $_.Exception.GetType().Name }
-    try {
-      [System.IO.Directory]::Delete($lock)
-      return $true
-    } catch { $lastFailure = $_.Exception.GetType().Name }
-    Start-Sleep -Milliseconds 50
-  }
-  Write-Host "[$LogTag] WARN: could not release the follow-up index lock at $lock ($lastFailure) - appends stay blocked until it is removed by hand"
-  return $false
-}
-
-# The age-prune is the index's DESTRUCTIVE reader: it decides what to delete from
-# the exemption state it reads, so that read and those deletions are one window
-# and take the same lock every writer does. An absent index path serializes
-# nothing, so it needs no lock. Locked=$false means the prune stays OFF this run:
+# The age-prune is the index's DESTRUCTIVE reader: it decides what to delete
+# from the exemption state it reads, so that read and those deletions are one
+# window and take the same lock every writer does. The caller keeps Held until
+# the deletions are done and then releases Lock (Exit-FollowupIndexLock) and
+# Held. Locked=$false, with Reason, means the prune stays OFF this run:
 # housekeeping never blocks the gate and never runs on state it cannot pin.
 function Enter-PruneIndexLock {
-  param([string]$IndexPath, [string]$LogTag = 'auto-review')
-  if ([string]::IsNullOrWhiteSpace($IndexPath)) { return @{ Locked = $true; Token = '' } }
-  $token = Enter-FollowupIndexLock -IndexPath $IndexPath -MaxTries 5 -LogTag $LogTag `
+  param([hashtable]$GitContext, [System.Collections.Generic.List[object]]$Held, [string]$LogTag = 'auto-review')
+  $bind = Enter-FollowupLogsBinding -GitContext $GitContext -Held $Held
+  if (-not $bind.Ok) { return @{ Locked = $false; Reason = "the follow-up index folder could not be held ($($bind.Reason))"; Lock = $null; Binding = $null } }
+  $lock = Enter-FollowupIndexLock -Binding $bind -MaxTries 5 -LogTag $LogTag `
     -DropConsequence 'leaving the review-log age-prune off this run, which deletes nothing and costs only retained disk'
-  if ([string]::IsNullOrEmpty($token)) { return @{ Locked = $false; Token = '' } }
-  return @{ Locked = $true; Token = $token }
+  if ($null -eq $lock) { return @{ Locked = $false; Reason = 'the follow-up index lock could not be taken, so its exemption state cannot be pinned across the deletions'; Lock = $null; Binding = $bind } }
+  return @{ Locked = $true; Reason = ''; Lock = $lock; Binding = $bind }
 }
 
 # Does the index end in a line break? Every writer ends what it appends with
@@ -2190,9 +2141,9 @@ function Enter-PruneIndexLock {
 # elsewhere is deliberately tolerant, and a tolerant decode can turn a damaged
 # tail into a well-formed string, which is the one answer that must not be
 # reachable here. Only LF counts -- a CRLF index still ends in LF, and no writer
-# emits a bare CR -- so both runtimes' checks accept exactly the same tails. An
-# EMPTY index holds no transaction that could have been cut off, so it is
-# appendable, and the sh helper carries the matching arm for it.
+# emits a bare CR -- the rule a 2.6.0 hook's shell check also applies, so both
+# accept exactly the same tails. An EMPTY index holds no transaction that could
+# have been cut off, so it is appendable.
 function Test-FollowupIndexTerminated {
   param([byte[]]$Existing)
   if ($null -eq $Existing -or $Existing.Length -eq 0) { return $true }
@@ -2202,8 +2153,10 @@ function Test-FollowupIndexTerminated {
 # ---- capture-doctrine v6 transaction machinery ----
 # ONE completeness specification (docs/capture-doctrine-v6.md), asked at every
 # boundary: the append gate on the final OPEN interval, the promoter on a
-# pending payload, the destructive reader on every interval. Each runtime
-# implements it separately; every implementation must preserve one accept set.
+# pending payload, the destructive reader on every interval. A 2.6.0
+# pre-commit hook still carries its own shell implementation and may write
+# this index, so the accept set stays the one docs/capture-doctrine-v6.md
+# publishes.
 
 function Get-FollowupTransactionOpenMarker {
   return '<!-- review-followups: transaction v1 OPEN -->'
@@ -2504,82 +2457,291 @@ function Get-FollowupTailState {
 # depends on the framing above it: rows that reached the file without their header
 # read as legacy bare-name rows, and a migration that landed without its rows
 # claims a contract for content that never arrived. Streaming the parts as
-# separate writes leaves each boundary as a place a crash can stop, so they are
-# concatenated first and handed to the stream once -- the same discipline the sh
-# hook applies by staging its whole block in a temp file and cat-ing it once.
+# separate writes leaves each boundary as a place a crash can stop, so every
+# block's transaction is concatenated first and handed to the stream once. The
+# first transaction carries the prefix (the title and frame for a new index, the
+# migration when due); each later one is its OPEN marker and its block.
 #
 # A TORN OR UNVOUCHED tail REFUSES the append rather than repairing, completing,
 # or burying it: appending would terminate the torn write and erase the evidence
 # the destructive reader denies on, and the row it cut may have been a capture
 # claim. The gate validates the FINAL interval only (Get-FollowupTailState) --
 # deeper damage is already durable, cannot be hidden by a further append, and
-# belongs to the destructive reader. Refusal costs one dropped record, which the
-# best-effort recording contract permits and the verdict artifact still holds.
+# belongs to the destructive reader. Refusal costs the dropped records, which the
+# best-effort recording contract permits and the verdict artifacts still hold.
 #
-# Returns the outcome rather than printing it: the caller owns its log tag's
-# wording and its success line. Refusal reasons are 'lock' (already diagnosed by
-# the acquisition) and 'torn' (Reason carries the display-safe cause; the caller
-# names the repair); no reason at all on success. I/O failures PROPAGATE to the
-# caller's warn-and-continue wrapper.
+# Returns the outcome rather than printing it (Write-FollowupAppendRefusal
+# words a refusal); it does not throw. Refusal: 'lock' (already reported by the
+# acquisition), 'torn' (Reason carries the display-safe cause), 'open' or 'read'
+# (nothing was written) and 'partial' (the write itself failed, so part of the
+# buffer may be in the index).
 function Invoke-FollowupIndexAppend {
-  param([string]$IndexPath, [string]$HeaderText, [string]$BlockText, [string]$LogTag = 'auto-review',
+  param([hashtable]$Binding, [string]$HeaderText, [string[]]$BlockTexts, [string]$LogTag = 'auto-review',
         [string]$DropConsequence = 'dropping this follow-up record, the gate still passes')
   $enc = New-Object System.Text.UTF8Encoding($false)
-  $lockToken = Enter-FollowupIndexLock -IndexPath $IndexPath -LogTag $LogTag -DropConsequence $DropConsequence
-  if ([string]::IsNullOrEmpty($lockToken)) { return @{ Appended = $false; Refusal = 'lock'; Reason = '' } }
-  $torn = $false
-  $tornReason = ''
+  $lock = Enter-FollowupIndexLock -Binding $Binding -LogTag $LogTag -DropConsequence $DropConsequence
+  if ($null -eq $lock) { return @{ Appended = $false; Refusal = 'lock'; Reason = '' } }
   try {
-    $attempt = 0
-    while ($true) {
+    $open = $null
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+      $open = Open-FollowupIndexForAppend -Binding $Binding
+      if ($open.State -cne 'busy') { break }
+      Start-Sleep -Milliseconds 50
+    }
+    if ($open.State -cne 'ok') { return @{ Appended = $false; Refusal = 'open'; Reason = $open.Reason } }
+    $fs = $open.Stream
+    try {
+      $txBytes = $null
       try {
-        $torn = $false
-        $tornReason = ''
-        $fs = [System.IO.File]::Open($IndexPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        try {
-          $txText = ''
-          if ($fs.Length -eq 0) {
-            $txText = (Get-FollowupTransactionOpenMarker) + "`n" + $HeaderText + $BlockText
+        # FileStream.Read may return short; a partial read would misreport the
+        # doctrine state and duplicate a frame, so loop and refuse instead.
+        $existing = New-Object byte[] $fs.Length
+        $read = 0
+        while ($read -lt $existing.Length) {
+          $n = $fs.Read($existing, $read, $existing.Length - $read)
+          if ($n -le 0) { return @{ Appended = $false; Refusal = 'read'; Reason = "a short read ($read of $($existing.Length) bytes)" } }
+          $read += $n
+        }
+        $prefix = $HeaderText
+        if ($existing.Length -gt 0) {
+          $tail = Get-FollowupTailState -Existing $existing
+          if ([string]::Equals($tail.State, 'bom', [System.StringComparison]::Ordinal) -or [string]::Equals($tail.State, 'torn', [System.StringComparison]::Ordinal)) {
+            return @{ Appended = $false; Refusal = 'torn'; Reason = $tail.Reason }
           }
-          else {
-            # FileStream.Read may return short; a partial read would misreport the
-            # doctrine state and duplicate a frame, so loop and fail loudly instead.
-            $existing = New-Object byte[] $fs.Length
-            $read = 0
-            while ($read -lt $existing.Length) {
-              $n = $fs.Read($existing, $read, $existing.Length - $read)
-              if ($n -le 0) { throw "short read on $IndexPath ($read of $($existing.Length) bytes)" }
-              $read += $n
-            }
-            $tail = Get-FollowupTailState -Existing $existing
-            if ([string]::Equals($tail.State, 'bom', [System.StringComparison]::Ordinal) -or [string]::Equals($tail.State, 'torn', [System.StringComparison]::Ordinal)) {
-              $torn = $true
-              $tornReason = $tail.Reason
-            }
-            else {
-              # TOLERANT decode, deliberately: this reader only decides whether to
-              # APPEND a frame, and an index whose bytes are damaged still deserves
-              # its migration append. The prune -- the reader that DELETES -- decodes
-              # the same file strictly and refuses on any invalid byte.
-              $txText = (Get-FollowupTransactionOpenMarker) + "`n" + (Get-FollowupDoctrineMigration -ExistingText $enc.GetString($existing)) + $BlockText
-            }
-          }
-          if (-not $torn) {
-            $txBytes = $enc.GetBytes($txText)
-            [void]$fs.Seek(0, [System.IO.SeekOrigin]::End)
-            $fs.Write($txBytes, 0, $txBytes.Length)
-          }
-        } finally { $fs.Dispose() }
-        break
-      } catch {
-        $attempt++
-        if ($attempt -ge 10) { throw }
-        Start-Sleep -Milliseconds 50
+          # TOLERANT decode, deliberately: this reader only decides whether to
+          # APPEND a frame, and an index whose bytes are damaged still deserves
+          # its migration append. The prune -- the reader that DELETES -- decodes
+          # the same file strictly and refuses on any invalid byte.
+          $prefix = Get-FollowupDoctrineMigration -ExistingText $enc.GetString($existing)
+        }
+        $tx = New-Object System.Text.StringBuilder
+        for ($b = 0; $b -lt $BlockTexts.Count; $b++) {
+          [void]$tx.Append((Get-FollowupTransactionOpenMarker) + "`n")
+          if ($b -eq 0) { [void]$tx.Append($prefix) }
+          [void]$tx.Append($BlockTexts[$b])
+        }
+        $txBytes = $enc.GetBytes($tx.ToString())
+      } catch { return @{ Appended = $false; Refusal = 'read'; Reason = $_.Exception.Message } }
+      try {
+        [void]$fs.Seek(0, [System.IO.SeekOrigin]::End)
+        $fs.Write($txBytes, 0, $txBytes.Length)
+        $fs.Flush($true)
+      } catch { return @{ Appended = $false; Refusal = 'partial'; Reason = $_.Exception.Message } }
+    } finally { $fs.Dispose() }
+  } finally { [void](Exit-FollowupIndexLock -Lock $lock -LogTag $LogTag) }
+  return @{ Appended = $true; Refusal = ''; Reason = '' }
+}
+
+# The index opened for one append, relative to the held logs folder: read and
+# write, no sharing, an existing ordinary single-link file or a new one.
+# State 'ok' (Stream, which owns the handle), 'busy' (another handle's sharing
+# excludes this one, or a concurrent create won the name; retry), 'refused' or
+# 'error' (Reason).
+function Open-FollowupIndexForAppend {
+  param([hashtable]$Binding)
+  $err = 0
+  $handle = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($Binding.Logs.Handle, (Get-FollowupIndexLeaf), 1, [ref]$err)
+  if ($handle.IsInvalid) {
+    $handle.Dispose()
+    if ($err -eq 32 -or $err -eq 33) { return @{ State = 'busy'; Reason = 'another program has it open' } }
+    if ($err -ne 2) { return @{ State = 'error'; Reason = "Win32 error $err" } }
+    $handle = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($Binding.Logs.Handle, (Get-FollowupIndexLeaf), 3, [ref]$err)
+    if ($handle.IsInvalid) {
+      $handle.Dispose()
+      if ($err -eq 32 -or $err -eq 33 -or $err -eq 80 -or $err -eq 183) { return @{ State = 'busy'; Reason = 'another program created or opened it' } }
+      return @{ State = 'error'; Reason = "Win32 error $err" }
+    }
+  }
+  if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) {
+    $handle.Dispose()
+    return @{ State = 'refused'; Reason = 'it is a link, not a file, or has more than one link' }
+  }
+  return @{ State = 'ok'; Reason = ''; Stream = (New-Object System.IO.FileStream($handle, [System.IO.FileAccess]::ReadWrite, 4096, $false)) }
+}
+
+# Prints what a refused append owes its operator, in the caller's log tag. A
+# 'lock' refusal was already reported by the acquisition, which named the
+# lock, why it could not be taken, what this caller loses and the remedy.
+function Write-FollowupAppendRefusal {
+  param([hashtable]$Result, [string]$IndexPath, [string]$LogTag)
+  if ($Result.Refusal -ceq 'torn') {
+    Write-Host (Get-FollowupTornIndexWarning -IndexPath $IndexPath -LogTag $LogTag -Reason $Result.Reason)
+  } elseif ($Result.Refusal -ceq 'partial') {
+    Write-Host "[$LogTag] WARN: the follow-up append to $IndexPath failed ($($Result.Reason)) and may have left a partial transaction. The rows do not prove that a commit landed. Inspect the tail against the capture-doctrine frame and repair any incomplete transaction before later promotion; the findings remain in the verdict artifacts."
+  } elseif ($Result.Refusal -cne 'lock') {
+    Write-Host "[$LogTag] WARN: could not $(if ($Result.Refusal -ceq 'open') { 'open' } else { 'read' }) $IndexPath for the follow-up append ($($Result.Reason)) - records dropped; nothing was written and the findings stay in the verdict artifacts"
+  }
+}
+
+# A PENDING PAYLOAD verified end to end before any byte is appended: EXACTLY one
+# block -- header line, row lines, its record, then the separator or the end of
+# the payload -- with row count and digest recomputed. A promoter is the last
+# gate before staged content becomes durable; a tail-shape check alone would
+# pass a tampered block under an intact record and plant a shape the prune
+# scanner could only refuse forever.
+function Test-FollowupPendingPayload {
+  param([string]$Payload)
+  if ([string]::IsNullOrEmpty($Payload)) { return @{ Ok = $false; Reason = 'an empty pending payload' } }
+  if ($Payload.Contains("`r")) { return @{ Ok = $false; Reason = 'a carriage return inside the pending payload' } }
+  # Char indexing, not StartsWith: culture-sensitive StartsWith treats U+FEFF
+  # as IGNORABLE, so it reports every payload as BOM-led. Comparisons in
+  # these validators are ordinal or char-wise, never culture rules.
+  if ($Payload[0] -eq [char]0xFEFF) { return @{ Ok = $false; Reason = 'a BOM leads the pending payload' } }
+  # A promoter authors NEW durable bytes, so its accept set must sit INSIDE
+  # the destructive reader's: the reader whitelists index bytes to printable
+  # ASCII before any destructive scan, and a promoted byte outside that set
+  # would quarantine every later prune. The tail gate stays wider on purpose
+  # -- historical content is the prune's to deny, not the append's to refuse.
+  foreach ($pc in $Payload.ToCharArray()) {
+    $pcv = [int]$pc
+    if ($pcv -ne 10 -and ($pcv -lt 32 -or $pcv -gt 126)) {
+      return @{ Ok = $false; Reason = 'a byte outside printable ASCII, which the destructive reader refuses to scan' }
+    }
+  }
+  $nl = $Payload.IndexOf([char]10)
+  if ($nl -lt 0) { return @{ Ok = $false; Reason = 'a payload with no complete header line' } }
+  $header = $Payload.Substring(0, $nl)
+  if ($header -cnotmatch '^## \S') { return @{ Ok = $false; Reason = 'a payload that does not begin at a block header' } }
+  # The reader keys retention on EXACTLY ONE non-empty verdict= token
+  # (Get-CaptureHeaderLocatorField's contract); a header it cannot key denies
+  # the prune on its own account, so promotion refuses it here first.
+  $pvFound = 0; $pvEmpty = $false; $pvValue = ''
+  foreach ($ptok in ($header -split '\s+')) {
+    if ($ptok -cmatch '^verdict=(?<v>.*)$') { $pvFound++; $pvValue = $Matches['v']; if ([string]::IsNullOrWhiteSpace($Matches['v'])) { $pvEmpty = $true } }
+  }
+  if ($pvFound -ne 1 -or $pvEmpty) {
+    return @{ Ok = $false; Reason = 'a payload header without exactly one non-empty verdict= field, a block the destructive reader cannot key' }
+  }
+  $headerAndRows = $header + "`n"
+  $rowCount = 0
+  $pvScoped = $false
+  $rest = $Payload.Substring($nl + 1)
+  while ($true) {
+    $nl = $rest.IndexOf([char]10)
+    if ($nl -lt 0) { return @{ Ok = $false; Reason = 'a payload cut before its record line' } }
+    $line = $rest.Substring(0, $nl)
+    if ($line -cmatch '^- (?:QUALITY|NON-BLOCKER): ') {
+      # The reader's full row production (Get-CaptureRowShape's contract):
+      # a row it classifies as malformed breaks every later binding and
+      # denies the prune, so promotion refuses the row before it can land.
+      if ($line -cnotmatch '^- (?:QUALITY|NON-BLOCKER): (?:[^\[\]]*?)(?: \[scoped: [a-z0-9]+(?:-[a-z0-9]+)* tree: (?:[0-9a-f]{40}|[0-9a-f]{64}) diff: [0-9a-f]{64} find: [0-9a-f]{64}\])?$') {
+        return @{ Ok = $false; Reason = 'a row outside the index row grammar the destructive reader accepts' }
+      }
+      if ($line -cmatch ' \[scoped: ') { $pvScoped = $true }
+      $headerAndRows += $line + "`n"
+      $rowCount++
+      $rest = $rest.Substring($nl + 1)
+      continue
+    }
+    break
+  }
+  $rec = Test-FollowupRecordLine -Line $line
+  if (-not $rec.Ok) { return @{ Ok = $false; Reason = 'a payload without a valid record line after its rows' } }
+  if (-not [string]::Equals([string]$rec.Rows, [string]$rowCount, [System.StringComparison]::Ordinal)) { return @{ Ok = $false; Reason = 'a payload record whose row count does not match its rows' } }
+  if (-not [string]::Equals([string]$rec.Sha, [string](Get-FollowupSha256Hex -Text $headerAndRows), [System.StringComparison]::Ordinal)) { return @{ Ok = $false; Reason = 'a payload record whose digest does not vouch for its block' } }
+  # SCOPED rows key retention on the header's locator, so the wire itself must
+  # pass the destructive reader's resolver and its leaf must be a name the
+  # prune could actually be asked about -- a scoped block whose locator the
+  # reader later refuses would deny every prune forever. A zero-row or
+  # plain-row block skips this: the reader keys nothing from it.
+  if ($pvScoped) {
+    $pw = Resolve-CaptureLocatorWire -Value $pvValue
+    if ($pw.Kind -cne 'exact' -and $pw.Kind -cne 'bare') {
+      return @{ Ok = $false; Reason = 'a scoped payload whose verdict locator the destructive reader cannot resolve' }
+    }
+    $pnorm = $pw.Path -replace '\\', '/'
+    # The DECODED locator is narrowed to printable ASCII (the reader itself
+    # accepts escaped non-ASCII paths): a 2.6.0 shell promoter, which may still
+    # write this index, narrows it the same way because it cannot replicate the
+    # reader's Unicode device-name folding, and one accept set across every
+    # promoter keeps backend and version choice from changing which follow-ups
+    # become durable.
+    foreach ($pwc in $pnorm.ToCharArray()) {
+      if ([int]$pwc -gt 126) {
+        return @{ Ok = $false; Reason = 'a scoped locator decoding outside printable ASCII, which every promoter uniformly refuses' }
       }
     }
-  } finally { [void](Exit-FollowupIndexLock -IndexPath $IndexPath -Token $lockToken -LogTag $LogTag) }
-  if ($torn) { return @{ Appended = $false; Refusal = 'torn'; Reason = $tornReason } }
-  return @{ Appended = $true; Refusal = ''; Reason = '' }
+    $pleaf = $pnorm.Substring($pnorm.LastIndexOf([char]'/') + 1)
+    if (-not (Test-CaptureVerdictLeaf -Name $pleaf)) {
+      return @{ Ok = $false; Reason = 'a scoped payload whose verdict leaf is not a review-verdict filename' }
+    }
+  }
+  $rest = $rest.Substring($nl + 1)
+  if ([string]::Equals($rest, '', [System.StringComparison]::Ordinal) -or [string]::Equals($rest, "`n", [System.StringComparison]::Ordinal)) { return @{ Ok = $true; Reason = '' } }
+  return @{ Ok = $false; Reason = 'a payload that is not exactly one record-closed block' }
+}
+
+# THE PROMOTER, shared by the commit gate (the pre-commit hook's
+# promote_followups) and the merge gate (after its ff-merge): each staged
+# payload is validated end to end, and every valid one is appended in one
+# write under one lock. Pending files are read by path: they are the gate's
+# own temporary files, and their content is validated whole before use.
+# Returns 10 when the transactions were appended, 0 when nothing was (each
+# drop already warned), 11 when the append failed and may be partial. It does
+# not throw: the hook maps any other exit status to an unknown index state.
+function Invoke-FollowupPromotion {
+  param([string[]]$PendingPaths, [string]$LogTag, [switch]$ProviderNeutralOutput)
+  $appendStarted = $false
+  try {
+    $blocks = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($pendingPath in @($PendingPaths)) {
+      if ([string]::IsNullOrWhiteSpace($pendingPath)) { continue }
+      $display = if ($ProviderNeutralOutput) { '<run-owned follow-up record>' } else { $pendingPath }
+      $raw = $null
+      # Only a confirmed absence (no file, or no folder above it) means the run
+      # staged nothing; any other failure -- a directory at the name, denied
+      # access, an I/O error -- is a record that could not be read, so it warns
+      # instead of passing as absence.
+      try { $raw = [System.IO.File]::ReadAllBytes($pendingPath) }
+      catch [System.IO.FileNotFoundException] { continue }
+      catch [System.IO.DirectoryNotFoundException] { continue }
+      catch {
+        Write-Host "[$LogTag] WARN: could not read the staged follow-ups at $display - record dropped, the findings stay in the verdict artifact"
+        continue
+      }
+      if ($raw.Length -eq 0) { continue }
+      # RAW bytes, decoded STRICTLY with no BOM tolerance: invalid UTF-8 refuses
+      # rather than being repaired into bytes the record's digest never covered.
+      $decoded = Get-FollowupStrictText -Bytes $raw
+      if (-not $decoded.Ok) {
+        Write-Host "[$LogTag] WARN: staged follow-ups at $display refused promotion: bytes that are not valid UTF-8 - record dropped, the findings stay in the verdict artifact"
+        continue
+      }
+      $payload = Test-FollowupPendingPayload -Payload $decoded.Text
+      if (-not $payload.Ok) {
+        Write-Host "[$LogTag] WARN: staged follow-ups at $display refused promotion: $($payload.Reason) - record dropped, the findings stay in the verdict artifact"
+        continue
+      }
+      $blocks.Add($decoded.Text)
+    }
+    if ($blocks.Count -eq 0) { return 0 }
+    $held = New-Object 'System.Collections.Generic.List[object]'
+    try {
+      $bind = Enter-FollowupLogsBinding -GitContext (Resolve-FollowupGitContext) -Held $held
+      if (-not $bind.Ok) {
+        Write-Host "[$LogTag] WARN: the follow-up index folder could not be held ($($bind.Reason)) - QUALITY follow-up records dropped, the findings stay in the verdict artifacts"
+        return 0
+      }
+      $appendStarted = $true
+      $result = Invoke-FollowupIndexAppend -Binding $bind -HeaderText (Get-FollowupIndexHeader) -BlockTexts $blocks.ToArray() -LogTag $LogTag `
+        -DropConsequence 'dropping these follow-up records, whose findings stay in the verdict artifacts'
+      if ($result.Appended) {
+        Write-Host "[$LogTag] promoted QUALITY follow-ups to $($bind.IndexPath)"
+        return 10
+      }
+      Write-FollowupAppendRefusal -Result $result -IndexPath $bind.IndexPath -LogTag $LogTag
+      if ($result.Refusal -ceq 'partial') { return 11 }
+      return 0
+    } finally { Exit-CrgHeldDirectories -Held $held }
+  } catch {
+    $why = if ($ProviderNeutralOutput) { 'the run-owned promotion operation failed; inspect internal review artifacts' } else { $_.Exception.Message }
+    if ($appendStarted) {
+      Write-Host "[$LogTag] WARN: the follow-up promotion failed during its append ($why); the index may hold a partial transaction - inspect its tail against the capture-doctrine frame"
+      return 11
+    }
+    Write-Host "[$LogTag] WARN: the follow-up promotion failed before any append ($why) - QUALITY follow-up records dropped, the findings stay in the verdict artifacts"
+    return 0
+  }
 }
 
 # The diagnostic a refused append owes its operator. Shared by every PowerShell
@@ -2588,7 +2750,7 @@ function Invoke-FollowupIndexAppend {
 function Get-FollowupTornIndexWarning {
   param([string]$IndexPath, [string]$LogTag = 'auto-review', [string]$Reason = '')
   $cause = if ([string]::IsNullOrWhiteSpace($Reason)) { 'its final transaction is incomplete' } else { $Reason }
-  return "[$LogTag] WARN: $IndexPath refused the append: $cause. This record is DROPPED rather than appended: appending would terminate the torn write and erase the evidence the age-prune denies on, after which it could resume deleting artifacts a cut capture claim may protect. REPAIR: inspect the file's tail by hand against the capture-doctrine frame it carries - complete or delete the damaged transaction (remove a leading BOM if one was added), leaving the file ending in a complete record-closed transaction. The findings stay in the verdict artifact and in the output above; the gate still passes."
+  return "[$LogTag] WARN: $IndexPath refused the append: $cause. The records are DROPPED rather than appended: appending would terminate the torn write and erase the evidence the age-prune denies on, after which it could resume deleting artifacts a cut capture claim may protect. REPAIR: inspect the file's tail by hand against the capture-doctrine frame it carries - complete or delete the damaged transaction (remove a leading BOM if one was added), leaving the file ending in a complete record-closed transaction. The findings stay in the verdict artifact and in the output above; the gate still passes."
 }
 
 # NON-pure (git probe + file append); wrapped so a failure NEVER breaks the gate
@@ -2604,10 +2766,10 @@ function Get-FollowupTornIndexWarning {
 #      to the MAIN repo's logs/review-followups.md, chosen by the same
 #      submodule-aware selection the verdict artifacts use (Get-FollowupIndexDir:
 #      the git-common-dir parent, or a submodule's working-tree top level), so a
-#      linked-worktree run records where the operator's main session reads. Falls back to the cwd's
-#      logs dir on a git-probe failure rather than losing the follow-ups. Other
-#      writers can append to the same index concurrently, so the append runs
-#      under the cross-writer lock and retries on a sharing violation.
+#      linked-worktree run records where the operator's main session reads. The
+#      index is reached only through the held, confirmed logs folder
+#      (Enter-FollowupLogsBinding); when Git cannot name it the record is
+#      dropped with a warning, never written under the current folder.
 function Add-ReviewFollowups {
   param([string]$VerdictText, [string]$VerdictFilePath, [string]$Backend, [string]$TreeOid, [string]$DiffSha,
         [bool]$CentralExpected, [string]$RepoRoot, [string]$LogTag = 'auto-review')
@@ -2633,31 +2795,20 @@ function Add-ReviewFollowups {
       Write-Host "[$LogTag] staged QUALITY follow-ups for parent promotion -> $pendingPath"
       return
     }
-    # Resolve the target repo's logs dir with the SAME submodule-aware selection
-    # the verdict artifacts use (Get-FollowupIndexDir <- Get-ReviewLogDir): the
-    # common-dir PARENT for a normal repo / linked worktree, the working-tree
-    # TOP-LEVEL for a submodule (whose common-dir parent is `.git/modules`, not
-    # the tree). Only fall back to the cwd logs dir when the probes genuinely
-    # fail -- otherwise an older-git linked-worktree run would record follow-ups
-    # in the WORKTREE, not the main repo, and the durable index the main session
-    # reads would miss them.
-    $logsDir = Get-FollowupLogsDirOrCwd -Context (Resolve-FollowupGitContext)
-    if (-not (Test-Path -LiteralPath $logsDir -PathType Container)) {
-      New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-    }
-    $followupFile = Join-Path $logsDir 'review-followups.md'
-    $appended = Invoke-FollowupIndexAppend -IndexPath $followupFile `
-      -HeaderText (Get-FollowupIndexHeader) -BlockText $block -LogTag $LogTag
-    if (-not $appended.Appended) {
-      # A 'lock' refusal was already reported by the acquisition, which named the
-      # lock, why it could not be taken, what this caller loses and the remedy. A
-      # second, thinner line here would only compete with it.
-      if ($appended.Refusal -ceq 'torn') {
-        Write-Host (Get-FollowupTornIndexWarning -IndexPath $followupFile -LogTag $LogTag -Reason $appended.Reason)
+    $held = New-Object 'System.Collections.Generic.List[object]'
+    try {
+      $bind = Enter-FollowupLogsBinding -GitContext (Resolve-FollowupGitContext) -Held $held
+      if (-not $bind.Ok) {
+        Write-Host "[$LogTag] WARN: could not record QUALITY follow-ups: the follow-up index folder could not be held ($($bind.Reason)); the verdict file holds them"
+        return
       }
-      return
-    }
-    Write-Host "[$LogTag] recorded QUALITY follow-ups to $followupFile"
+      $appended = Invoke-FollowupIndexAppend -Binding $bind -HeaderText (Get-FollowupIndexHeader) -BlockTexts @($block) -LogTag $LogTag
+      if (-not $appended.Appended) {
+        Write-FollowupAppendRefusal -Result $appended -IndexPath $bind.IndexPath -LogTag $LogTag
+        return
+      }
+      Write-Host "[$LogTag] recorded QUALITY follow-ups to $($bind.IndexPath)"
+    } finally { Exit-CrgHeldDirectories -Held $held }
   } catch {
     Write-Host "[$LogTag] WARN: could not record QUALITY follow-ups: $($_.Exception.Message)"
     # Under a gate this is the staging write, whose loss a passed gate's
@@ -2700,14 +2851,6 @@ function Write-QualityFollowupNotice {
   Add-ReviewFollowups -VerdictText $Artifact -VerdictFilePath $VerdictFile -Backend $Backend -TreeOid $TreeOid -DiffSha $DiffSha `
     -CentralExpected $CentralExpected -RepoRoot $RepoRoot -LogTag $LogTag
   Write-Host "[$LogTag] ============================================================================="
-}
-
-# A probe failure falls back to the cwd's logs folder: losing a record is worse
-# than misfiling one.
-function Get-FollowupLogsDirOrCwd {
-  param([hashtable]$Context)
-  if ($null -ne $Context -and $Context.Ok) { return $Context.LogsDir }
-  return (Join-Path (Get-Location).Path 'logs')
 }
 
 # ---- Review feedback: findings files, carry-forward, TASKS.md and the PASS
@@ -4529,35 +4672,49 @@ function Add-ReviewTasks {
 # and only these, are collected past it (scripts/git-hooks/pre-commit
 # crg_feedback_status, scripts/shared/auto-merge.ps1
 # Get-CrgReviewFeedbackStatusLines): `review-feedback: ` for the open task
-# counts and `review-feedback WARN: ` for work left undone. A successful
-# gate's output must read the same whichever provider reviewed, so Text names
-# TASKS.md, the Git directory, the logs folder or Git's own messages, never a
-# findings file or verdict, whose names carry the backend; detail that could
-# (an exception message) goes on a separate plain WARN line, which only a
-# failed gate shows. One line whose message is at most 600 UTF-16 units,
-# shortened with a marker and never inside a surrogate pair; with the tag
-# and prefix in front, whatever the console encoding, the line stays under
-# the collectors' 4096-byte line limit (a first limit of
-# 2000 characters could pass 4096 bytes in UTF-8; merge-gate review,
-# 2026-10-09). At most 12 warnings per process, then one line saying more
-# were left out, so one invocation cannot fill the 32 lines a collector shows
-# for all of them.
+# counts, `review-feedback WARN: ` for feedback work left undone, and
+# `housekeeping WARN: ` (-Housekeeping) for upkeep the review skipped or left
+# half done -- the review-log age-prune and the follow-up index lock -- which
+# was equally invisible on a passing gate. A successful gate's output must
+# read the same whichever provider reviewed, so Text names TASKS.md, the Git
+# directory, the logs folder, a setting or Git's own messages, never a
+# findings file, verdict or per-provider log folder, whose names carry the
+# backend; detail that could (a path, an exception message) goes on a
+# separate plain WARN line, which a gate shows from a review wrapper's
+# captured output only when it fails. The follow-up promotion the hook and
+# the merge gate run themselves is not captured: its lines print on the
+# console as written, pass or fail. One line whose
+# message is at most 600 UTF-16 units, shortened with a marker and never
+# inside a surrogate pair; with the tag and prefix in front, whatever the
+# console encoding, the line stays under the collectors' 4096-byte line limit
+# (a first limit of 2000 characters could pass 4096 bytes in UTF-8;
+# merge-gate review, 2026-10-09). At most 12 warnings of each kind per
+# process, then one line saying more were left out, so one invocation cannot
+# fill the 32 lines a collector shows for all of them.
 $script:CrgFeedbackWarnCount = 0
+$script:CrgHousekeepingWarnCount = 0
 function Write-ReviewFeedbackStatus {
-  param([string]$LogTag, [string]$Text, [switch]$Warn)
-  if ($Warn) {
+  param([string]$LogTag, [string]$Text, [switch]$Warn, [switch]$Housekeeping)
+  $label = 'review-feedback'
+  if ($Housekeeping) {
+    $label = 'housekeeping'
+    $Warn = $true
+    $script:CrgHousekeepingWarnCount++
+    if ($script:CrgHousekeepingWarnCount -gt 13) { return }
+    if ($script:CrgHousekeepingWarnCount -eq 13) { $Text = 'further housekeeping warnings of this review are not shown' }
+  } elseif ($Warn) {
     $script:CrgFeedbackWarnCount++
     if ($script:CrgFeedbackWarnCount -gt 13) { return }
     if ($script:CrgFeedbackWarnCount -eq 13) { $Text = 'further review-feedback warnings of this review are not shown' }
   }
   $one = ($Text -replace '\p{Cc}', ' ').Trim()
-  if ($one.Length -eq 0) { $one = 'a review-feedback step reported nothing' }
+  if ($one.Length -eq 0) { $one = "a $label step reported nothing" }
   if ($one.Length -gt 600) {
     $cut = 580
     if ([char]::IsHighSurrogate($one[$cut - 1])) { $cut-- }
     $one = $one.Substring(0, $cut).TrimEnd() + ' ... (shortened)'
   }
-  Write-Host "[$LogTag] review-feedback$(if ($Warn) { ' WARN' }): $one"
+  Write-Host "[$LogTag] $label$(if ($Warn) { ' WARN' }): $one"
 }
 
 function Get-ReviewVerdictRecordInput {
@@ -4753,11 +4910,13 @@ function Get-FollowupSealRevalidationReport {
 # `seal-*` name shape, disjoint from the verdict namespace the trend and
 # checklist consumers fail closed on) and appends one transaction: OPEN, frame
 # when due, the seal line, and a ZERO-ROW stamp block naming that artifact.
-# The handle is then disposed (FileShare.None refuses every opener, this
-# process included) and POST-APPEND REVALIDATION re-reads the pathname under
-# the still-held lock: success means exactly that no discrepancy was observed
-# during that pass -- an ordinary read, not an atomic snapshot -- and
-# prune-time validation remains the enforcement that endures.
+# The index, the provenance record and the re-read are all opened relative to
+# the held logs folder (section 7). The handle is then disposed (it shares
+# nothing, so every other opener is refused while it is open) and POST-APPEND
+# REVALIDATION reopens the index under the still-held lock: success means
+# exactly that no discrepancy was observed during that pass -- an ordinary
+# read, not an atomic snapshot -- and prune-time validation remains the
+# enforcement that endures.
 function Invoke-FollowupLegacySeal {
   param([string]$ExpectedBytes, [string]$ExpectedSha, [string]$Backend, [string]$LogTag = 'auto-review')
   if ($ExpectedBytes -cnotmatch '^[1-9][0-9]*$' -or $ExpectedSha -cnotmatch '^[0-9a-f]{64}$') {
@@ -4765,21 +4924,34 @@ function Invoke-FollowupLegacySeal {
     return 2
   }
   $ctx = Resolve-FollowupGitContext
-  if (-not $ctx.Ok) {
-    Write-Host "[$LogTag] seal REFUSED: the follow-up index location could not be resolved from git"
-    return 2
-  }
-  $indexPath = Join-Path $ctx.LogsDir 'review-followups.md'
-  if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) {
-    Write-Host "[$LogTag] seal REFUSED: no follow-up index exists at $indexPath - a file with no legacy region needs no seal"
-    return 2
-  }
-  $enc = New-Object System.Text.UTF8Encoding($false)
-  $lockToken = Enter-FollowupIndexLock -IndexPath $indexPath -LogTag $LogTag
-  if ([string]::IsNullOrEmpty($lockToken)) { return 2 }
+  $held = New-Object 'System.Collections.Generic.List[object]'
+  $lock = $null
+  $indexPath = ''
   try {
+    $bind = Enter-FollowupLogsBinding -GitContext $ctx -Held $held
+    if (-not $bind.Ok) {
+      Write-Host "[$LogTag] seal REFUSED: the follow-up index folder could not be held ($($bind.Reason))"
+      return 2
+    }
+    $indexPath = $bind.IndexPath
+    $lock = Enter-FollowupIndexLock -Binding $bind -LogTag $LogTag
+    if ($null -eq $lock) { return 2 }
+    $enc = New-Object System.Text.UTF8Encoding($false)
     $sealLine = ''
-    $fs = [System.IO.File]::Open($indexPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    $err = 0
+    $handle = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($bind.Logs.Handle, (Get-FollowupIndexLeaf), 1, [ref]$err)
+    if ($handle.IsInvalid) {
+      $handle.Dispose()
+      if ($err -eq 2) { Write-Host "[$LogTag] seal REFUSED: no follow-up index exists at $indexPath - a file with no legacy region needs no seal" }
+      else { Write-Host "[$LogTag] seal REFUSED: could not open $indexPath (Win32 error $err) - nothing was sealed" }
+      return 2
+    }
+    if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) {
+      $handle.Dispose()
+      Write-Host "[$LogTag] seal REFUSED: $indexPath is a link, not a file, or has more than one link - nothing was sealed"
+      return 2
+    }
+    $fs = New-Object System.IO.FileStream($handle, [System.IO.FileAccess]::ReadWrite, 4096, $false)
     try {
       $existing = New-Object byte[] $fs.Length
       $read = 0
@@ -4816,12 +4988,9 @@ function Invoke-FollowupLegacySeal {
       # new record, never overwrite a prior one.
       # InvariantCulture: under a non-Gregorian process culture a
       # locale-formatted timestamp can name a day the classifier's invariant
-      # parse rejects, orphaning the record from age-pruning forever. The
+      # parse rejects, orphaning the record from age-pruning forever.
       $sealTs = (Get-Date).ToString('yyyyMMdd-HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
       $centralDir = Join-Path $ctx.LogsDir (Join-Path $Backend 'reviews')
-      if (-not (Test-Path -LiteralPath $centralDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $centralDir -Force | Out-Null
-      }
       $prov = "SEAL-PROVENANCE`nBACKEND: $Backend`nTIMESTAMP: $sealTs`nEXPECTED-BYTES: $ExpectedBytes`nEXPECTED-SHA256: $ExpectedSha`nMEASURED-BYTES: $measuredLen`nMEASURED-SHA256: $measuredSha`n"
       $sealName = ''
       for ($sfx = 0; $sfx -lt 100; $sfx++) {
@@ -4830,30 +4999,31 @@ function Invoke-FollowupLegacySeal {
         # Only a CONFIRMED name collision retries with the next suffix; any
         # other open failure refuses. A failure after the exclusive create is
         # a real write failure -- retrying it as a collision would leave a
-        # partial provenance file behind a reported success -- so it removes
-        # the partial candidate and refuses the seal.
-        try {
-          $pfs = [System.IO.File]::Open($candPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        } catch {
-          if (Test-Path -LiteralPath $candPath) { continue }
-          Write-Host "[$LogTag] seal REFUSED: could not create a provenance record in $centralDir - nothing was sealed"
+        # partial provenance file behind a reported success -- so the partial
+        # candidate is deleted through the handle that created it and the
+        # seal refuses.
+        $pf = Open-CrgHeldFile -Path $candPath -Mode Create -Held $held -CreateUnder $ctx.LogsDir
+        if ($pf.State -ceq 'exists') { continue }
+        if ($pf.State -cne 'ok') {
+          Write-Host "[$LogTag] seal REFUSED: could not create a provenance record in $centralDir ($($pf.State): $($pf.Reason)) - nothing was sealed"
           return 2
         }
         try {
-          try { $pb = $enc.GetBytes($prov); $pfs.Write($pb, 0, $pb.Length) } finally { $pfs.Dispose() }
-        } catch {
-          # The cleanup itself is VERIFIED: a suppressed deletion failure
-          # would leave the partial record on disk while this diagnostic
-          # asserted removal, misreporting the mutation state the operator
-          # recovers from.
-          try { Remove-Item -LiteralPath $candPath -Force -ErrorAction Stop } catch { }
-          if (Test-Path -LiteralPath $candPath) {
-            Write-Host "[$LogTag] seal REFUSED: the provenance record could not be written and the PARTIAL record at $candPath could not be removed - delete it by hand before re-running; nothing was sealed"
-          } else {
-            Write-Host "[$LogTag] seal REFUSED: the provenance record could not be written in $centralDir - the partial record was removed and nothing was sealed"
+          $writeFailure = Write-CrgHeldText -Handle $pf.Handle -Text $prov
+          if ($writeFailure) {
+            # The cleanup itself is VERIFIED: a suppressed deletion failure
+            # would leave the partial record on disk while this diagnostic
+            # asserted removal, misreporting the mutation state the operator
+            # recovers from.
+            $delErr = 0
+            if ([CrgAttributeNeutral.NativeV1]::DeleteHeldExact($pf.Handle, $false, [ref]$delErr)) {
+              Write-Host "[$LogTag] seal REFUSED: the provenance record could not be written in $centralDir ($writeFailure) - the partial record was removed and nothing was sealed"
+            } else {
+              Write-Host "[$LogTag] seal REFUSED: the provenance record could not be written ($writeFailure) and the PARTIAL record at $candPath could not be removed (Win32 error $delErr) - delete it by hand before re-running; nothing was sealed"
+            }
+            return 2
           }
-          return 2
-        }
+        } finally { $pf.Handle.Dispose() }
         $sealName = $cand
         break
       }
@@ -4874,13 +5044,30 @@ function Invoke-FollowupLegacySeal {
       $preLen = $fs.Length
       [void]$fs.Seek(0, [System.IO.SeekOrigin]::End)
       $fs.Write($txBytes, 0, $txBytes.Length)
+      $fs.Flush($true)
     } finally { $fs.Dispose() }
-    # POST-APPEND REVALIDATION, through a fresh pathname open under the
-    # still-held cross-writer lock: the fresh read is what can see a pathname
-    # swap the held handle never could. The check is for THIS run's exact
-    # transaction at the exact append boundary -- a rollback to an earlier
-    # already-sealed file must not report SEALED on a non-unique seal line.
-    $after = [System.IO.File]::ReadAllBytes($indexPath)
+    # POST-APPEND REVALIDATION, through a fresh open relative to the held logs
+    # folder under the still-held cross-writer lock: the fresh open is what can
+    # see a file replaced at the index's name, which the closed handle never
+    # could. The check is for THIS run's exact transaction at the exact append
+    # boundary -- a rollback to an earlier already-sealed file must not report
+    # SEALED on a non-unique seal line.
+    $after = $null
+    $reread = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($bind.Logs.Handle, (Get-FollowupIndexLeaf), 0, [ref]$err)
+    if ($reread.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinaryFile($reread)) {
+      $reread.Dispose()
+      throw "the index could not be reopened for revalidation (Win32 error $err)"
+    }
+    $rfs = New-Object System.IO.FileStream($reread, [System.IO.FileAccess]::Read, 4096, $false)
+    try {
+      $after = New-Object byte[] $rfs.Length
+      $read = 0
+      while ($read -lt $after.Length) {
+        $n = $rfs.Read($after, $read, $after.Length - $read)
+        if ($n -le 0) { throw "short revalidation read on $indexPath" }
+        $read += $n
+      }
+    } finally { $rfs.Dispose() }
     $afterTail = Get-FollowupTailState -Existing $after
     # Presence and length are judged SEPARATELY: a foreign append can extend
     # the file past an intact transaction, and a joint test would misreport
@@ -4913,7 +5100,63 @@ function Invoke-FollowupLegacySeal {
     # survived.
     Write-Host "[$LogTag] seal FAILED: an I/O failure interrupted the operation ($($_.Exception.Message)). The index state is UNCLASSIFIED - a partial transaction or a provenance record may exist. Inspect the index tail and the central review-log directory by hand, repair a damaged tail before any re-seal, then re-inspect and re-run. Nothing is reported sealed."
     return 2
-  } finally { [void](Exit-FollowupIndexLock -IndexPath $indexPath -Token $lockToken -LogTag $LogTag) }
+  } finally {
+    [void](Exit-FollowupIndexLock -Lock $lock -LogTag $LogTag)
+    Exit-CrgHeldDirectories -Held $held
+  }
+}
+
+# A line folded so that every spelling a reader could take for a
+# verdict-structure name (VERDICT, a severity prefix, a header name, the
+# fail-closed banner) reads as that name in every culture. A culture `(?i)`
+# match does not do this: under tr-TR it does not fold ASCII `i` onto `I`, and
+# the invariant culture folds neither U+212A nor U+0130 (both checked
+# 2026-10-10). Compatibility decomposition turns full-width forms and U+212A
+# into ASCII and splits U+0130 into I plus a combining dot. After it, only
+# printable ASCII, tab, LF and CR survive, upper-cased: dash punctuation
+# reads as `-`, U+0131 reads as `I` (invariant upper-casing keeps it), and
+# every other character -- ASCII control characters such as U+0000 and every
+# other non-ASCII character -- is dropped. Space, tab, LF and CR are kept,
+# including the spaces decomposition maps to U+0020 (U+00A0, U+2009), so a
+# name split by one stays split, as it reads; other whitespace (U+0085,
+# U+1680, U+2028, U+2029) is non-ASCII after decomposition, so it is dropped
+# and joins what it separated. Letters of other scripts that merely look
+# Latin (Cyrillic А) have no such mapping and are dropped like any other.
+# Callers only widen what they refuse with the fold; acceptance stays exact.
+# $null means the line could not be normalized (an unpaired surrogate) and
+# must be refused.
+# The WHOLE line is folded. Folding only a bounded head was tried and dropped
+# (staged review, 2026-10-10): padding before the colon (`BLOCKER`, a hundred
+# spaces, `:`) or before a header name pushed the delimiter past the cut, and
+# the line escaped recognition. Dropping only nonspacing marks and format
+# characters was also tried and dropped (merge review, 2026-10-10): a
+# per-UTF-16-unit loop classified the halves of U+E0100 as surrogates and kept
+# them, and invisible characters of other categories (the Hangul fillers are
+# letters; unassigned code points) pass any category list. Characters are
+# classified whole, a surrogate pair at once, through CharUnicodeInfo, not
+# regex `\p{...}` classes: the regex engine's tables put U+00AD under dash
+# punctuation, not format, so a regex-based fold read `BLOC<U+00AD>KER:` as
+# `BLOC-KER:` and missed it (checked 2026-10-10).
+# scripts/review-common.ps1 and the log readers
+# (scripts/shared/analyze-blocker-trends.ps1, dispatch-checklist.ps1,
+# worker-audit.ps1) carry byte-identical copies of this function.
+function ConvertTo-CrgStructureFold {
+  param([string]$Line)
+  if ($Line -cnotmatch '[^\x09\x0A\x0D\x20-\x7E]') { return $Line.ToUpperInvariant() }
+  try { $decomposed = $Line.Normalize([System.Text.NormalizationForm]::FormKD) } catch { return $null }
+  $fold = New-Object System.Text.StringBuilder ($decomposed.Length)
+  for ($i = 0; $i -lt $decomposed.Length; $i++) {
+    $c = $decomposed[$i]
+    $code = [int]$c
+    if ($code -lt 0x80) {
+      if (($code -ge 0x20 -and $code -lt 0x7F) -or $code -eq 9 -or $code -eq 10 -or $code -eq 13) { [void]$fold.Append([char]::ToUpperInvariant($c)) }
+      continue
+    }
+    if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($decomposed, $i) -eq [System.Globalization.UnicodeCategory]::DashPunctuation) { [void]$fold.Append('-') }
+    elseif ($code -eq 0x131) { [void]$fold.Append('I') }
+    if ([char]::IsHighSurrogate($c) -and $i + 1 -lt $decomposed.Length -and [char]::IsLowSurrogate($decomposed[$i + 1])) { $i++ }
+  }
+  return $fold.ToString()
 }
 
 # Classify a reviewer's verdict text into a gate exit code. Every review host
@@ -4921,7 +5164,7 @@ function Invoke-FollowupLegacySeal {
 # one provider's reading and fail under another's.
 # Returns a hashtable: @{
 #   ExitCode      = 0|2|3
-#   VerdictText   = '' or the trimmed `VERDICT: ...` line
+#   VerdictText   = '' or the `VERDICT: ...` line without trailing whitespace
 #   Diagnostic    = '' or a one-line fail-closed reason
 #   BlockerCount, QualityCount, LegacyNbCount, NoteCount  = ints (for log)
 # }
@@ -4944,8 +5187,8 @@ function Invoke-FollowupLegacySeal {
 #   3 = malformed / inconsistent verdict: a MISSING `VERDICT:` line (zero
 #       lines -- including the BLOCKER case, which then fails closed rather
 #       than exit 2), a wrong `VERDICT:` line for a QUALITY/NOTE/zero-finding
-#       set, duplicate `VERDICT:` lines, malformed category enumeration, or
-#       empty input.
+#       set, duplicate `VERDICT:` lines, a severity prefix that is not one of
+#       the exact names, malformed category enumeration, or empty input.
 function Get-VerdictExitCode {
   param([string]$Verdict)
 
@@ -4973,20 +5216,49 @@ function Get-VerdictExitCode {
   $base.LegacyNbCount = ([regex]::Matches($Verdict, '(?m)^NON-BLOCKER:')).Count
   $base.NoteCount     = ([regex]::Matches($Verdict, '(?m)^NOTE:')).Count
 
-  # Reject duplicate VERDICT lines as malformed. Reviewer output is an
-  # untrusted boundary; ambiguity (multiple `VERDICT:` lines) must fail
-  # closed rather than silently picking the first. Zero VERDICT lines
-  # surfaces as $base.VerdictText = '' and falls through to the per-
-  # severity branches, each of which checks $base.VerdictText against
-  # the expected value and fails closed when the line is missing.
-  $verdictLines = @($Verdict -split "`n" | Where-Object { $_ -match '^VERDICT:' })
+  # The counts above are exact, so a near-miss prefix (`Blocker:`, BLOCKER
+  # spelled with U+212A for K, `NOTE :`) would be silently uncounted and could
+  # let a finding pass under VERDICT: CLEAN. Lines are recognized through
+  # ConvertTo-CrgStructureFold, never a culture `(?i)` match: under tr-TR that
+  # match does not fold ASCII `i` onto `I`, so `quality:` went unrecognized
+  # (staged review, 2026-10-10). The fold only widens what is refused; it never
+  # decides acceptance. The log readers refuse the same lines as untrustworthy.
+  #
+  # Duplicate VERDICT lines are malformed too: reviewer output is an untrusted
+  # boundary, and ambiguity must fail closed rather than silently picking the
+  # first. Zero VERDICT lines surfaces as $base.VerdictText = '' and falls
+  # through to the per-severity branches, each of which checks
+  # $base.VerdictText against the expected value and fails closed when the
+  # line is missing.
+  $verdictLines = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($line in ($Verdict -split "`n")) {
+    $fold = ConvertTo-CrgStructureFold -Line $line
+    if ($null -eq $fold) {
+      $base.Diagnostic = 'a verdict line could not be normalized for the severity and VERDICT line checks'
+      return $base
+    }
+    $structure = [regex]::Match($fold, '\A(BLOCKER|QUALITY|NON-BLOCKER|NOTE|VERDICT)\s*:')
+    if (-not $structure.Success) { continue }
+    $name = $structure.Groups[1].Value
+    if ([string]::Equals($name, 'VERDICT', [System.StringComparison]::Ordinal)) { $verdictLines.Add($line); continue }
+    if (-not $line.StartsWith("${name}:", [System.StringComparison]::Ordinal)) {
+      $base.Diagnostic = "a line spells the severity prefix $name in a form other than the exact '${name}:'"
+      return $base
+    }
+  }
+  # Only TRAILING whitespace is removed, with the regex class `\s` the log
+  # readers' `^VERDICT: (...)\s*$` uses, so the accepted line is the one they
+  # accept: anything before `VERDICT` -- whitespace, or a control character
+  # the fold drops -- stays and fails the exact comparison. A full Trim()
+  # accepted `<U+000C>VERDICT: CLEAN`, which every reader rejects (merge
+  # review, 2026-10-10).
   if ($verdictLines.Count -gt 1) {
-    $base.VerdictText = $verdictLines[0].Trim()
+    $base.VerdictText = [regex]::Replace($verdictLines[0], '\s+\z', '')
     $base.ExitCode = 3
     $base.Diagnostic = "verdict contains $($verdictLines.Count) VERDICT: lines (expected exactly 1)"
     return $base
   }
-  $base.VerdictText = if ($verdictLines.Count -eq 1) { $verdictLines[0].Trim() } else { '' }
+  $base.VerdictText = if ($verdictLines.Count -eq 1) { [regex]::Replace($verdictLines[0], '\s+\z', '') } else { '' }
 
   # Per-category enumeration sanity check. The prompt requires the reviewer to
   # write `<CATEGORY>: <count>` or `<CATEGORY>: none` for each of the eight
@@ -5069,11 +5341,12 @@ function Get-VerdictExitCode {
   # still be VERDICT: NON-BLOCKING (findings exist, so CLEAN is inconsistent;
   # BLOCKED is inconsistent without a BLOCKER); a wrong/missing line is malformed
   # output -> exit 3 per the fail-closed contract documented at the helper header.
-  # The verdict words match case-insensitively by contract, but ordinally:
-  # -ne compares by culture, ignoring characters such as U+00AD and folding
-  # U+212A (Kelvin sign) onto K.
+  # The verdict line is compared exactly, in case and spelling, as the
+  # log readers compare it. Any case folding would let one matcher accept a
+  # line another rejects: -ne compares by culture, and culture regex matching
+  # folds U+212A (Kelvin sign) onto K.
   if ($base.QualityCount -gt 0 -or $base.LegacyNbCount -gt 0) {
-    if (-not [string]::Equals($base.VerdictText, 'VERDICT: NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not [string]::Equals($base.VerdictText, 'VERDICT: NON-BLOCKING', [System.StringComparison]::Ordinal)) {
       $base.ExitCode = 3
       $base.Diagnostic = "QUALITY/legacy findings but verdict is '$($base.VerdictText)' (expected 'VERDICT: NON-BLOCKING')"
       return $base
@@ -5087,7 +5360,7 @@ function Get-VerdictExitCode {
   # without a BLOCKER finding is also inconsistent). Anything else means
   # the output is malformed -> exit 3.
   if ($base.NoteCount -gt 0) {
-    if (-not [string]::Equals($base.VerdictText, 'VERDICT: NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not [string]::Equals($base.VerdictText, 'VERDICT: NON-BLOCKING', [System.StringComparison]::Ordinal)) {
       $base.ExitCode = 3
       $base.Diagnostic = "NOTE-only findings but verdict is '$($base.VerdictText)' (expected 'VERDICT: NON-BLOCKING')"
       return $base
@@ -5096,7 +5369,7 @@ function Get-VerdictExitCode {
     return $base
   }
 
-  if (-not [string]::Equals($base.VerdictText, 'VERDICT: CLEAN', [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not [string]::Equals($base.VerdictText, 'VERDICT: CLEAN', [System.StringComparison]::Ordinal)) {
     $base.ExitCode = 3
     $base.Diagnostic = "verdict has zero findings but is not 'VERDICT: CLEAN'"
     return $base

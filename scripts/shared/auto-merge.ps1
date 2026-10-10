@@ -259,6 +259,17 @@ try {
 # (em-dashes, smart quotes) before this script writes the trusted-
 # infra copies. Same defect class as the verdict + prompt reads in
 # auto-review.ps1 (fixed in a prior round). Pin explicitly here too.
+# The console code pages belong to the console window this script shares with
+# the invoking shell, so the finally at the end of the script puts back the
+# values saved here.
+try {
+  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+} catch {
+  Write-Host "[auto-merge] ERROR: the console code pages could not be read ($($_.Exception.Message)) - merge ABORTED (fail closed)."
+  exit 3
+}
+try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -1760,9 +1771,10 @@ function Get-CrgSuccessfulReviewProjection {
   return @{ Ok = $true; Code = ''; Lines = $lines.ToArray() }
 }
 
-# Review-feedback warnings (Write-ReviewFeedbackStatus in
+# Review-feedback and housekeeping warnings (Write-ReviewFeedbackStatus in
 # scripts/review-common.ps1) for a passed merge: without them a passed merge
-# hid feedback work left undone (merge review, 2026-10-09). Kept apart from
+# hid feedback work left undone (merge review, 2026-10-09) and skipped
+# housekeeping. Kept apart from
 # Get-CrgSuccessfulReviewProjection on purpose. It reads EVERY launched
 # child, not only the panel that supplied the verdict, because a passing
 # child of a replaced panel may still have written records. It never fails
@@ -1794,10 +1806,11 @@ function Get-CrgReviewFeedbackStatusLines {
       $reader = [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::new($false, $false), $false)
       if ($stream.Length -gt 67108864) { throw 'the log is too large' }
       while ($null -ne ($line = $reader.ReadLine())) {
-        if ($line -cnotmatch '\A\[auto-review(?::claude)?\] (review-feedback WARN: .*)\z') { continue }
+        if ($line -cnotmatch '\A\[auto-review(?::claude)?\] ((review-feedback|housekeeping) WARN: .*)\z') { continue }
         $warning = $Matches[1]
-        if ([System.Text.Encoding]::UTF8.GetByteCount($warning) -gt 4096 -or $warning -cmatch '[\x00-\x1F\x7F]' -or $warning -cnotmatch '\Areview-feedback WARN: \S(?:.*\S)?\z') {
-          $warning = 'review-feedback WARN: a review-feedback line was not in the expected form and is not shown'
+        $kind = $Matches[2]
+        if ([System.Text.Encoding]::UTF8.GetByteCount($warning) -gt 4096 -or $warning -cmatch '[\x00-\x1F\x7F]' -or $warning -cnotmatch '\A(?:review-feedback|housekeeping) WARN: \S(?:.*\S)?\z') {
+          $warning = "$kind WARN: a $kind line was not in the expected form and is not shown"
         }
         [void]$found.Add($warning)
       }
@@ -2176,194 +2189,6 @@ function Get-ReviewChildArgs {
   return $childArgs
 }
 
-# A PENDING PAYLOAD verified end to end before any byte is appended: EXACTLY one
-# block -- header line, row lines, its record, then the separator or the end of
-# the payload -- with row count and digest recomputed. A promoter is the last
-# gate before staged content becomes durable; a tail-shape check alone would
-# pass a tampered block under an intact record and plant a shape the prune
-# scanner could only refuse forever.
-function Test-FollowupPendingPayload {
-  param([string]$Payload)
-  if ([string]::IsNullOrEmpty($Payload)) { return @{ Ok = $false; Reason = 'an empty pending payload' } }
-  if ($Payload.Contains("`r")) { return @{ Ok = $false; Reason = 'a carriage return inside the pending payload' } }
-  # Char indexing, not StartsWith: culture-sensitive StartsWith treats U+FEFF
-  # as IGNORABLE, so it reports every payload as BOM-led. Comparisons in
-  # these validators are ordinal or char-wise, never culture rules.
-  if ($Payload[0] -eq [char]0xFEFF) { return @{ Ok = $false; Reason = 'a BOM leads the pending payload' } }
-  # A promoter authors NEW durable bytes, so its accept set must sit INSIDE
-  # the destructive reader's: the reader whitelists index bytes to printable
-  # ASCII before any destructive scan, and a promoted byte outside that set
-  # would quarantine every later prune. The tail gate stays wider on purpose
-  # -- historical content is the prune's to deny, not the append's to refuse.
-  foreach ($pc in $Payload.ToCharArray()) {
-    $pcv = [int]$pc
-    if ($pcv -ne 10 -and ($pcv -lt 32 -or $pcv -gt 126)) {
-      return @{ Ok = $false; Reason = 'a byte outside printable ASCII, which the destructive reader refuses to scan' }
-    }
-  }
-  $nl = $Payload.IndexOf([char]10)
-  if ($nl -lt 0) { return @{ Ok = $false; Reason = 'a payload with no complete header line' } }
-  $header = $Payload.Substring(0, $nl)
-  if ($header -cnotmatch '^## \S') { return @{ Ok = $false; Reason = 'a payload that does not begin at a block header' } }
-  # The reader keys retention on EXACTLY ONE non-empty verdict= token
-  # (Get-CaptureHeaderLocatorField's contract); a header it cannot key denies
-  # the prune on its own account, so promotion refuses it here first.
-  $pvFound = 0; $pvEmpty = $false; $pvValue = ''
-  foreach ($ptok in ($header -split '\s+')) {
-    if ($ptok -cmatch '^verdict=(?<v>.*)$') { $pvFound++; $pvValue = $Matches['v']; if ([string]::IsNullOrWhiteSpace($Matches['v'])) { $pvEmpty = $true } }
-  }
-  if ($pvFound -ne 1 -or $pvEmpty) {
-    return @{ Ok = $false; Reason = 'a payload header without exactly one non-empty verdict= field, a block the destructive reader cannot key' }
-  }
-  $headerAndRows = $header + "`n"
-  $rowCount = 0
-  $pvScoped = $false
-  $rest = $Payload.Substring($nl + 1)
-  while ($true) {
-    $nl = $rest.IndexOf([char]10)
-    if ($nl -lt 0) { return @{ Ok = $false; Reason = 'a payload cut before its record line' } }
-    $line = $rest.Substring(0, $nl)
-    if ($line -cmatch '^- (?:QUALITY|NON-BLOCKER): ') {
-      # The reader's full row production (Get-CaptureRowShape's contract):
-      # a row it classifies as malformed breaks every later binding and
-      # denies the prune, so promotion refuses the row before it can land.
-      if ($line -cnotmatch '^- (?:QUALITY|NON-BLOCKER): (?:[^\[\]]*?)(?: \[scoped: [a-z0-9]+(?:-[a-z0-9]+)* tree: (?:[0-9a-f]{40}|[0-9a-f]{64}) diff: [0-9a-f]{64} find: [0-9a-f]{64}\])?$') {
-        return @{ Ok = $false; Reason = 'a row outside the index row grammar the destructive reader accepts' }
-      }
-      if ($line -cmatch ' \[scoped: ') { $pvScoped = $true }
-      $headerAndRows += $line + "`n"
-      $rowCount++
-      $rest = $rest.Substring($nl + 1)
-      continue
-    }
-    break
-  }
-  $rec = Test-FollowupRecordLine -Line $line
-  if (-not $rec.Ok) { return @{ Ok = $false; Reason = 'a payload without a valid record line after its rows' } }
-  if (-not [string]::Equals([string]$rec.Rows, [string]$rowCount, [System.StringComparison]::Ordinal)) { return @{ Ok = $false; Reason = 'a payload record whose row count does not match its rows' } }
-  if (-not [string]::Equals([string]$rec.Sha, [string](Get-FollowupSha256Hex -Text $headerAndRows), [System.StringComparison]::Ordinal)) { return @{ Ok = $false; Reason = 'a payload record whose digest does not vouch for its block' } }
-  # SCOPED rows key retention on the header's locator, so the wire itself must
-  # pass the destructive reader's resolver and its leaf must be a name the
-  # prune could actually be asked about -- a scoped block whose locator the
-  # reader later refuses would deny every prune forever. A zero-row or
-  # plain-row block skips this: the reader keys nothing from it.
-  if ($pvScoped) {
-    $pw = Resolve-CaptureLocatorWire -Value $pvValue
-    if ($pw.Kind -cne 'exact' -and $pw.Kind -cne 'bare') {
-      return @{ Ok = $false; Reason = 'a scoped payload whose verdict locator the destructive reader cannot resolve' }
-    }
-    $pnorm = $pw.Path -replace '\\', '/'
-    # The DECODED locator is narrowed to printable ASCII in EVERY promoter
-    # (the reader itself accepts escaped non-ASCII paths): the sh promoter
-    # cannot replicate the reader's Unicode device-name folding without
-    # drifting, so the narrowing is uniform here too -- or backend choice
-    # would change which follow-ups become durable.
-    foreach ($pwc in $pnorm.ToCharArray()) {
-      if ([int]$pwc -gt 126) {
-        return @{ Ok = $false; Reason = 'a scoped locator decoding outside printable ASCII, which every promoter uniformly refuses' }
-      }
-    }
-    $pleaf = $pnorm.Substring($pnorm.LastIndexOf([char]'/') + 1)
-    if (-not (Test-CaptureVerdictLeaf -Name $pleaf)) {
-      return @{ Ok = $false; Reason = 'a scoped payload whose verdict leaf is not a review-verdict filename' }
-    }
-  }
-  $rest = $rest.Substring($nl + 1)
-  if ([string]::Equals($rest, '', [System.StringComparison]::Ordinal) -or [string]::Equals($rest, "`n", [System.StringComparison]::Ordinal)) { return @{ Ok = $true; Reason = '' } }
-  return @{ Ok = $false; Reason = 'a payload that is not exactly one record-closed block' }
-}
-
-# Promote a child wrapper's STAGED QUALITY follow-ups to the durable
-# logs/review-followups.md index. Called ONLY after the ff-merge has
-# succeeded (merge-gate BLOCKER 2026-07-10: a child that appended on its own
-# pass could record follow-ups for a merge that subsequently aborted on the
-# exit union, the branch pin, or the ff-merge -- so the children stage to
-# CROSS_REVIEW_FOLLOWUPS_PENDING paths and THIS single post-merge point promotes).
-# NON-pure I/O twin of the wrappers' direct-append mode: same main-repo
-# resolution (the submodule-aware Get-FollowupIndexDir selection), same header, same
-# exclusive-handle retry against concurrent writers. Any failure warns and
-# degrades -- the merge is already applied, so a lost follow-up record must
-# not fail the gate.
-function Publish-ReviewFollowups {
-  param(
-    [string]$PendingPath,
-    [string]$BackendName,
-    [switch]$ProviderNeutralOutput
-  )
-  $pendingDisplay = if ($ProviderNeutralOutput) { '<run-owned follow-up record>' } else { $PendingPath }
-  $backendDisplay = if ($ProviderNeutralOutput) { 'review' } else { $BackendName }
-  try {
-    if ([string]::IsNullOrWhiteSpace($PendingPath) -or -not (Test-Path -LiteralPath $PendingPath)) { return }
-    # RAW bytes, decoded STRICTLY with no BOM tolerance: the payload
-    # validator's accept set must match the sh promoter's byte-for-byte
-    # (raw-byte uniformity, v6), and invalid UTF-8 must refuse rather than be
-    # repaired into bytes the record's digest never covered.
-    $decoded = Get-FollowupStrictText -Bytes ([System.IO.File]::ReadAllBytes($PendingPath))
-    if (-not $decoded.Ok) {
-      Write-Host "[auto-merge] WARN: pending follow-ups at $pendingDisplay refused promotion: bytes that are not valid UTF-8 - record dropped, the findings stay in the verdict artifact"
-      return
-    }
-    $block = $decoded.Text
-    if ([string]::IsNullOrWhiteSpace($block)) { return }
-    # The promoter is the last gate before staged content becomes durable:
-    # grammar, row count, and digest are verified BEFORE any byte is appended,
-    # and a failure drops the record loudly rather than planting a shape the
-    # prune scanner could only refuse forever.
-    $payload = Test-FollowupPendingPayload -Payload $block
-    if (-not $payload.Ok) {
-      Write-Host "[auto-merge] WARN: pending follow-ups at $pendingDisplay refused promotion: $($payload.Reason) - record dropped, the findings stay in the verdict artifact"
-      return
-    }
-    $logsDir = $null
-    if ([string]::IsNullOrWhiteSpace($logsDir)) {
-      # Submodule-aware root selection (Get-FollowupIndexDir <- Get-ReviewLogDir):
-      # the common-dir PARENT for a normal repo / linked worktree, the working-tree
-      # TOP-LEVEL for a submodule (whose common-dir parent is `.git/modules`).
-      $commonDir = $null
-      $absOut = & git rev-parse --path-format=absolute --git-common-dir 2>$null
-      if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($absOut)) {
-        $commonDir = ($absOut | Select-Object -First 1)
-      } else {
-        $plainOut = & git rev-parse --git-common-dir 2>$null
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($plainOut)) {
-          try { $commonDir = (Resolve-Path -LiteralPath ($plainOut | Select-Object -First 1) -ErrorAction Stop).Path } catch { $commonDir = $null }
-        }
-      }
-      $topLevel = $null
-      $topOut = & git rev-parse --show-toplevel 2>$null
-      if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($topOut)) {
-        $topLevel = ($topOut | Select-Object -First 1)
-      }
-      $logsDir = Get-FollowupIndexDir -CommonDir $commonDir -TopLevel $topLevel
-      if ([string]::IsNullOrWhiteSpace($logsDir)) { $logsDir = Join-Path (Get-Location).Path 'logs' }
-    }
-    if (-not (Test-Path -LiteralPath $logsDir -PathType Container)) {
-      New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-    }
-    $followupFile = Join-Path $logsDir 'review-followups.md'
-    # Concurrent writers on the shared main-repo index (another repo's commit gate,
-    # a standalone wrapper run, the sh hook's promoter) must not clobber a freshly
-    # appended entry, so this promotion runs under the same cross-writer protocol
-    # the wrappers' direct-append mode uses.
-    $appended = Invoke-FollowupIndexAppend -IndexPath $followupFile `
-      -HeaderText (Get-FollowupIndexHeader) -BlockText $block -LogTag 'auto-merge' `
-      -DropConsequence 'dropping this follow-up record, the merge still stands'
-    if (-not $appended.Appended) {
-      # A 'lock' refusal was already reported by the acquisition, which named the
-      # lock, why it could not be taken, what this caller loses and the remedy. A
-      # second, thinner line here would only compete with it.
-      if ($appended.Refusal -ceq 'torn') {
-        Write-Host (Get-FollowupTornIndexWarning -IndexPath $followupFile -LogTag 'auto-merge' -Reason $appended.Reason)
-      }
-      return
-    }
-    Write-Host "[auto-merge] promoted $backendDisplay QUALITY follow-ups to $followupFile"
-  } catch {
-    $promotionError = if ($ProviderNeutralOutput) { 'the run-owned promotion operation failed; inspect internal review artifacts' } else { $_.Exception.Message }
-    Write-Host "[auto-merge] WARN: could not promote $backendDisplay QUALITY follow-ups: $promotionError"
-  }
-}
-
 # Resolve the centralized shared-logs `logs/<backend>/reviews` dir -- the SAME
 # destination the wrappers' Resolve-DefaultReviewOutDir DEFAULT picks (via the
 # shared Get-ReviewLogDir: the git-common-dir parent for normal/worktree layouts,
@@ -2465,9 +2290,8 @@ function Resolve-CentralLogDir {
 # a newer method set), and initialization is LAZY and FALLIBLE: under the
 # script's EAP=Stop a compiler/policy failure from a load-time Add-Type
 # would terminate the gate before usage validation or the
-# exit-code mapping -- the same fallibility model Initialize-CrgLockNative
-# applies, with failure routed through the centralization path's ordinary
-# warning-and-preserve arm rather than a raw termination.
+# exit-code mapping, so failure is routed through the centralization path's
+# ordinary warning-and-preserve arm rather than a raw termination.
 $script:crgMergeNativeState = $null
 function Initialize-CrgMergeNative {
   if ($null -ne $script:crgMergeNativeState) { return $script:crgMergeNativeState }
@@ -2550,7 +2374,7 @@ function Copy-RunArtifactsToCentralLogs {
   # The scaffolding is transient run-dir state that goes away with the run dir, so it
   # is intentionally NOT preserved. (Mirrors the prune-class name shapes in the
   # wrappers' Get-ReviewLogPruneClass.)
-  $verdictNameRe = [regex]'^review-\d{8}-\d{6}-.+\.(md|jsonl|stderr\.log|exhaustion\.json|errored\.txt)$'
+  $verdictNameRe = [regex]'^review-[0-9]{8}-[0-9]{6}-.+\.(md|jsonl|stderr\.log|exhaustion\.json|errored\.txt)$'
   $files = @($allFiles | Where-Object { $verdictNameRe.IsMatch($_.Name) })
   if ($files.Count -gt 0 -and -not (Initialize-CrgMergeNative)) {
     Write-Host "[auto-merge] forensics WARNING: the atomic-publish helper is unavailable, so $backendDisplay artifacts cannot be centralized safely - copy SKIPPED; PRESERVING the run dir so artifacts are not lost."
@@ -2882,7 +2706,7 @@ Write-Host (Get-MergePanelPlanStatusLine -PassCount $script:PanelPassCount)
 # Every launched panel/fallback child runs with an explicit -OutDir into its
 # own per-slot subdir here. The gate-owned writers are the review process (its verdict
 # `review-*-branch-*.md` and its staged `followups.pending.md`, promoted
-# post-merge by Publish-ReviewFollowups or discarded with the run dir on abort)
+# post-merge by Invoke-FollowupPromotion or discarded with the run dir on abort)
 # and Start-ReviewChild (the runner scaffolding --
 # child-args.txt, child-exit.txt, child-runner.ps1, child-stdout.log, and
 # child-stderr.log). NOTE this dir is under
@@ -3537,19 +3361,19 @@ try {
   # reach the durable index (they describe content that actually landed).
   # Every launched child's staging is promoted, the superseded exhausted
   # panel's included (its completed passes' findings still describe landed
-  # content) and every fallback child's.
+  # content) and every fallback child's. One call appends them all under one
+  # lock (Invoke-FollowupPromotion, the promoter the commit gate also runs);
+  # its result only words its own warnings, since the merge already stands.
+  $promotionPaths = New-Object 'System.Collections.Generic.List[string]'
   foreach ($pp in @($allPendingPaths)) {
-    if (-not [string]::IsNullOrWhiteSpace($pp.Path)) {
-      Publish-ReviewFollowups -PendingPath $pp.Path -BackendName $pp.Backend -ProviderNeutralOutput
-    }
+    if (-not [string]::IsNullOrWhiteSpace($pp.Path)) { $promotionPaths.Add($pp.Path) }
   }
   if ($fallbackHappened) {
     foreach ($fp in @($fallbackPendingPaths)) {
-      if (-not [string]::IsNullOrWhiteSpace($fp)) {
-        Publish-ReviewFollowups -PendingPath $fp -BackendName $fallbackProvider -ProviderNeutralOutput
-      }
+      if (-not [string]::IsNullOrWhiteSpace($fp)) { $promotionPaths.Add($fp) }
     }
   }
+  [void](Invoke-FollowupPromotion -PendingPaths $promotionPaths.ToArray() -LogTag 'auto-merge' -ProviderNeutralOutput)
   # --- Non-gating post-merge process audit (REPORT-ONLY) -------------------
   # The merge has ALREADY completed and the base is updated above; nothing in
   # this block can change the merge outcome or this script's exit code (control
@@ -3825,4 +3649,12 @@ finally {
   } else {
     Remove-TreeNoRecurse -Path $runDir
   }
+}
+} finally {
+  try {
+    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "auto-merge.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+  try {
+    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "auto-merge.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
 }

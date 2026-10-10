@@ -144,16 +144,22 @@
                    (Get-CultureComparisonFindings): a -c/-i prefixed comparison operator,
                    or one with a quoted, [string] or [char] operand, unless the operand
                    that decides the comparison (the left one; the collection for
-                   -contains/-in) is a [char], other numeric cast or a number;
+                   -contains/-in) is a number or a cast to a type no string can be
+                   (not [object], [psobject], an interface String implements or a
+                   collection other than an array; an array cast is judged by its
+                   element type);
                    case-insensitive -like; StartsWith/EndsWith, and IndexOf/LastIndexOf on
                    a quoted string, without a written-out Ordinal or OrdinalIgnoreCase
-                   StringComparison last; ValidateSet; and an enabled Unique switch or
-                   the Unique cmdlet. Windows PowerShell 5.1 compares those by culture,
+                   StringComparison last; ValidateSet; a switch with a quoted clause
+                   (unless -CaseSensitive with -Regex or -Wildcard); Sort-Object and
+                   Group-Object; and an enabled Unique switch or the Unique cmdlet.
+                   Windows PowerShell 5.1 compares those by culture,
                    which ignores characters such as U+00AD. A pointer, not a gate: an
                    operand's run-time type is not in the syntax, so the rule can miss a
                    comparison or name one that is exact; checklist item 11 and review
                    keep comparisons exact. Added lines only. A file the parser cannot
-                   read gets one finding saying so.
+                   read gets one finding saying so. Staged mode only: the in-process
+                   paired adapter never parses candidate PowerShell.
       UNSUPPORTED-SYNTAX
                    a GOVERNED file whose line-oriented classes could not run over
                    it, and why. The ways a file reaches it:
@@ -464,6 +470,37 @@ $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 # opened. A pathname this tool cannot represent faithfully is a STOP, not a guess.
 $script:Utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
 
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
 # Pin UTF-8 for native command pipes BEFORE any git read. Windows PowerShell 5.1
 # defaults $OutputEncoding to ASCII, so `git ls-files` / `git show` / `git diff`
 # output is decoded lossily and UTF-8 Markdown can mojibake before scanning --
@@ -474,7 +511,16 @@ $script:Utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
 # failure and continuing would run the scan under a lossy decoder and risk a
 # FALSE-CLEAN lint, the one outcome this linter exists to prevent. (Codex BLOCKER
 #: swallowed encoding setup defeated the UTF-8 contract.)
+# The console code pages belong to the console window this script shares with
+# the invoking shell, so a run that switches them saves them first and the
+# finally at the end of the script puts them back; captured-input runs leave
+# them alone.
+$crgSavedConsoleInputEncoding = $null
+$crgSavedConsoleOutputEncoding = $null
+try {
 if (-not $PSBoundParameters.ContainsKey('PairedInput') -and -not $PSBoundParameters.ContainsKey('FirstAttachmentInput')) {
+  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
   $OutputEncoding = $script:Utf8NoBom
   [Console]::InputEncoding = $script:Utf8NoBom
   [Console]::OutputEncoding = $script:Utf8NoBom
@@ -3808,11 +3854,19 @@ function Get-CultureComparisonFindings {
   # ADVISORY. A likely culture-sensitive string comparison on an ADDED line of a staged
   # PowerShell file, pointed out for the author; exact comparison is kept by authoring
   # (docs/authoring-invariant-checklist.md item 11) and review, not by this rule. It
-  # was an ERROR rule during 2.6.0 development and two review rounds showed why it
+  # was an ERROR rule during 2.6.0 development, and repeated review rounds showed why it
   # cannot be one: the syntax does not give an operand's run-time type, so a static
-  # reading both misses forms (lowercase method names, module-qualified cmdlets,
-  # receivers of unstated type) and refuses valid code (a List[string] IndexOf, a
-  # disabled -Unique:$false). Do not make it blocking again.
+  # reading both misses comparisons (receivers and operands of unstated type) and
+  # names exact ones (a List[string] IndexOf). Do not make it blocking again.
+  #
+  # Only the ordinary staged lint, a process of its own over the author's files, may
+  # call this; the in-process paired adapter must not. Parsing is not free of side
+  # effects: Windows PowerShell 5.1 loads an assembly named in an assembly-qualified
+  # type literal and searches for a module named in a `using module` statement while
+  # it parses (both checked 2026-10-10), and the paired adapter runs inside the
+  # central runtime, whose contract excludes worktree reads. A text test cannot
+  # screen this out: type literals with an assembly name are not separable from
+  # attributes and generic arguments without the parser.
   #
   # Windows PowerShell 5.1 compares strings by CULTURE in the
   # comparison operators, ValidateSet, the Unique switch and cmdlet, and the String
@@ -3835,10 +3889,16 @@ function Get-CultureComparisonFindings {
   # The syntax fixes an operand's type only for literals and casts
   # (Get-CultureOperandKind), so a comparison that may be a string one -- a -c/-i
   # prefixed operator, or a quoted, [string] or [char] operand -- is reported unless its
-  # deciding operand is a [char], other numeric cast or a number; casting the left
-  # operand states the type. -clike/-cnotlike match character by character and are not reported. Two
-  # operands of unstated type under a plain operator, switch, @{} keys, Sort-Object and
-  # Group-Object are left to review by hand.
+  # deciding operand is a number or a cast to a type no string can be (not [object],
+  # [psobject], an interface String implements or a collection other than an array,
+  # an array cast being judged by its element type); casting the left
+  # operand to such a type states the type. -clike/-cnotlike match
+  # character by character and are not reported. A switch with a quoted clause
+  # (unless -CaseSensitive with -Regex or -Wildcard, which match characters exactly),
+  # Sort-Object and Group-Object are reported whatever their operands: the syntax
+  # cannot show their values are not strings. @{} keys and two operands of unstated
+  # type under a plain operator are left to review by hand: nearly every hashtable
+  # literal and untyped comparison would be named, burying the findings that matter.
   param([object[]]$Records, [hashtable]$AddedSet)
   $out = @()
   if (-not $Records -or -not $AddedSet -or $AddedSet.Count -eq 0) { return $out }
@@ -3875,14 +3935,18 @@ function Get-CultureComparisonFindings {
   }
   $stringMethods = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
   foreach ($k in @('StartsWith', 'EndsWith', 'IndexOf', 'LastIndexOf')) { [void]$stringMethods.Add($k) }
+  $orderingCommands = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($k in @('Sort-Object', 'sort', 'Group-Object', 'group')) { [void]$orderingCommands.Add($k) }
   $uniqueCommands = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($k in @('Sort-Object', 'sort', 'Select-Object', 'select')) { [void]$uniqueCommands.Add($k) }
+  foreach ($k in @('Select-Object', 'select')) { [void]$uniqueCommands.Add($k) }
+  $exactSwitch = [System.Management.Automation.Language.SwitchFlags]::Regex -bor [System.Management.Automation.Language.SwitchFlags]::Wildcard
   $nodes = $ast.FindAll({
     param($n)
     $n -is [System.Management.Automation.Language.BinaryExpressionAst] -or
     $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
     $n -is [System.Management.Automation.Language.AttributeAst] -or
-    $n -is [System.Management.Automation.Language.CommandAst]
+    $n -is [System.Management.Automation.Language.CommandAst] -or
+    $n -is [System.Management.Automation.Language.SwitchStatementAst]
   }, $true)
   foreach ($node in $nodes) {
     if ($node -is [System.Management.Automation.Language.BinaryExpressionAst]) {
@@ -3899,7 +3963,7 @@ function Get-CultureComparisonFindings {
       $mayBeString = $prefixed -or [string]::Equals($deciding, 'String', [System.StringComparison]::Ordinal) -or
         [string]::Equals($other, 'String', [System.StringComparison]::Ordinal) -or [string]::Equals($other, 'Char', [System.StringComparison]::Ordinal)
       if (-not $mayBeString) { continue }
-      $typed = [string]::Equals($deciding, 'Char', [System.StringComparison]::Ordinal) -or [string]::Equals($deciding, 'Scalar', [System.StringComparison]::Ordinal)
+      $typed = [string]::Equals($deciding, 'Char', [System.StringComparison]::Ordinal) -or [string]::Equals($deciding, 'Typed', [System.StringComparison]::Ordinal)
       if ($typed -and -not [string]::Equals($role, 'like', [System.StringComparison]::Ordinal)) { continue }
       $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$node.ErrorPosition.StartLineNumber; Match = $opText; Hint = "$opText $($roleHint[$role])" }
     } elseif ($node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
@@ -3923,14 +3987,33 @@ function Get-CultureComparisonFindings {
       if (-not (& $touchesAdded $node.Extent.StartLineNumber $node.Extent.EndLineNumber)) { continue }
       $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$node.Extent.StartLineNumber; Match = 'ValidateSet'
         Hint = 'ValidateSet matches by culture: use [ValidatePattern(''\A(?:a|b)\z'', Options = ''None'')]' }
+    } elseif ($node -is [System.Management.Automation.Language.SwitchStatementAst]) {
+      $flags = $node.Flags
+      if (($flags -band [System.Management.Automation.Language.SwitchFlags]::CaseSensitive) -and ($flags -band $exactSwitch)) { continue }
+      # The header or a quoted clause must be added; an added line elsewhere in a long
+      # switch body says nothing about how its clauses compare.
+      $headerEnd = if ($null -eq $node.Condition) { $node.Extent.StartLineNumber } else { $node.Condition.Extent.EndLineNumber }
+      $headerAdded = & $touchesAdded $node.Extent.StartLineNumber $headerEnd
+      $hit = $null
+      foreach ($clause in @($node.Clauses)) {
+        if (-not [string]::Equals((Get-CultureOperandKind -Ast $clause.Item1), 'String', [System.StringComparison]::Ordinal)) { continue }
+        if ($headerAdded -or (& $touchesAdded $clause.Item1.Extent.StartLineNumber $clause.Item1.Extent.EndLineNumber)) { $hit = $clause.Item1; break }
+      }
+      if ($null -eq $hit) { continue }
+      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$hit.Extent.StartLineNumber; Match = [string]$hit.Extent.Text
+        Hint = 'switch compares a string clause by culture, with or without -CaseSensitive: test with [string]::Equals(value, clause, [System.StringComparison]::Ordinal) in if/elseif, or use -CaseSensitive with -Regex and anchored patterns' }
     } else {
       $command = [string]$node.GetCommandName()
       $qualifier = $command.LastIndexOf([char]'\')
       if ($qualifier -ge 0) { $command = $command.Substring($qualifier + 1) }
+      $hint = 'the Unique switch and the Unique cmdlet compare by culture: de-duplicate through a HashSet[string] built with [System.StringComparer]::Ordinal'
       if ([string]::Equals($command, 'Get-Unique', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($command, 'gu', [System.StringComparison]::OrdinalIgnoreCase)) {
         $at = $node.CommandElements[0].Extent
+      } elseif ($orderingCommands.Contains($command)) {
+        $at = $node.CommandElements[0].Extent
+        $hint = "$command compares string keys by culture, with or without -CaseSensitive: sort an index array with [Array]::Sort(keys, index, [System.StringComparer]::Ordinal), and group through a Dictionary built with that comparer"
       } elseif ($uniqueCommands.Contains($command)) {
-        # Parameter names bind by any unambiguous prefix; on the covered cmdlets every
+        # Parameter names bind by any unambiguous prefix; on Select-Object every
         # prefix of Unique names only Unique. -Unique:$false de-duplicates nothing.
         $param = @($node.CommandElements | Where-Object {
           $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName.Length -gt 0 -and
@@ -3941,8 +4024,7 @@ function Get-CultureComparisonFindings {
         $at = $param[0].Extent
       } else { continue }
       if (-not (& $touchesAdded $node.Extent.StartLineNumber $node.Extent.EndLineNumber)) { continue }
-      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$at.StartLineNumber; Match = [string]$at.Text
-        Hint = 'the Unique switch and the Unique cmdlet compare by culture: de-duplicate through a HashSet[string] built with [System.StringComparer]::Ordinal' }
+      $out += @{ Class = 'CULTURE-COMPARE'; Tier = 'ADVISORY'; Line = [int]$at.StartLineNumber; Match = [string]$at.Text; Hint = $hint }
     }
   }
   return $out
@@ -3950,12 +4032,17 @@ function Get-CultureComparisonFindings {
 
 function Get-CultureOperandKind {
   # The comparison type an operand fixes by its syntax alone: 'String' for a quoted or
-  # expandable string or a [string] cast, 'Char' for a [char] cast, 'Scalar' for another
-  # numeric cast or a number ([decimal] is numeric but not primitive), 'Unknown'
-  # otherwise. A collection -- an array literal,
-  # @() or parentheses around one -- takes its elements' kind: String if any element is,
-  # Char or Scalar only when every element is typed. Variables, members, calls and
-  # indexing are Unknown: their type exists only at run time.
+  # expandable string or a [string] cast, 'Char' for a [char] cast, 'Typed' for a number
+  # or a cast to a type no string can be, 'Unknown' otherwise. PowerShell converts the
+  # other operand to a Typed operand's type, so the comparison is not a string one. A
+  # cast to a type a string already is fixes nothing -- [object], or an interface
+  # String implements such as [IComparable]: `[IComparable]'GIT_DIR'` stays a String
+  # (checked 2026-10-10). Neither does [psobject], which wraps the string, nor a cast to
+  # a collection type other than an array, whose elements are compared one by one. A collection --
+  # an array cast, an array literal, @() or parentheses around one -- takes its
+  # elements' kind: String if any element is, Char or Typed only when every element
+  # is typed. Variables, members, calls and indexing are Unknown: their type exists
+  # only at run time.
   param($Ast)
   while ($true) {
     if ($Ast -is [System.Management.Automation.Language.ParenExpressionAst]) { $Ast = $Ast.Pipeline; continue }
@@ -3974,22 +4061,24 @@ function Get-CultureOperandKind {
   if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
       $Ast -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) { return 'String' }
   if ($Ast -is [System.Management.Automation.Language.ConstantExpressionAst]) {
-    if ($null -ne $Ast.Value -and ($Ast.Value.GetType().IsPrimitive -or $Ast.Value -is [decimal])) { return 'Scalar' }
+    if ($null -ne $Ast.Value -and ($Ast.Value.GetType().IsPrimitive -or $Ast.Value -is [decimal])) { return 'Typed' }
     return 'Unknown'
   }
   if ($Ast -is [System.Management.Automation.Language.ConvertExpressionAst]) {
     $type = $Ast.Type.TypeName.GetReflectionType()
+    if ($null -ne $type -and $type.IsArray) { $type = $type.GetElementType() }
     if ([object]::Equals($type, [string])) { return 'String' }
     if ([object]::Equals($type, [char])) { return 'Char' }
-    if ($null -ne $type -and ($type.IsPrimitive -or [object]::Equals($type, [decimal]))) { return 'Scalar' }
-    return 'Unknown'
+    if ($null -eq $type -or $type.IsAssignableFrom([string]) -or [object]::Equals($type, [psobject]) -or
+        [System.Collections.IEnumerable].IsAssignableFrom($type)) { return 'Unknown' }
+    return 'Typed'
   }
   if ($Ast -is [System.Management.Automation.Language.ArrayLiteralAst]) {
     $kinds = @($Ast.Elements | ForEach-Object { Get-CultureOperandKind -Ast $_ })
     if ([Array]::IndexOf([string[]]$kinds, 'String') -ge 0) { return 'String' }
     if ([Array]::IndexOf([string[]]$kinds, 'Unknown') -ge 0) { return 'Unknown' }
     if ([Array]::IndexOf([string[]]$kinds, 'Char') -ge 0) { return 'Char' }
-    return 'Scalar'
+    return 'Typed'
   }
   return 'Unknown'
 }
@@ -4032,7 +4121,7 @@ function Get-StagedSourceFindings {
   # carries no exemption beyond the detector's own 0/1 value rule. Source-comment
   # inventory findings are DOWNGRADED to ADVISORY (one tier softer than the .md
   # ERROR, per the comment-extraction precision note).
-  param([string]$Path, [string]$StagedText, [hashtable]$AddedSet, [string]$Ext)
+  param([string]$Path, [string]$StagedText, [hashtable]$AddedSet, [string]$Ext, [switch]$NoPowerShellParse)
   $EchoWindow = 2
   $lines = $StagedText -split "`n"
   # A List, not `$out +=`: one record per line of a whole source file, and array
@@ -4042,9 +4131,10 @@ function Get-StagedSourceFindings {
   $allRecs = $allRecsList.ToArray()
   # CULTURE-COMPARE reads every added PowerShell line, code included, so it runs ahead of
   # the count classes' added-comment gate below; .psm1 is outside the count classes'
-  # $script:SourceExtPattern and gets this rule alone.
+  # $script:SourceExtPattern and gets this rule alone. -NoPowerShellParse is the
+  # paired adapter's: see Get-CultureComparisonFindings for why it must not parse.
   $cultureFindings = @()
-  if ([Array]::IndexOf([string[]]@('ps1', 'psm1'), [string]$Ext) -ge 0) {
+  if (-not $NoPowerShellParse -and [Array]::IndexOf([string[]]@('ps1', 'psm1'), [string]$Ext) -ge 0) {
     foreach ($f in (Get-CultureComparisonFindings -Records $allRecs -AddedSet $AddedSet)) { $f['File'] = $Path; $cultureFindings += $f }
   }
   if ([string]::Equals($Ext, 'psm1', [System.StringComparison]::Ordinal)) { return $cultureFindings }
@@ -5400,7 +5490,10 @@ function Invoke-PairedAuthorLint {
   foreach ($record in $changes) {
     $path = [string]$record.Path
     $narrative = $path -match $script:NarrativeDocPattern
-    if ([string]::Equals($record.Status, 'D', [System.StringComparison]::Ordinal) -or (-not $narrative -and $path -notmatch $script:SourceExtPattern -and $path -notmatch $script:PowerShellExtPattern)) { continue }
+    # CULTURE-COMPARE does not run in this in-process adapter (Get-CultureComparisonFindings
+    # says why), so a .psm1 file has no class to run here and a .ps1 file, like the other
+    # comment-scanned extensions, is in scope only through its added comments.
+    if ([string]::Equals($record.Status, 'D', [System.StringComparison]::Ordinal) -or (-not $narrative -and $path -notmatch $script:SourceExtPattern)) { continue }
     $fileFindings = @(); $counted = $false; $skip = $false
     if (-not (Test-IsRegularBlobMode -Mode $record.Entry.Mode)) {
       $fileFindings += @{ Class = 'UNSUPPORTED-SYNTAX'; Tier = 'ADVISORY'; File = $path; Line = 1; Match = (Get-ObjectKindLabel -Mode $record.Entry.Mode); Hint = 'the staged object is not a regular file, so its bytes are not this file''s text and no line-oriented class can run over them -- check the entry by hand' }
@@ -5433,7 +5526,7 @@ function Invoke-PairedAuthorLint {
       } elseif ($addedSet.Count -gt 0) {
         $ext = [IO.Path]::GetExtension($path).TrimStart('.').ToLowerInvariant()
         $sourceInScope = $true
-        if (-not [string]::Equals($ext, 'rs', [System.StringComparison]::Ordinal) -and $path -notmatch $script:PowerShellExtPattern) {
+        if (-not [string]::Equals($ext, 'rs', [System.StringComparison]::Ordinal)) {
           $sourceLines = @($blobRead.Text -split "`n")
           $sourceRecords = New-Object 'System.Collections.Generic.List[object]'
           for ($j = 0; $j -lt $sourceLines.Count; $j++) { $sourceRecords.Add(@{ Line = $j + 1; Text = $sourceLines[$j] }) }
@@ -5444,7 +5537,7 @@ function Invoke-PairedAuthorLint {
         }
         if ($sourceInScope) {
           $counted = $true
-          $fileFindings += @(Get-StagedSourceFindings -Path $path -StagedText $blobRead.Text -AddedSet $addedSet -Ext $ext)
+          $fileFindings += @(Get-StagedSourceFindings -Path $path -StagedText $blobRead.Text -AddedSet $addedSet -Ext $ext -NoPowerShellParse)
         }
       }
     }
@@ -6161,3 +6254,13 @@ if ($OutPath) {
 # the still-running AI gate" (1, or any other unexpected exit).
 $errorCount = @($allFindings | Where-Object { [string]::Equals($_.Tier, 'ERROR', [System.StringComparison]::Ordinal) }).Count
 if ($errorCount -gt 0) { exit 3 } else { exit 0 }
+} finally {
+  if ($null -ne $crgSavedConsoleInputEncoding) {
+    try { [Console]::InputEncoding = $crgSavedConsoleInputEncoding }
+    catch { Write-Warning "author-lint.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+  }
+  if ($null -ne $crgSavedConsoleOutputEncoding) {
+    try { [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding }
+    catch { Write-Warning "author-lint.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+  }
+}

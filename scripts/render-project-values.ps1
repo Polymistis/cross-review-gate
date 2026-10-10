@@ -16,6 +16,37 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
 # Native process-environment enumeration is required because managed maps can
 # collapse case-distinct Windows names before a prohibited Git selector is seen.
 function Initialize-CrgRendererEnvironmentNative {
@@ -100,7 +131,7 @@ function ConvertFrom-CrgRawEnvironmentEntry {
     throw [System.InvalidOperationException]::new('raw environment entries must be non-empty and NUL-free')
   }
   $startsWithEquals = $Entry.StartsWith('=', [System.StringComparison]::Ordinal)
-  # Ordinal: string IndexOf, -ceq/-cne and -cin compare by culture and ignore characters such as U+00AD.
+  # [char] overloads: IndexOf(string) compares by culture.
   $separator = if ($startsWithEquals) { $Entry.IndexOf([char]'=', 1) } else { $Entry.IndexOf([char]'=') }
   if (($startsWithEquals -and $separator -le 1) -or (-not $startsWithEquals -and $separator -le 0)) {
     throw [System.InvalidOperationException]::new('raw environment entry does not use name=value grammar')
@@ -1046,7 +1077,7 @@ function Invoke-CrgRendererGit {
 
   $priorInputEncoding = $null
   if ($null -ne $InputBytes -and $null -eq $psi.PSObject.Properties['StandardInputEncoding']) {
-    $priorInputEncoding = [Console]::InputEncoding
+    $priorInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
     [Console]::InputEncoding = $script:CrgUtf8NoBom
   } elseif ($null -ne $InputBytes) { $psi.StandardInputEncoding = $script:CrgUtf8NoBom }
   try { $process = [System.Diagnostics.Process]::Start($psi) }

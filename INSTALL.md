@@ -1083,10 +1083,16 @@ lines: the commit gate's task counts (`review-feedback: open review tasks in
 TASKS.md: QUALITY=<q> NOTE=<n>`) and a `review-feedback WARN:` line for each
 feedback step left undone (tasks not added and why, a recovery copy or
 `.partial` file left, a findings file not written, findings files skipped,
-carried findings or QUALITY follow-ups unavailable), so a passing review
-never hides them. The warnings are gathered from every review invocation
+carried findings or QUALITY follow-ups unavailable), plus a `review result:
+housekeeping WARN:` line for each piece of upkeep skipped or left half done
+(the review-log age-prune skipped or limited, `CROSS_REVIEW_PRUNE_TOOL`
+unusable, prune batches failed, a follow-up index lock left behind), so a
+passing review never hides them. The warnings are gathered from every review invocation
 the gate launched, at most 32 shown and the rest counted, and gathering them
-never fails a passed gate.
+never fails a passed gate. The follow-up promotion that the commit and merge
+gates run themselves is not a review invocation: its warnings, plain and
+`housekeeping WARN:` alike, print directly, without the `review result:`
+prefix.
 
 ## Legacy-index seal (capture doctrine v6) — REQUIRED before pruning resumes
 
@@ -1132,12 +1138,15 @@ guards (unresolved capture claims, doctrine-state checks) still apply, and
 a later edit to the legacy region makes the seal inert and the quarantine
 returns.
 
-The v6 verification also requires a SHA-256 utility on the pre-commit
-hook's PATH (`sha256sum`, shipped with Git for Windows, or `shasum`). On
-a host without one, staged follow-ups
-are DROPPED with a warning rather than appended unverified — permanently,
-not transiently — so treat the utility as a production dependency of
-the gate.
+Every writer of the index — the review wrappers, the merge gate and the
+pre-commit hook's promotion — is PowerShell (`Invoke-FollowupPromotion` in
+`scripts/review-common.ps1`) and reaches the index, its lock and the seal
+records only through the held logs folder Git names
+(`docs/capture-doctrine-v6.md` section 7). When Git cannot name that folder,
+or it cannot be held, the follow-up records are dropped with a warning and
+the prune stays off; nothing is written under the current folder. A lock
+left by a crashed writer (`logs/review-followups.md.lock`) keeps appends and
+the prune off, reported on every run, until it is removed by hand.
 
 ## Step 11 — generate a trend report (after some review history exists)
 

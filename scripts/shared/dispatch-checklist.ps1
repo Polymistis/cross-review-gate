@@ -133,8 +133,12 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 # MOVEFILE_WRITE_THROUGH is the canonical Windows atomic-replace on the same
 # volume; it returns $false (not throws) on failure -- including a ReadOnly
 # destination -- so the caller can fail loud and leave the prior artifact intact.
-if (-not ('DispatchChecklist.Native' -as [type])) {
-  Add-Type -Namespace 'DispatchChecklist' -Name 'Native' -MemberDefinition @'
+# The type name is VERSIONED: a type name, once loaded, can never be redefined
+# in a PowerShell process, so an unversioned guard would accept an older
+# copy's definition whenever two versions run in one process. A new method set
+# gets a new suffix.
+if (-not ('DispatchChecklist.NativeV1' -as [type])) {
+  Add-Type -Namespace 'DispatchChecklist' -Name 'NativeV1' -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
 public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);
 '@
@@ -283,6 +287,59 @@ $script:CategoryCountMax = 10000
 # old code reused the 10000 category ceiling) would validate a shape the producer
 # cannot make as trustworthy evidence. (Codex BLOCKER.)
 $script:ReviewPassMax = 10
+
+# A line folded so that every spelling a reader could take for a
+# verdict-structure name (VERDICT, a severity prefix, a header name, the
+# fail-closed banner) reads as that name in every culture. A culture `(?i)`
+# match does not do this: under tr-TR it does not fold ASCII `i` onto `I`, and
+# the invariant culture folds neither U+212A nor U+0130 (both checked
+# 2026-10-10). Compatibility decomposition turns full-width forms and U+212A
+# into ASCII and splits U+0130 into I plus a combining dot. After it, only
+# printable ASCII, tab, LF and CR survive, upper-cased: dash punctuation
+# reads as `-`, U+0131 reads as `I` (invariant upper-casing keeps it), and
+# every other character -- ASCII control characters such as U+0000 and every
+# other non-ASCII character -- is dropped. Space, tab, LF and CR are kept,
+# including the spaces decomposition maps to U+0020 (U+00A0, U+2009), so a
+# name split by one stays split, as it reads; other whitespace (U+0085,
+# U+1680, U+2028, U+2029) is non-ASCII after decomposition, so it is dropped
+# and joins what it separated. Letters of other scripts that merely look
+# Latin (Cyrillic А) have no such mapping and are dropped like any other.
+# Callers only widen what they refuse with the fold; acceptance stays exact.
+# $null means the line could not be normalized (an unpaired surrogate) and
+# must be refused.
+# The WHOLE line is folded. Folding only a bounded head was tried and dropped
+# (staged review, 2026-10-10): padding before the colon (`BLOCKER`, a hundred
+# spaces, `:`) or before a header name pushed the delimiter past the cut, and
+# the line escaped recognition. Dropping only nonspacing marks and format
+# characters was also tried and dropped (merge review, 2026-10-10): a
+# per-UTF-16-unit loop classified the halves of U+E0100 as surrogates and kept
+# them, and invisible characters of other categories (the Hangul fillers are
+# letters; unassigned code points) pass any category list. Characters are
+# classified whole, a surrogate pair at once, through CharUnicodeInfo, not
+# regex `\p{...}` classes: the regex engine's tables put U+00AD under dash
+# punctuation, not format, so a regex-based fold read `BLOC<U+00AD>KER:` as
+# `BLOC-KER:` and missed it (checked 2026-10-10).
+# scripts/review-common.ps1 and the log readers
+# (scripts/shared/analyze-blocker-trends.ps1, dispatch-checklist.ps1,
+# worker-audit.ps1) carry byte-identical copies of this function.
+function ConvertTo-CrgStructureFold {
+  param([string]$Line)
+  if ($Line -cnotmatch '[^\x09\x0A\x0D\x20-\x7E]') { return $Line.ToUpperInvariant() }
+  try { $decomposed = $Line.Normalize([System.Text.NormalizationForm]::FormKD) } catch { return $null }
+  $fold = New-Object System.Text.StringBuilder ($decomposed.Length)
+  for ($i = 0; $i -lt $decomposed.Length; $i++) {
+    $c = $decomposed[$i]
+    $code = [int]$c
+    if ($code -lt 0x80) {
+      if (($code -ge 0x20 -and $code -lt 0x7F) -or $code -eq 9 -or $code -eq 10 -or $code -eq 13) { [void]$fold.Append([char]::ToUpperInvariant($c)) }
+      continue
+    }
+    if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($decomposed, $i) -eq [System.Globalization.UnicodeCategory]::DashPunctuation) { [void]$fold.Append('-') }
+    elseif ($code -eq 0x131) { [void]$fold.Append('I') }
+    if ([char]::IsHighSurrogate($c) -and $i + 1 -lt $decomposed.Length -and [char]::IsLowSurrogate($decomposed[$i + 1])) { $i++ }
+  }
+  return $fold.ToString()
+}
 
 # Classify a single category-count tail the SAME WAY the wrapper's category
 # regex matches it: the wrapper accepts ONLY `none` or a bounded digit run
@@ -601,11 +658,11 @@ function Read-VerdictArtifactText {
 #
 # IsCleanEvidence is a SUPERSET of the wrapper's own malformed-output contract
 # (`Get-VerdictExitCode` in scripts/review-common.ps1): it rejects everything the wrapper
-# would fail closed on (exit 3) AND additionally rejects over/underfilled
-# category row blocks, malformed category tails, and wrong-case severity prefixes
-# (which the wrapper does not inspect but which would misparse here or hide a real
-# finding -- see Test-VerdictBlock's row-balance note and the $hasInvalidCount /
-# $hasWrongCaseSeverity scans). So this generator
+# would fail closed on (exit 3), including non-canonical severity prefixes (the
+# $hasWrongCaseSeverity scan), AND additionally rejects over/underfilled
+# category row blocks and malformed category tails outside any review-pass block
+# (which would misparse here -- see Test-VerdictBlock's row-balance note and the
+# $hasInvalidCount scan). So this generator
 # never accepts a wrapper-rejected verdict, and may reject a few well-formed-to-
 # the-wrapper-but-row-malformed ones on purpose. Because the artifact
 # is a per-pass CONCATENATION, the file is split into PASS BLOCKS on the
@@ -669,10 +726,9 @@ $script:CatNamesAll = @('PLAN-DRIFT','SILENT-FAILURE','TOMBSTONE-OR-SHIM','CROSS
 function Test-VerdictBlock {
   param([string]$Block)
 
-  # Case-INSENSITIVE VERDICT (mirroring the wrappers' `-match '^VERDICT:'` + case-
-  # insensitive word compare): `verdict: clean` is a wrapper-accepted verdict, so
-  # this parser must not quarantine it. Severity/category regexes stay case-SENSITIVE.
-  $verdictWordRe = [regex]'(?im)^VERDICT:\s*(?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
+  # The VERDICT word is exact, as the wrappers compare the line, less trailing
+  # whitespace, ordinally (`verdict: clean` is wrapper-rejected). Severity/category regexes are exact too.
+  $verdictWordRe = [regex]'(?m)^VERDICT: (?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
   $catExactRe = [regex]'(?m)^(?<cat>PLAN-DRIFT|SILENT-FAILURE|TOMBSTONE-OR-SHIM|CROSS-CRATE-CONTRACT|LOADER-OR-ASSET-EDGE|CONVENTION-ADHERENCE|TEST-QUALITY|DOC-VS-CODE-DRIFT):[^\S\r\n]*(?<rest>.*)$'
   # Severity-prefix counting MIRRORS Get-VerdictExitCode EXACTLY
   # (it counts `(?m)^BLOCKER:`, `^QUALITY:`, `^NON-BLOCKER:`, `^NOTE:` with NO
@@ -687,9 +743,11 @@ function Test-VerdictBlock {
   $legacyNbPrefixRe = [regex]'(?m)^NON-BLOCKER:'
   $notePrefixRe = [regex]'(?m)^NOTE:'
 
-  # Exactly one `^VERDICT:` line (mirrors the wrapper's `^VERDICT:` capture +
-  # its 0-or->1 rejection). The WORD validity is handled by the coherence rule.
-  $verdictLines = @([regex]::Matches($Block, '(?im)^VERDICT:'))
+  # Exactly one VERDICT line in any spelling (mirrors the wrapper's capture
+  # through ConvertTo-CrgStructureFold + its 0-or->1 rejection; a line that
+  # cannot be normalized counts). The WORD validity is handled by the
+  # coherence rule.
+  $verdictLines = @($Block -split "`n" | Where-Object { $verdictFold = ConvertTo-CrgStructureFold -Line $_; $null -eq $verdictFold -or $verdictFold -cmatch '\AVERDICT\s*:' })
   if ($verdictLines.Count -ne 1) { return $false }
   $verdictWord = $null
   $vw = $verdictWordRe.Match($Block)
@@ -749,29 +807,34 @@ function Test-VerdictBlock {
   # Coherence (wrapper precedence): BLOCKER present -> valid (any word); else
   # QUALITY/NON-BLOCKER/NOTE -> word must be NON-BLOCKING; else zero findings -> word CLEAN.
   if ($blockerN -ge 1) { return $true }
-  if ($nbLikeN -ge 1) { return [string]::Equals($verdictWord, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase) }
-  return [string]::Equals($verdictWord, 'CLEAN', [System.StringComparison]::OrdinalIgnoreCase)
+  if ($nbLikeN -ge 1) { return [string]::Equals($verdictWord, 'NON-BLOCKING', [System.StringComparison]::Ordinal) }
+  return [string]::Equals($verdictWord, 'CLEAN', [System.StringComparison]::Ordinal)
 }
 
 # ---------------------------------------------------------------------------
 function Get-VerdictStructure {
   param([string]$Content)
-  $verdictRe = [regex]'(?im)^VERDICT:\s*(?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
+  $verdictRe = [regex]'(?m)^VERDICT: (?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
   # Wrapper-exact severity-prefix form (NO content requirement) so an empty
   # `BLOCKER:` line is recognized as a finding signal, matching auto-review.ps1.
   # (Class-sweep with Test-VerdictBlock, Codex BLOCKER.)
   $sevRe     = [regex]'(?m)^(BLOCKER|QUALITY|NON-BLOCKER|NOTE):'
   $catNames  = $script:CatNamesAll
 
-  # ANY `^VERDICT:` line (presence), mirroring the wrapper's case-INSENSITIVE
-  # `-match '^VERDICT:'` capture (so `verdict: clean` is detected, not quarantined).
-  $anyVerdictRe = [regex]'(?im)^VERDICT:'
-  $hasVerdict = $anyVerdictRe.IsMatch($Content)
+  # Loose line recognition goes through ConvertTo-CrgStructureFold, never a
+  # culture `(?i)` match, which under tr-TR does not fold ASCII `i` onto `I`.
+  # A line that cannot be normalized makes the file untrustworthy
+  # ($hasWrongCaseSeverity below).
+  $structureLines = @($Content -split "`n")
+  $structureFolds = @(foreach ($structureLine in $structureLines) { ConvertTo-CrgStructureFold -Line $structureLine })
+  # ANY VERDICT line in any spelling (presence), mirroring the wrapper's
+  # capture; the exact word check above decides acceptance.
+  $hasVerdict = (@($structureFolds | Where-Object { $_ -cmatch '\AVERDICT\s*:' }).Count -gt 0)
   $verdictWords = @($verdictRe.Matches($Content) | ForEach-Object { $_.Groups['v'].Value })
-  $hasBlockedOrNb = @($verdictWords | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase) })
+  $hasBlockedOrNb = @($verdictWords | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::Ordinal) -or [string]::Equals([string]$_, 'NON-BLOCKING', [System.StringComparison]::Ordinal) })
 
   # Fail-closed banner is the AUTHORITATIVE fail-closed signal.
-  $hasFailClosed = $Content -match '(?m)^=====\s*GATE FAILED CLOSED\s*====='
+  $hasFailClosed = (@($structureFolds | Where-Object { $_ -cmatch '\A=====\s*GATE FAILED CLOSED\s*=====' }).Count -gt 0)
 
   # Complete category block: every one of the eight category lines is present
   # somewhere (a quick signal; per-block cardinality is enforced below).
@@ -857,7 +920,7 @@ function Get-VerdictStructure {
   foreach ($durLn in ($Content -split "`r?`n")) {
     if ($durLeading -and [string]::IsNullOrWhiteSpace($durLn)) { $durLeading = $false; continue }
     if ($durLeading) {
-      if ($durLn -match '^\s*REVIEW-DURATION-SECS\b') {
+      if ((ConvertTo-CrgStructureFold -Line $durLn) -cmatch '\A\s*REVIEW-DURATION-SECS\b') {
         if ($durLn -cnotmatch '^REVIEW-DURATION-SECS: (0|[1-9][0-9]*)$') { $allBlocksValid = $false; break }
         $durStamps++
       }
@@ -946,21 +1009,19 @@ function Get-VerdictStructure {
     if ((Get-CategoryTailKind -Tail $m.Groups['rest'].Value).Kind -eq 'invalid') { $hasInvalidCount = $true; break }
   }
 
-  # STRICTER-than-wrapper local policy (parity with analyze-blocker-trends.ps1's
-  # Get-VerdictSuspectReason): reject a WRONG-CASE severity prefix ANYWHERE. A
-  # column-0 line like `blocker:` / `Quality:` matches a severity NAME case-
-  # insensitively but NOT the exact-case `^(BLOCKER|QUALITY|NON-BLOCKER|NOTE):`
-  # that $sevRe (and the wrapper) count with, so it is INVISIBLE to finding-
-  # counting -- a real finding hidden in the wrong case would leave a `VERDICT:
-  # CLEAN` verdict falsely clean. Both log-consumers (this checklist AND the trend
-  # analyzer) must reject it, or they disagree on which verdict files are
-  # trustworthy evidence.
+  # Wrapper parity (Get-VerdictExitCode refuses the same lines, as does
+  # analyze-blocker-trends.ps1's Get-VerdictSuspectReason): reject a near-miss
+  # severity prefix ANYWHERE. A column-0 line like `blocker:` / `Quality:` /
+  # `NOTE :` folds to a severity NAME but is NOT the exact
+  # `^(BLOCKER|QUALITY|NON-BLOCKER|NOTE):` that $sevRe counts with, so it is
+  # INVISIBLE to finding-counting -- a real finding hidden that way would leave a
+  # `VERDICT: CLEAN` verdict falsely clean. A line that cannot be normalized
+  # cannot be cleared of that and is refused with them.
   $hasWrongCaseSeverity = $false
-  foreach ($sm in ([regex]'(?im)^(?<sev>BLOCKER|QUALITY|NON-BLOCKER|NOTE):').Matches($Content)) {
-    $sev = $sm.Groups['sev'].Value
-    # Exact names, not "equals its upper case": (?i) also matches U+212A
-    # (Kelvin sign) for K, which ToUpperInvariant leaves as it is.
-    if ($sev -cnotmatch '\A(?:BLOCKER|QUALITY|NON-BLOCKER|NOTE)\z') { $hasWrongCaseSeverity = $true; break }
+  for ($i = 0; $i -lt $structureLines.Count; $i++) {
+    if ($null -eq $structureFolds[$i]) { $hasWrongCaseSeverity = $true; break }
+    $sm = [regex]::Match($structureFolds[$i], '\A(BLOCKER|QUALITY|NON-BLOCKER|NOTE)\s*:')
+    if ($sm.Success -and -not $structureLines[$i].StartsWith("$($sm.Groups[1].Value):", [System.StringComparison]::Ordinal)) { $hasWrongCaseSeverity = $true; break }
   }
 
   $isClean = $hasVerdict -and (-not $hasFailClosed) -and $allCats -and $allBlocksValid -and (-not $hasInvalidCount) -and (-not $hasWrongCaseSeverity)
@@ -1201,7 +1262,7 @@ function Write-Artifact {
     # (MoveFileEx wants absolute paths).
     $tmpFull = [System.IO.Path]::GetFullPath($tmp)
     $outFull = [System.IO.Path]::GetFullPath($outAbs)
-    $moved = [DispatchChecklist.Native]::MoveFileEx($tmpFull, $outFull, 0x9)
+    $moved = [DispatchChecklist.NativeV1]::MoveFileEx($tmpFull, $outFull, 0x9)
     if (-not $moved) {
       $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
       throw "MoveFileEx failed (Win32 error $err) replacing '$outFull'"

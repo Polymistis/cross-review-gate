@@ -106,6 +106,76 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
+# Git prints paths and reference names in UTF-8, unquoted, and Windows
+# PowerShell decodes native output with its cached [Console]::OutputEncoding,
+# so a capture whose output is such an identifier (a path from rev-parse or
+# core.hooksPath, a reference from symbolic-ref) goes through this helper,
+# which sets that encoding, and with it the console's output code page, to
+# UTF-8 for the one call and then puts back the page the console had. Other captures print hashes or ASCII keywords, are
+# read only for their exit code or emptiness, or list paths that are only
+# compared with the gate's fixed ASCII paths, which a misdecoded non-ASCII
+# name cannot equal. The code page belongs to the console window bootstrap
+# shares with the invoking shell, and a caller's catch must not turn an
+# encoding failure into an ordinary probe failure, so a read, switch or
+# restore that fails ends the run (exit 1) with a message written through the
+# PowerShell host rather than the .NET console stream, which bypasses the
+# host. Tried and dropped (staged review, 2026-10-10): setting the code pages
+# for the whole run with a PowerShell.Exiting restore (it runs only when the
+# engine exits and loses its failures in the event job); wrapping the whole
+# script in a dot-sourced block whose finally restores (each top-level error
+# then printed the entire script as its position).
+function Invoke-CrgGitUtf8 {
+  param([string[]]$GitArgs, [switch]$MergeError)
+  try {
+    $prior = Get-CrgConsoleRestoreEncoding
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+  }
+  catch {
+    $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not read the console output code page or switch it to UTF-8 to read Git's output ($($_.Exception.Message)). The run stops here.")
+    exit 1
+  }
+  try {
+    if ($MergeError) { & git @GitArgs 2>&1 } else { & git @GitArgs 2>$null }
+  } finally {
+    try { [Console]::OutputEncoding = $prior }
+    catch {
+      $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not restore the console output code page after a Git call ($($_.Exception.Message)); run chcp to reset it. The run stops here.")
+      exit 1
+    }
+  }
+}
+
 # Live process state must come from the native Windows block. Managed
 # environment dictionaries can collapse case-distinct names under PowerShell
 # Core, while native Git consumes the raw ordered block.
@@ -207,7 +277,7 @@ function ConvertFrom-CrgRawEnvironmentEntry {
   if ([string]::IsNullOrEmpty($Entry) -or $Entry.IndexOf([char]0) -ge 0) {
     throw [System.InvalidOperationException]::new('raw environment entries must be non-empty and NUL-free')
   }
-  # Ordinal: string IndexOf, -ceq/-cne and -in compare by culture and ignore characters such as U+00AD.
+  # [char] overloads: IndexOf(string) compares by culture.
   $separator = if ($Entry.StartsWith('=', [System.StringComparison]::Ordinal)) {
     $Entry.IndexOf([char]'=', 1)
   } else {
@@ -590,7 +660,7 @@ function Get-CrgGitCommonDir {
   # try/catch so the $null contract holds under a caller's EAP=Stop:
   # the captured git stderr line would otherwise become a terminating
   # error instead of the $null the callers diagnose.
-  try { $raw = (& git -C $RepoRoot rev-parse --git-common-dir 2>&1) } catch { return $null }
+  try { $raw = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('-C', $RepoRoot, 'rev-parse', '--git-common-dir')) } catch { return $null }
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$raw")) { return $null }
   $p = "$raw".Trim()
   if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $RepoRoot $p }
@@ -603,7 +673,7 @@ function Get-CrgGitCommonDir {
 # worktree's baseline.
 function Get-CrgGitDir {
   param([string]$RepoRoot)
-  try { $raw = (& git -C $RepoRoot rev-parse --absolute-git-dir 2>&1) } catch { return $null }
+  try { $raw = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('-C', $RepoRoot, 'rev-parse', '--absolute-git-dir')) } catch { return $null }
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$raw")) { return $null }
   return "$raw".Trim()
 }
@@ -992,7 +1062,7 @@ function Get-CrgHeadPathBaseline {
     return [pscustomobject]@{ State = 'error'; Mode = $null; Oid = $null; Head = ''; Reason = 'HEAD commit probe threw' }
   }
   if ($LASTEXITCODE -ne 0) {
-    try { $crgHbRef = (& git -C $Repo symbolic-ref -q HEAD 2>$null) } catch {
+    try { $crgHbRef = (Invoke-CrgGitUtf8 -GitArgs @('-C', $Repo, 'symbolic-ref', '-q', 'HEAD')) } catch {
       return [pscustomobject]@{ State = 'error'; Mode = $null; Oid = $null; Head = ''; Reason = 'HEAD symbolic-ref probe threw' }
     }
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$crgHbRef")) {
@@ -1330,7 +1400,7 @@ function Get-CrgRetiredProjectModeHeadState {
     return Get-CrgRetiredProjectModeCommitSnapshot -Repo $Repo -Commit "$($crgPmHead[0])".Trim()
   }
   if ($LASTEXITCODE -ne 0) {
-    try { $crgPmRef = (& git -C $Repo symbolic-ref -q HEAD 2>$null) } catch {
+    try { $crgPmRef = (Invoke-CrgGitUtf8 -GitArgs @('-C', $Repo, 'symbolic-ref', '-q', 'HEAD')) } catch {
       return [pscustomobject]@{ State = 'error'; Reason = 'git symbolic-ref HEAD threw after HEAD failed to resolve'; Head = ''; Identity = '' }
     }
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$crgPmRef")) {
@@ -1518,7 +1588,7 @@ function Invoke-CrgIsolatedGitProcess {
     # Console.InputEncoding when its StreamWriter is created, so select a
     # no-preamble encoding only for that construction and restore it before
     # any Git input is written.
-    $ipPriorConsoleInputEncoding = [Console]::InputEncoding
+    $ipPriorConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
     [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
   }
   try {
@@ -5297,7 +5367,7 @@ function Get-CrgDispatcherGuardHold {
   param([string]$RepoRoot)
   $capOwner = $null
   try {
-    $capHooksRel = (& git -C $RepoRoot rev-parse --git-path hooks/pre-commit 2>$null)
+    $capHooksRel = (Invoke-CrgGitUtf8 -GitArgs @('-C', $RepoRoot, 'rev-parse', '--git-path', 'hooks/pre-commit'))
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($capHooksRel)) { return @{ Ok = $false; Handle = $null } }
     # --git-path is repo-relative in a plain repo; anchor it at the
     # repo root, never the process CWD.
@@ -5786,7 +5856,7 @@ function Convert-CrgVersionBytes {
 function Get-CrgPackageSourceCommit {
   param([string]$Root)
   try {
-    $srcTop = (& git -C $Root rev-parse --show-toplevel 2>$null)
+    $srcTop = (Invoke-CrgGitUtf8 -GitArgs @('-C', $Root, 'rev-parse', '--show-toplevel'))
     if ($LASTEXITCODE -ne 0) { return 'unknown' }
   } catch { return 'unknown' }
   $srcTopNorm = ''
@@ -7964,7 +8034,7 @@ if ($LASTEXITCODE -ne 0 -or -not [string]::Equals("$gitCheck".Trim(), 'true', [S
 # install followed by every-commit failure is the worst outcome;
 # normalize so the file copies land in the same tree the dispatcher
 # will look in.
-$gitTopLevel = & git -C $targetRepoAbs rev-parse --show-toplevel 2>&1
+$gitTopLevel = Invoke-CrgGitUtf8 -MergeError -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--show-toplevel')
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitTopLevel)) {
   Write-Error "bootstrap.ps1: 'git rev-parse --show-toplevel' failed inside '$targetRepoAbs'."
   exit 1
@@ -8220,7 +8290,7 @@ $crgGitEnvironmentBound = $true
 [Environment]::SetEnvironmentVariable('GIT_DIR', $crgGitDir, 'Process')
 [Environment]::SetEnvironmentVariable('GIT_WORK_TREE', $targetRepoAbs, 'Process')
 [Environment]::SetEnvironmentVariable('GIT_COMMON_DIR', $crgCommonDir, 'Process')
-$crgPinnedTop = (& git -C $targetRepoAbs rev-parse --show-toplevel 2>$null)
+$crgPinnedTop = (Invoke-CrgGitUtf8 -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--show-toplevel'))
 $crgPinnedTopExit = $LASTEXITCODE
 $crgPinnedGitDir = Get-CrgGitDir -RepoRoot $targetRepoAbs
 $crgPinnedCommonDir = Get-CrgGitCommonDir -RepoRoot $targetRepoAbs
@@ -8236,7 +8306,7 @@ if ($crgPinnedTopExit -ne 0 -or [string]::IsNullOrWhiteSpace("$crgPinnedTop") -o
   exit 1
 }
 $crgRetiredPmHead = $crgPinnedPmHead
-$crgHooksOverride = (& git -C $targetRepoAbs config --get core.hooksPath 2>$null)
+$crgHooksOverride = (Invoke-CrgGitUtf8 -GitArgs @('-C', $targetRepoAbs, 'config', '--get', 'core.hooksPath'))
 $crgHooksOverrideExit = $LASTEXITCODE
 $crgHooksOverrideClass = Resolve-HooksPathGuard -ExitCode $crgHooksOverrideExit
 if ($crgHooksOverrideClass -ceq 'abort-set') {
@@ -9216,7 +9286,7 @@ if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison
 $crgExcludeMutated = $null
 if (-not $DispatcherOnly) {
   $crgCustExcl = $null
-  try { $crgCustExcl = ("$(& git -C $targetRepoAbs rev-parse --git-path info/exclude 2>$null)").Trim() } catch { $crgCustExcl = $null }
+  try { $crgCustExcl = ("$(Invoke-CrgGitUtf8 -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--git-path', 'info/exclude'))").Trim() } catch { $crgCustExcl = $null }
   if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($crgCustExcl)) {
     if (-not [System.IO.Path]::IsPathRooted($crgCustExcl)) { $crgCustExcl = Join-Path $targetRepoAbs $crgCustExcl }
     $crgCustExclDir = Split-Path -Parent $crgCustExcl
@@ -10572,7 +10642,7 @@ Write-Host ""
 # transition publication; every exit below reaches the shared finally.
 Push-Location -LiteralPath $targetRepoAbs
 try {
-  $existingHooksPath = (& git config --get core.hooksPath 2>&1)
+  $existingHooksPath = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('config', '--get', 'core.hooksPath'))
   $hooksPathExit = $LASTEXITCODE
   # Revalidate at the mutation boundary. A configured hooks path is never
   # rewritten by bootstrap: Git's config writer cannot participate in the
@@ -10587,7 +10657,7 @@ try {
   # Resolve the actual hooks dir: `git rev-parse --git-path hooks/pre-commit`
   # handles regular repos, worktrees (where .git is a file, not a dir),
   # and submodules uniformly.
-  $hooksPathRel = (& git rev-parse --git-path hooks/pre-commit 2>&1)
+  $hooksPathRel = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('rev-parse', '--git-path', 'hooks/pre-commit'))
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($hooksPathRel)) {
     Write-Error "bootstrap.ps1: 'git rev-parse --git-path hooks/pre-commit' failed."
     exit 1

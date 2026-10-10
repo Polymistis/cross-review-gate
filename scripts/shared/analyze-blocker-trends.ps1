@@ -70,7 +70,7 @@
 #     BOM / invalid-UTF-8 encoding) AND it fails the structure contract (no
 #     `VERDICT:` line at all, an unrecognized `=====` marker, an incomplete
 #     `REVIEW PASS n/N` sequence, a non-header leading fragment, a malformed
-#     REVIEW-DURATION-SECS stamp, a wrong-case severity prefix, a review-pass
+#     REVIEW-DURATION-SECS stamp, a near-miss severity prefix, a review-pass
 #     block with != 1 `VERDICT:` line, a review-pass block whose verdict word is
 #     incoherent with its findings, or a review-pass block with a malformed or
 #     missing eight-category block -- validated UNCONDITIONALLY, since this
@@ -201,8 +201,10 @@ if ($PSBoundParameters.ContainsKey('ReviewsDirCsv')) {
 # malformed provenance: never prose, never `legacy` (it would contaminate
 # the legacy bucket), never the first plausible value. `legacy` is reserved
 # for a region with NO header-shaped line at all (the wrappers predating
-# the header).
-$abCandidateRe = [regex]'(?i)^\s*(DIFF-SHA256|REVIEW-TREE-OID|REVIEW-BACKEND|REVIEW-EFFORT|REVIEW-SEVERITY-CONTRACT|REVIEW-DURATION-SECS)\b'
+# the header). A header-shaped line is recognized through
+# ConvertTo-CrgStructureFold, so its case and look-alike spellings are caught
+# in every culture; a line that cannot be normalized counts as header-shaped.
+$abCandidatePattern = '\A\s*(DIFF-SHA256|REVIEW-TREE-OID|REVIEW-BACKEND|REVIEW-EFFORT|REVIEW-SEVERITY-CONTRACT|REVIEW-DURATION-SECS)\b'
 $abEffortByBackend = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
 $abEffortByBackend['codex']  = '^REVIEW-EFFORT: (minimal|low|medium|high|xhigh|max|unknown)$'
 $abEffortByBackend['claude'] = '^REVIEW-EFFORT: n/a$'
@@ -214,7 +216,8 @@ function Get-ArtifactBackend {
   foreach ($abLine in $abLines) {
     if ($abLine.Length -eq 0) { break }
     $abRegion.Add($abLine)
-    if ($abCandidateRe.IsMatch($abLine)) { $abHeaderShaped = $true }
+    $abFold = ConvertTo-CrgStructureFold -Line $abLine
+    if ($null -eq $abFold -or $abFold -cmatch $abCandidatePattern) { $abHeaderShaped = $true }
   }
   if (-not $abHeaderShaped) { return @{ Backend = 'legacy'; Reason = $null } }
   $abBad = { param($abWhat) return @{ Backend = $null; Reason = "a header-bearing identity region that is not a producer header era ($abWhat) -- malformed provenance cannot be trusted (and is never legacy)" } }
@@ -728,6 +731,59 @@ function Get-FindingArchetype {
 # which verdicts are trustworthy evidence.
 $script:CategoryCountMax = 10000
 
+# A line folded so that every spelling a reader could take for a
+# verdict-structure name (VERDICT, a severity prefix, a header name, the
+# fail-closed banner) reads as that name in every culture. A culture `(?i)`
+# match does not do this: under tr-TR it does not fold ASCII `i` onto `I`, and
+# the invariant culture folds neither U+212A nor U+0130 (both checked
+# 2026-10-10). Compatibility decomposition turns full-width forms and U+212A
+# into ASCII and splits U+0130 into I plus a combining dot. After it, only
+# printable ASCII, tab, LF and CR survive, upper-cased: dash punctuation
+# reads as `-`, U+0131 reads as `I` (invariant upper-casing keeps it), and
+# every other character -- ASCII control characters such as U+0000 and every
+# other non-ASCII character -- is dropped. Space, tab, LF and CR are kept,
+# including the spaces decomposition maps to U+0020 (U+00A0, U+2009), so a
+# name split by one stays split, as it reads; other whitespace (U+0085,
+# U+1680, U+2028, U+2029) is non-ASCII after decomposition, so it is dropped
+# and joins what it separated. Letters of other scripts that merely look
+# Latin (Cyrillic А) have no such mapping and are dropped like any other.
+# Callers only widen what they refuse with the fold; acceptance stays exact.
+# $null means the line could not be normalized (an unpaired surrogate) and
+# must be refused.
+# The WHOLE line is folded. Folding only a bounded head was tried and dropped
+# (staged review, 2026-10-10): padding before the colon (`BLOCKER`, a hundred
+# spaces, `:`) or before a header name pushed the delimiter past the cut, and
+# the line escaped recognition. Dropping only nonspacing marks and format
+# characters was also tried and dropped (merge review, 2026-10-10): a
+# per-UTF-16-unit loop classified the halves of U+E0100 as surrogates and kept
+# them, and invisible characters of other categories (the Hangul fillers are
+# letters; unassigned code points) pass any category list. Characters are
+# classified whole, a surrogate pair at once, through CharUnicodeInfo, not
+# regex `\p{...}` classes: the regex engine's tables put U+00AD under dash
+# punctuation, not format, so a regex-based fold read `BLOC<U+00AD>KER:` as
+# `BLOC-KER:` and missed it (checked 2026-10-10).
+# scripts/review-common.ps1 and the log readers
+# (scripts/shared/analyze-blocker-trends.ps1, dispatch-checklist.ps1,
+# worker-audit.ps1) carry byte-identical copies of this function.
+function ConvertTo-CrgStructureFold {
+  param([string]$Line)
+  if ($Line -cnotmatch '[^\x09\x0A\x0D\x20-\x7E]') { return $Line.ToUpperInvariant() }
+  try { $decomposed = $Line.Normalize([System.Text.NormalizationForm]::FormKD) } catch { return $null }
+  $fold = New-Object System.Text.StringBuilder ($decomposed.Length)
+  for ($i = 0; $i -lt $decomposed.Length; $i++) {
+    $c = $decomposed[$i]
+    $code = [int]$c
+    if ($code -lt 0x80) {
+      if (($code -ge 0x20 -and $code -lt 0x7F) -or $code -eq 9 -or $code -eq 10 -or $code -eq 13) { [void]$fold.Append([char]::ToUpperInvariant($c)) }
+      continue
+    }
+    if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($decomposed, $i) -eq [System.Globalization.UnicodeCategory]::DashPunctuation) { [void]$fold.Append('-') }
+    elseif ($code -eq 0x131) { [void]$fold.Append('I') }
+    if ([char]::IsHighSurrogate($c) -and $i + 1 -lt $decomposed.Length -and [char]::IsLowSurrogate($decomposed[$i + 1])) { $i++ }
+  }
+  return $fold.ToString()
+}
+
 # Classify a category line's tail as none|count|invalid by the wrapper's
 # category value grammar. The log consumers must classify tails identically, or
 # they disagree on which verdict files are trustworthy evidence.
@@ -757,10 +813,10 @@ function Get-CategoryTailKind {
 # dropped into the trend report. This is the SUPERSET bar
 # dispatch-checklist (Get-VerdictStructure / Test-VerdictBlock) applies, not just
 # the wrapper's (Get-VerdictExitCode): it rejects everything the wrapper fails
-# closed on (exit 3, possibly banner-less) AND the STRICTER-than-wrapper shapes
-# dispatch-checklist rejects -- over/underfilled category ROW blocks, malformed
-# category TAILS (`+1`, `1.0`) outside any review-pass block, and WRONG-CASE
-# severity prefixes (`blocker:`) --
+# closed on (exit 3, possibly banner-less), including non-canonical severity
+# prefixes (`blocker:`), AND the STRICTER-than-wrapper shapes
+# dispatch-checklist rejects -- over/underfilled category ROW blocks and malformed
+# category TAILS (`+1`, `1.0`) outside any review-pass block --
 # because both scripts consume the same
 # verdict logs and must agree on which files are trustworthy evidence (a file one
 # rejects but the other counts would desync the corpus). $VerdictWordRe is the
@@ -771,35 +827,38 @@ function Get-CategoryTailKind {
 # ---------------------------------------------------------------------------
 function Get-VerdictSuspectReason {
   param([string]$Content, [regex]$VerdictWordRe)
-  # Case policy MIRRORS the wrappers (and dispatch-checklist), which is ASYMMETRIC:
-  #  - The VERDICT line + word and the GATE FAILED CLOSED banner are matched CASE-
-  #    INSENSITIVELY. The wrappers detect the verdict with `-match '^VERDICT:'` and
-  #    compare the word with case-insensitive `-ne` (Get-VerdictExitCode in
-  #    scripts/review-common.ps1), so `verdict: clean` is an ACCEPTED clean verdict --
-  #    quarantining it here would wrongly diverge from a wrapper-accepted log.
-  #  - SEVERITY prefixes and CATEGORY lines / `none` are matched CASE-SENSITIVELY
-  #    (the wrapper counts `^BLOCKER:` and `^<CAT>:` rows case-sensitively);
-  #    a WRONG-CASE severity prefix is quarantined by the scan below as a finding
-  #    the case-sensitive parser would silently under-count.
-  if ($Content -match '(?m)^=====\s*GATE FAILED CLOSED\s*=====') {
+  # Case policy MIRRORS the wrappers (and dispatch-checklist):
+  #  - Acceptance is exact. The verdict word, SEVERITY prefixes and CATEGORY
+  #    lines / `none` are matched case-sensitively, as Get-VerdictExitCode in
+  #    scripts/review-common.ps1 matches them, so `verdict: clean` is
+  #    wrapper-rejected evidence.
+  #  - Loose matches only widen what is refused, and they go through
+  #    ConvertTo-CrgStructureFold, never a culture `(?i)` match, which under
+  #    tr-TR does not fold ASCII `i` onto `I`: a VERDICT line in any spelling
+  #    counts toward the one-line requirement, as the wrapper counts it, and a
+  #    near-miss severity prefix is quarantined by the scan below.
+  $structureLines = @($Content -split "`n")
+  $structureFolds = @(foreach ($structureLine in $structureLines) { ConvertTo-CrgStructureFold -Line $structureLine })
+  for ($i = 0; $i -lt $structureLines.Count; $i++) {
+    if ($null -eq $structureFolds[$i]) { return 'a line could not be normalized for the verdict-structure checks -- untrustworthy evidence' }
+  }
+  if (@($structureFolds | Where-Object { $_ -cmatch '\A=====\s*GATE FAILED CLOSED\s*=====' }).Count -gt 0) {
     return 'GATE FAILED CLOSED banner (fail-closed evidence)'
   }
-  if ($Content -notmatch '(?m)^VERDICT:') {
+  if (@($structureFolds | Where-Object { $_ -cmatch '\AVERDICT\s*:' }).Count -eq 0) {
     return 'no VERDICT: line (truncated / missing verdict -- the wrapper and dispatch-checklist fail closed)'
   }
-  # Reject WRONG-CASE severity prefixes anywhere: a column-0 line like `blocker:` /
-  # `Quality:` matches a severity NAME case-insensitively but NOT the exact-case
+  # Reject NEAR-MISS severity prefixes anywhere: a column-0 line like `blocker:`
+  # / `Quality:` / `NOTE :` folds to a severity NAME but is NOT the exact
   # `^(BLOCKER|QUALITY|NON-BLOCKER|NOTE):` that the wrapper and this analyzer's
   # $severityRe count with, so it is INVISIBLE to finding-counting -- a real finding
-  # written (or corrupted) in the wrong case would leave a `VERDICT: CLEAN` verdict
+  # written (or corrupted) that way would leave a `VERDICT: CLEAN` verdict
   # falsely clean AND pollute the corpus with an uncounted finding. Fail closed on
   # any such line rather than trust a block the case-sensitive parser under-counts.
-  foreach ($sm in ([regex]'(?im)^(?<sev>BLOCKER|QUALITY|NON-BLOCKER|NOTE):').Matches($Content)) {
-    $sev = $sm.Groups['sev'].Value
-    # Exact names, not "equals its upper case": (?i) also matches U+212A
-    # (Kelvin sign) for K, which ToUpperInvariant leaves as it is.
-    if ($sev -cnotmatch '\A(?:BLOCKER|QUALITY|NON-BLOCKER|NOTE)\z') {
-      return "a severity-prefix line uses non-uppercase '$sev`:' -- the wrapper's case-sensitive parser under-counts it, so a real finding could hide under a falsely-clean verdict (untrustworthy)"
+  for ($i = 0; $i -lt $structureLines.Count; $i++) {
+    $sm = [regex]::Match($structureFolds[$i], '\A(BLOCKER|QUALITY|NON-BLOCKER|NOTE)\s*:')
+    if ($sm.Success -and -not $structureLines[$i].StartsWith("$($sm.Groups[1].Value):", [System.StringComparison]::Ordinal)) {
+      return "a severity-prefix line spells $($sm.Groups[1].Value) in a non-canonical form -- the wrapper refuses it, and an exact-name parser would under-count it, so a real finding could hide under a falsely-clean verdict (untrustworthy)"
     }
   }
   # Every `=====` marker must be a well-formed REVIEW PASS marker (the banner is
@@ -872,7 +931,7 @@ function Get-VerdictSuspectReason {
   foreach ($durLn in ($Content -split "`r?`n")) {
     if ($durLeading -and [string]::IsNullOrWhiteSpace($durLn)) { $durLeading = $false; continue }
     if ($durLeading) {
-      if ($durLn -match '^\s*REVIEW-DURATION-SECS\b') {
+      if ((ConvertTo-CrgStructureFold -Line $durLn) -cmatch '\A\s*REVIEW-DURATION-SECS\b') {
         if ($durLn -cnotmatch '^REVIEW-DURATION-SECS: (0|[1-9][0-9]*)$') {
           return 'a leading-region REVIEW-DURATION-SECS line violates its declared shape (exact-case name, one non-negative unpadded base-10 integer) -- malformed duration metadata, regardless of artifact shape'
         }
@@ -888,7 +947,6 @@ function Get-VerdictSuspectReason {
   if ($durStamps -gt 1) {
     return 'more than one REVIEW-DURATION-SECS stamp -- conflicting duration metadata is malformed evidence'
   }
-  $lineVerdictRe = [regex]'(?im)^VERDICT:[^\r\n]*'   # case-INSENSITIVE, mirroring the wrappers' `-match '^VERDICT:'`
   # Category-block validation is UNCONDITIONAL: every verdict-shaped artifact
   # counted here must carry the complete eight-category block, because the
   # wrapper rejects a categoryless verdict (exit 3). There is NO pre-category
@@ -919,7 +977,8 @@ function Get-VerdictSuspectReason {
       }
       continue
     }
-    $verdictLines = $lineVerdictRe.Matches($blk)
+    # Any spelling counts, as the wrapper counts it (ConvertTo-CrgStructureFold).
+    $verdictLines = @($blk -split "`n" | Where-Object { $verdictFold = ConvertTo-CrgStructureFold -Line $_; $null -eq $verdictFold -or $verdictFold -cmatch '\AVERDICT\s*:' })
     if ($verdictLines.Count -ne 1) {
       return "a review-pass block has $($verdictLines.Count) VERDICT: line(s) (exactly one required -- the wrapper and dispatch-checklist fail closed on zero or duplicate)"
     }
@@ -941,10 +1000,10 @@ function Get-VerdictSuspectReason {
       $vwm = $VerdictWordRe.Match($blk)
       if ($vwm.Success) { $vw = $vwm.Groups['v'].Value }
       if (($blk -cmatch '(?m)^QUALITY:') -or ($blk -cmatch '(?m)^NON-BLOCKER:') -or ($blk -cmatch '(?m)^NOTE:')) {
-        if (-not [string]::Equals($vw, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not [string]::Equals($vw, 'NON-BLOCKING', [System.StringComparison]::Ordinal)) {
           return 'a review-pass block has QUALITY/NON-BLOCKER/NOTE findings but its VERDICT is not NON-BLOCKING (wrapper-rejected incoherence)'
         }
-      } elseif (-not [string]::Equals($vw, 'CLEAN', [System.StringComparison]::OrdinalIgnoreCase)) {
+      } elseif (-not [string]::Equals($vw, 'CLEAN', [System.StringComparison]::Ordinal)) {
         return 'a review-pass block has zero findings but its VERDICT is not CLEAN (wrapper-rejected incoherence)'
       }
     }
@@ -1164,11 +1223,9 @@ $newestMtime = [DateTime]::MinValue
 # legacy NON-BLOCKER are parsed because the verdict log spans the rename;
 # the report buckets them separately so the rename is visible in trends.
 $severityRe = [regex]'(?m)^(?<sev>BLOCKER|QUALITY|NON-BLOCKER|NOTE):\s*(?<text>.*)$'
-# The VERDICT regex is case-INSENSITIVE (mirroring the wrappers' `-match '^VERDICT:'`
-# + case-insensitive word compare in Get-VerdictExitCode), while $severityRe above
-# stays case-SENSITIVE -- the wrapper counts `^BLOCKER:` etc. case-sensitively. This
-# asymmetry is the wrapper's; see Get-VerdictSuspectReason's case-policy note.
-$verdictLineRe = [regex]'(?im)^VERDICT:\s*(?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
+# The VERDICT regex is exact, as Get-VerdictExitCode compares the line, less
+# trailing whitespace, ordinally; see Get-VerdictSuspectReason's case-policy note.
+$verdictLineRe = [regex]'(?m)^VERDICT: (?<v>CLEAN|NON-BLOCKING|BLOCKED)\s*$'
 
 foreach ($src in $sources) {
   foreach ($file in $src.Files) {
@@ -1234,13 +1291,13 @@ foreach ($src in $sources) {
     # (2) UNEXPLAINED corruption: a file that fails the structure contract and is NOT a
     # recognized producer-shaped fail-closed run (either bannerless -- no VERDICT line,
     # an unknown marker, a truncated pass sequence, an incoherent verdict, a malformed
-    # category block, a malformed duration stamp, a wrong-case severity prefix -- OR
+    # category block, a malformed duration stamp, a near-miss severity prefix -- OR
     # carrying the banner but with an invalid header/diagnostic/suffix/framing that
     # Get-FailClosedBannerReason above rejected). It is not a self-declared failure, so
     # it cannot be trusted or silently dropped -- the abort below names EVERY offender
     # across ALL dirs before any report is written. Applies dispatch-checklist's
     # SUPERSET trustworthiness bar (everything the wrapper's Get-VerdictExitCode
-    # rejects PLUS row-balance / invalid-tail / wrong-case severity), so any verdict
+    # rejects PLUS row-balance / invalid-tail), so any verdict
     # EITHER log-consumer would reject cannot pollute the trends corpus.
     $suspectReason = Get-VerdictSuspectReason -Content $content -VerdictWordRe $verdictLineRe
     if ($null -ne $suspectReason) {
@@ -1265,9 +1322,9 @@ foreach ($src in $sources) {
     # test is CASE-SENSITIVE (-cmatch), matching the wrapper and the $severityRe
     # extraction below (a lowercase `blocker:` is not a finding to either).
     $vAll = @($verdictLineRe.Matches($content) | ForEach-Object { $_.Groups['v'].Value })
-    if (($content -cmatch '(?m)^BLOCKER:') -or (@($vAll | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0)) {
+    if (($content -cmatch '(?m)^BLOCKER:') -or (@($vAll | Where-Object { [string]::Equals([string]$_, 'BLOCKED', [System.StringComparison]::Ordinal) }).Count -gt 0)) {
       $vbucket = 'BLOCKED'
-    } elseif (@($vAll | Where-Object { [string]::Equals([string]$_, 'NON-BLOCKING', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
+    } elseif (@($vAll | Where-Object { [string]::Equals([string]$_, 'NON-BLOCKING', [System.StringComparison]::Ordinal) }).Count -gt 0) {
       $vbucket = 'NON-BLOCKING'
     } else {
       $vbucket = 'CLEAN'
@@ -1332,7 +1389,7 @@ if ($excludedFailClosed.Count -gt 0) {
 # (named above), not aborted; a bannered file the recognizer REJECTED lands here.
 # ---------------------------------------------------------------------------
 if ($suspectFiles.Count -gt 0) {
-  Write-Host "[trends] ERROR: $($suspectFiles.Count) scanned verdict file(s) are UNRECOGNIZED-malformed (fail the structure contract and are not a recognized fail-closed run -- e.g. no VERDICT line, an unknown marker, an incoherent verdict, a malformed duration stamp, a wrong-case severity prefix, a byte-order mark or invalid UTF-8 encoding, or a GATE FAILED CLOSED banner that does not match the wrapper's exact emission); refusing to write a report that would silently drop or miscount them:"
+  Write-Host "[trends] ERROR: $($suspectFiles.Count) scanned verdict file(s) are UNRECOGNIZED-malformed (fail the structure contract and are not a recognized fail-closed run -- e.g. no VERDICT line, an unknown marker, an incoherent verdict, a malformed duration stamp, a near-miss severity prefix, a byte-order mark or invalid UTF-8 encoding, or a GATE FAILED CLOSED banner that does not match the wrapper's exact emission); refusing to write a report that would silently drop or miscount them:"
   foreach ($s in $suspectFiles) { Write-Host "[trends]   - $s" }
   Write-Host "[trends]        Quarantine (move out of the scanned dir) or repair the file(s), then re-run."
   exit 1

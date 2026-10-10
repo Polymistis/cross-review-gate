@@ -235,704 +235,52 @@ fi
 unset _crg_gs_rc _crg_gs_state_rc
 
 
-# Retired project-mode authorization is inert. Git for Windows' sh keeps
-# environment names case-sensitive, while child PowerShell resolves them
-# case-insensitively. Remove every exported ASCII case variant without
-# evaluating any environment value, then verify the child environment is clean.
-crg_clear_retired_mode_env() {
-  _crg_rme_dump=$(env 2>/dev/null) || return 1
-  _crg_rme_names=$(printf '%s\n' "$_crg_rme_dump" | LC_ALL=C awk -F= '
-    tolower($1) == "cross_review_allow_mode_change" { print $1 }
-  ') || return 1
-  unset CROSS_REVIEW_ALLOW_MODE_CHANGE
-  for _crg_rme_name in $_crg_rme_names; do
-    unset "$_crg_rme_name" || return 1
+# Git for Windows' sh keeps environment names case-sensitive, while child
+# PowerShell resolves them case-insensitively, so an inherited case variant of
+# a name competes with the canonical one. Unsets the canonical names given as
+# arguments and every exported ASCII case variant of them, without evaluating
+# any environment value, then verifies the child environment holds none.
+# Arguments are identifiers; awk lowercases them itself, so the name set it
+# matches can never be emptied by a failed helper, and an empty argument list
+# is refused rather than certified clean.
+crg_clear_env_case_variants() {
+  [ "$#" -gt 0 ] || return 1
+  _crg_cev_want="$*"
+  for _crg_cev_name in "$@"; do
+    unset "$_crg_cev_name" || return 1
   done
-  _crg_rme_after=$(env 2>/dev/null) || return 1
-  _crg_rme_left=$(printf '%s\n' "$_crg_rme_after" | LC_ALL=C awk -F= '
-    tolower($1) == "cross_review_allow_mode_change" { print $1 }
+  _crg_cev_dump=$(env 2>/dev/null) || return 1
+  _crg_cev_names=$(printf '%s\n' "$_crg_cev_dump" | LC_ALL=C awk -F= -v want="$_crg_cev_want" '
+    BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) if (w[i] != "") set[tolower(w[i])] = 1 }
+    (tolower($1) in set) { print $1 }
   ') || return 1
-  [ -z "$_crg_rme_left" ] || return 1
-  unset _crg_rme_dump _crg_rme_names _crg_rme_name _crg_rme_after _crg_rme_left
+  for _crg_cev_name in $_crg_cev_names; do
+    unset "$_crg_cev_name" || return 1
+  done
+  _crg_cev_after=$(env 2>/dev/null) || return 1
+  _crg_cev_left=$(printf '%s\n' "$_crg_cev_after" | LC_ALL=C awk -F= -v want="$_crg_cev_want" '
+    BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) if (w[i] != "") set[tolower(w[i])] = 1 }
+    (tolower($1) in set) { print $1 }
+  ') || return 1
+  [ -z "$_crg_cev_left" ] || return 1
+  unset _crg_cev_want _crg_cev_dump _crg_cev_names _crg_cev_name _crg_cev_after _crg_cev_left
   return 0
 }
-if ! crg_clear_retired_mode_env; then
+
+# Retired project-mode authorization is inert: no case variant may reach a
+# child.
+if ! crg_clear_env_case_variants CROSS_REVIEW_ALLOW_MODE_CHANGE; then
   echo "[pre-commit] ERROR: could not clear every case variant of the retired project-mode authorization variable; refusing before child execution." >&2
   exit 1
 fi
 
-
-# The follow-up index's capture doctrine. Every writer must emit byte-identical
-# text so a reader sees one contract regardless of which gate wrote the file.
-CROSS_REVIEW_FOLLOWUP_DOCTRINE_VERSION=6
-# Exit 0 = the file already carries this writer's frame as the WINNING frame
-# under the monotonic rule (or a NEWER version governs, which an older frame
-# could not supersede); 1 = absent/stale/malformed (append); >=2 = unreadable,
-# an UNKNOWN state the caller must not guess at. Supersession is monotonic BY
-# VERSION -- the highest complete version wins wherever it sits, position only
-# breaking ties within one version -- so a complete older frame appended below a
-# newer one no longer forces a rewrite, and an unknown newer frame is left alone.
-# CROSS-WRITER APPEND LOCK. The atomicity unit for this index is the WHOLE
-# transaction -- header (when creating), doctrine frame (when migrating), and
-# every row of one promotion -- because a row's meaning depends on the block
-# header above it: the header carries the artifact LOCATOR that every row
-# beneath it is read against, so an interleave that separates rows from their
-# header leaves those rows pointing at another run's artifact or at nothing.
-# ATOMICITY COMES FROM THE LOCK, not from any single write: the transaction is
-# assembled in one buffer and streamed while the lock is held, which is what
-# keeps a concurrent worktree's hook from interleaving into the middle of it --
-# no `cat` or `printf` is atomic at any size. `mkdir` is the portable atomic
-# test-and-set (it fails when the directory exists on every filesystem this runs
-# on), so every writer of this index takes the SAME sidecar directory lock around
-# its append.
-# A lock nobody can release would disable appends forever, so acquisition writes
-# an owner marker naming the holder, and a lock that cannot be taken within the
-# retry budget DROPS this record with a WARN naming the lock, its marker and its
-# age. An operator clears crash residue; nothing reclaims it automatically.
-#
-# NO AUTOMATIC TAKEOVER. Aging a lock out and reclaiming it -- by delete, and
-# later by atomic rename-aside plus ownership tokens -- was built here and taken
-# back out: in portable sh every step is a PATH check (`test`, `mkdir`, `mv`),
-# and a path check reports what was true at some past instant, never what holds
-# during the write that follows. A holder that resumes mid-reclaim cannot be
-# fenced, so the reclaim could let two writers append at once -- the exact
-# interleaving this lock exists to prevent. Do not rebuild it on path checks. It
-# needs an OS-fenced primitive this hook does not have: an exclusive handle held
-# across the whole critical section, or a lease with a fencing token the
-# filesystem itself validates.
-
-# The marker names the holder for diagnostics, and the release compares it
-# byte-for-byte against the token this writer wrote. That catches a release whose
-# token DIFFERS from the standing marker -- another process, or this one from a
-# different second -- and stops exactly there. The token is a tag, a PID and a
-# WHOLE-SECOND stamp, so one process reacquiring inside a single second writes
-# byte-identical bytes and the comparison cannot separate those generations; a
-# caller that held a token across its own release-and-reacquire would defeat it,
-# which is why no caller here keeps one past the release it was acquired for.
-# It is not an authenticity check and cannot be one: the marker sits at a
-# workspace-readable path and its bytes are deterministic, so any process that
-# can read it can reproduce it.
-#
-# ONE READ, and every consumer works from its snapshot: nothing downstream may
-# open the marker a second time. Two reads of a path another process can rewrite
-# between them would let the rendering and the release decision disagree about
-# what was standing there.
-#
-# HEX, not raw text, because the snapshot has to survive command substitution --
-# which drops NUL bytes and every trailing newline. Those are exactly the bytes a
-# rendering must be able to announce and a comparison must be able to see.
-#
-# -L BEFORE -f, ON BOTH THE LOCK DIRECTORY AND THE MARKER: POSIX `-f` and `-d`
-# DEREFERENCE, so a link at either level passes them and the read lands outside
-# the lock. Classifying `owner` alone is not enough -- a link at `<index>.lock`
-# redirects resolution before `owner` is ever examined, and an external target
-# then looks perfectly regular.
-#
-# NO FALLIBLE STAGE HIDES BEHIND ANOTHER. A POSIX pipeline reports only its LAST
-# stage, so `head | od | tr` returns zero even when the read failed: a first
-# stage emitting the expected bytes and exiting nonzero still produced status 0
-# carrying the full hex, which would have authorized a release on a failed read.
-# So the file read is `od -N` reading the marker DIRECTLY, making the fallible
-# I/O the command whose status the substitution reports, and every transformation
-# after it lands in its own variable with its own check. What is left upstream of
-# a checked stage is only `printf` of a string already in memory, whose sole
-# failure mode is a write to a pipe whose reader has already died -- and that
-# reader is the stage being checked. `pipefail` would cover the shape generically
-# but is not portable across the shells this hook runs under, so nothing here
-# depends on it.
-#
-# The node refusal is NOT absolute: the tests and the read are separate calls, so
-# a node swapped between them is still read. Closing that needs a no-follow open
-# this shell has no portable way to perform; the gate narrows the pre-existing
-# window rather than removing it.
-#
-# Status: 2 = a node that must not be read, at EITHER level -- so something that
-# is not a directory standing where the lock belongs reports a refusal rather
-# than absence, which is also what the .NET readers report for that node. 3 = a
-# read or an encode this shell could not complete, INCLUDING a traversal that
-# could not prove absence: `test` answers false for a node it cannot reach
-# exactly as it does for one that is not there, so an unsearchable parent
-# reports 3 rather than an absence the release would go on to word as another
-# writer's ownership. 1 = nothing there, across a parent this reader could
-# search. 0 = a snapshot on stdout, empty only for a zero-byte marker.
-#
-# ONE constant for the bound, read here and enforced by the comparison in
-# crg_followup_lock_marker_matches. Declaring the cap twice is how a reader and
-# its length guard drift apart, and a guard that disagrees with the read it
-# guards admits exactly the prefix it exists to reject.
-CROSS_REVIEW_FOLLOWUP_MARKER_CAP=512
-
-# Bare lowercase hex from a raw `od -tx1` dump, WITHOUT a pipeline. A pipeline
-# assignment reports only its LAST command, so a producer interrupted mid-write
-# hands the consumer a prefix while the consumer still exits 0 -- and a prefix
-# that reaches the expected token's length compares EQUAL, authorizing the
-# removal of a lock whose tail was never read. That is the same prefix
-# acceptance the cap guard exists to refuse, arriving through the producer
-# instead of through the bound. Word-splitting drops od's spacing with no
-# process that can fail, and the alphabet check is what lets the fold use a
-# here-doc: it proves the text carries none of the characters an unquoted
-# here-doc would expand.
-crg_followup_hex_normalize() {
-  _crg_hnb=''
-  for _crg_hnw in $1; do
-    _crg_hnb="$_crg_hnb$_crg_hnw"
-  done
-  case "$_crg_hnb" in
-    *[!0-9A-Fa-f]*) return 3 ;;
-  esac
-  # STAGED rather than printed as the tail of the function. A failing final
-  # stage would otherwise hand its own status to the caller, where only 1, 2 and
-  # 3 carry meaning and a 1 reads as ABSENCE -- a claim a transform that broke
-  # over bytes that were present is never entitled to make.
-  _crg_hnc=$(LC_ALL=C tr 'A-F' 'a-f' <<CRG_FOLLOWUP_HEX_FOLD
-$_crg_hnb
-CRG_FOLLOWUP_HEX_FOLD
-) || return 3
-  printf '%s' "$_crg_hnc"
-}
-
-crg_followup_lock_marker_hex() {
-  [ -L "$1" ] && return 2
-  if [ -e "$1" ] && [ ! -d "$1" ]; then return 2; fi
-  if [ ! -d "$1" ]; then
-    # ABSENCE HAS TO BE EARNED. Without a searchable parent, "nothing here" is a
-    # claim this reader cannot make -- and the release turns a 1 into ownership
-    # wording, so an access error would be reported as another writer's lock.
-    _crg_hxp=${1%/*}
-    case "$_crg_hxp" in
-      "$1") _crg_hxp=. ;;
-      '')   _crg_hxp=/ ;;
-    esac
-    # BOTH tests, because `-x` alone answers for a regular file too: an
-    # executable file standing where a parent belongs satisfies it while being
-    # unsearchable, which would report absence this reader never established.
-    if [ ! -d "$_crg_hxp" ] || [ ! -x "$_crg_hxp" ]; then return 3; fi
-    return 1
-  fi
-  [ -L "$1/owner" ] && return 2
-  if [ -e "$1/owner" ] && [ ! -f "$1/owner" ]; then return 2; fi
-  if [ ! -f "$1/owner" ]; then
-    [ -x "$1" ] || return 3
-    return 1
-  fi
-  _crg_hxa=$(LC_ALL=C od -An -v -tx1 -N "$CROSS_REVIEW_FOLLOWUP_MARKER_CAP" "$1/owner" 2>/dev/null) || return 3
-  _crg_hxc=$(crg_followup_hex_normalize "$_crg_hxa") || return 3
-  printf '%s' "$_crg_hxc"
-}
-
-# The release compares the WHOLE marker against what acquisition wrote: the token
-# plus its single LF terminator. A trimmed prefix would accept a marker whose tail
-# was rewritten, and the tail is what an editor of this path controls. The
-# snapshot is bounded well above any token, so an oversized marker encodes to more
-# hex than the token accounts for and mismatches instead of passing as a prefix.
-crg_followup_lock_marker_matches() {
-  [ -n "$2" ] || return 1
-  # An unquoted here-doc expands exactly three characters, so a token carrying
-  # any of them is refused rather than encoded. Acquisition never writes one,
-  # and the alternative -- piping the token into od -- is the producer-masking
-  # shape this protocol just removed.
-  case "$2" in
-    *'$'*|*'`'*|*'\'*)
-      echo "[pre-commit] WARN: the marker to compare carries a character this shell cannot encode without a pipeline - refusing the release rather than guessing" >&2
-      return 3 ;;
-  esac
-  # od is the SOLE command here: the here-doc supplies the token and its single
-  # LF terminator from the shell itself -- the same bytes acquisition wrote --
-  # so there is no separate producer whose failure the assignment could discard.
-  _crg_mexp=$(LC_ALL=C od -An -v -tx1 <<CRG_FOLLOWUP_TOKEN_HEX
-$2
-CRG_FOLLOWUP_TOKEN_HEX
-) || _crg_mexp=''
-  if [ -n "$_crg_mexp" ]; then
-    _crg_mexp=$(crg_followup_hex_normalize "$_crg_mexp") || _crg_mexp=''
-  fi
-  if [ -z "$_crg_mexp" ]; then
-    # A token this writer holds always encodes to something, so an empty
-    # encoding is a broken toolchain, not a marker mismatch. The refusal is the
-    # same either way -- nothing is removed -- but the reason has to say which.
-    echo "[pre-commit] WARN: could not hex-encode the owner marker for comparison (is 'od' present?) - refusing the release rather than guessing" >&2
-    return 3
-  fi
-  # REFUSED AT THE CAP, not merely past it. The snapshot below stops at
-  # CROSS_REVIEW_FOLLOWUP_MARKER_CAP bytes, so an expectation that reaches
-  # exactly that length is indistinguishable from the same bytes followed by
-  # anything else: the read ends before the divergence and a PREFIX compares
-  # equal, which would authorize deleting a lock whose tail this writer never
-  # wrote. A marker that cannot be confirmed INSIDE the bound is therefore
-  # refused rather than compared against a truncation, matching the PowerShell
-  # writers.
-  if [ "${#_crg_mexp}" -ge "$((CROSS_REVIEW_FOLLOWUP_MARKER_CAP * 2))" ]; then
-    echo "[pre-commit] WARN: the marker to compare cannot be confirmed inside the bounded read - refusing the release rather than accepting a prefix" >&2
-    return 3
-  fi
-  # STATUS IS STRUCTURED, not collapsed. A node this reader refuses (2) and a read
-  # it could not complete (3) are NOT the same claim as "these bytes differ" (1):
-  # only the last one says anything about ownership. Folding them together made a
-  # transient read fault present as another writer's lock, which sends an operator
-  # looking for a holder that was never there while the lock stands.
-  _crg_mgot=$(crg_followup_lock_marker_hex "$1")
-  _crg_mrc=$?
-  [ "$_crg_mrc" -eq 2 ] && return 2
-  [ "$_crg_mrc" -eq 3 ] && return 3
-  [ "$_crg_mrc" -eq 0 ] || return 1
-  [ -n "$_crg_mgot" ] || return 1
-  [ "$_crg_mgot" = "$_crg_mexp" ]
-}
-
-# Display form, PRINTABLE-ASCII WHITELIST: printable ASCII passes and every other
-# byte is dropped -- ASCII controls (NUL included) as much as C1 controls, the
-# UTF-8 bytes of bidi overrides and separators, and everything non-ASCII -- with
-# the removal ANNOUNCED so the rendering never implies the marker said only what
-# survived. Another process's bytes reach an operator's terminal through here, and
-# a blacklist keeps losing to the next character class nobody enumerated. (The
-# .NET writers escape those bytes as \uXXXX instead of dropping them; both are the
-# same whitelist decision, and only sh lacks a portable per-character escape.)
-crg_followup_lock_marker_display() {
-  _crg_mhex=$(crg_followup_lock_marker_hex "$1")
-  # A read this shell could not complete is NOT absence. Rendering it as 'no
-  # marker' would deny a holder that may well be standing there, and it is the
-  # state the .NET readers announce as '[unreadable marker]' -- an operator
-  # reading either runtime's WARN meets one phrase for one state.
-  case "$?" in
-    2) printf '[unreadable marker: not a regular file]'; return 0 ;;
-    3) printf '[unreadable marker]'; return 0 ;;
-    1) printf 'no marker'; return 0 ;;
-  esac
-  [ -n "$_crg_mhex" ] || { printf 'no marker'; return 0; }
-  # Rendered from the SNAPSHOT's bytes, so every dropped byte is visible to the
-  # announcement -- including NUL, which command substitution of the raw text
-  # would have removed before anything could notice it was there.
-  printf '%s' "$_crg_mhex" | LC_ALL=C awk '
-    {
-      hex = $0
-      out = ""
-      dropped = 0
-      n = int(length(hex) / 2)
-      for (i = 0; i < n; i++) {
-        hi = index("0123456789abcdef", substr(hex, i * 2 + 1, 1)) - 1
-        lo = index("0123456789abcdef", substr(hex, i * 2 + 2, 1)) - 1
-        v = hi * 16 + lo
-        # The rendering is ONE line, so the first line break ends it -- the same
-        # boundary the .NET writers stop at.
-        if (v == 10 || v == 13) break
-        if (v >= 32 && v <= 126) {
-          if (length(out) < 120) out = out sprintf("%c", v)
-        } else {
-          dropped = 1
-        }
-      }
-      if (out == "") {
-        # An all-hostile marker cleans to nothing. Reporting that as absence
-        # would hide the very removal this rendering exists to announce.
-        printf "%s", (dropped ? "[marker unprintable: every byte removed]" : "no marker")
-      } else if (dropped) {
-        printf "%s [non-printable bytes removed]", out
-      } else {
-        printf "%s", out
-      }
-    }'
-}
-
-crg_followup_lock_age_display() {
-  _crg_now=$(date +%s 2>/dev/null || echo 0)
-  _crg_then=$(date -r "$1" +%s 2>/dev/null)
-  case "$_crg_then" in
-    ''|*[!0-9]*) printf 'unknown'; return 0 ;;
-  esac
-  [ "$_crg_now" -gt 0 ] || { printf 'unknown'; return 0; }
-  printf '%ss' "$((_crg_now - _crg_then))"
-}
-
-# Prints the marker this writer wrote; the caller passes it back to the release
-# so a writer cannot remove a lock it does not hold. A failed acquisition prints
-# nothing.
-crg_followup_lock_acquire() {
-  _crg_lock="$1.lock"
-  _crg_budget=${2:-10}
-  _crg_tries=0
-  _crg_self="pre-commit:$$:$(date +%s 2>/dev/null || echo 0)"
-  while [ "$_crg_tries" -lt "$_crg_budget" ]; do
-    if mkdir "$_crg_lock" 2>/dev/null; then
-      _crg_mine="$(date +%s 2>/dev/null || echo 0) $_crg_self"
-      if printf '%s\n' "$_crg_mine" > "$_crg_lock/owner" 2>/dev/null; then
-        printf '%s' "$_crg_mine"
-        return 0
-      fi
-      echo "[pre-commit] WARN: could not write the owner marker in $_crg_lock - releasing the markerless lock and retrying" >&2
-      rmdir "$_crg_lock" 2>/dev/null || echo "[pre-commit] WARN: could not remove $_crg_lock after a failed acquisition - remove it by hand" >&2
-    fi
-    _crg_tries=$((_crg_tries + 1))
-    sleep 1
-  done
-  echo "[pre-commit] WARN: could not take the follow-up index lock at $_crg_lock (holder: '$(crg_followup_lock_marker_display "$_crg_lock")', age $(crg_followup_lock_age_display "$_crg_lock")) - dropping this follow-up record; follow-up recording is best-effort and the gate continues to its terminal identity check. If no writer is alive, remove that directory by hand: nothing reclaims it automatically." >&2
-  return 1
-}
-
-crg_followup_lock_release() {
-  _crg_lock="$1.lock"
-  if [ -z "$2" ]; then
-    echo "[pre-commit] WARN: release of $_crg_lock called without a marker - removing nothing" >&2
-    return 1
-  fi
-  crg_followup_lock_marker_matches "$_crg_lock" "$2"
-  _crg_relrc=$?
-  if [ "$_crg_relrc" -ne 0 ]; then
-    # Only a byte MISMATCH licenses the ownership wording. A refused node or a
-    # failed read means this writer never learned whose lock it is, and saying
-    # otherwise sends an operator hunting a holder the reader never saw.
-    if [ "$_crg_relrc" -eq 1 ]; then
-      echo "[pre-commit] WARN: $_crg_lock does not carry this writer's marker - removing nothing" >&2
-    else
-      echo "[pre-commit] WARN: the owner marker in $_crg_lock could not be read for comparison - removing nothing; the lock stays until a reader can confirm it or an operator clears it" >&2
-    fi
-    return 1
-  fi
-  rm -f "$_crg_lock/owner" 2>/dev/null
-  if rmdir "$_crg_lock" 2>/dev/null; then return 0; fi
-  echo "[pre-commit] WARN: could not release the follow-up index lock at $_crg_lock - appends stay blocked until it is removed by hand" >&2
-  return 1
-}
-
-# The transaction buffer lives INSIDE the lock directory this writer holds, under
-# an mktemp-random name: no other process can predict or pre-create the path to
-# steer the write, and the object is confirmed to be a regular file and not a
-# symlink before a byte goes through it.
-crg_followup_tx_create() {
-  _crg_txp=$(mktemp "$1/tx.XXXXXXXX" 2>/dev/null) || return 1
-  if [ -L "$_crg_txp" ] || [ ! -f "$_crg_txp" ]; then
-    echo "[pre-commit] WARN: the follow-up transaction buffer at $_crg_txp is not a regular file - refusing to write through it" >&2
-    rm -f "$_crg_txp" 2>/dev/null
-    return 1
-  fi
-  printf '%s' "$_crg_txp"
-}
-
-# Is the index's last transaction COMPLETE? Every writer ends its transaction with
-# a line break, so a nonempty index whose final byte is not one was cut off
-# mid-write. 0 = terminated, 1 = torn, 2 = the answer could not be established.
-#
-# The tail is STAGED and compared as BYTES rather than captured: command
-# substitution strips trailing newlines, so an LF tail and an empty one would read
-# identically, and it drops NUL bytes -- both answer TERMINATED for a tail that is
-# not one, the single answer that buries a torn write. The comparison against a
-# literal LF is the whole test, and it matches the PowerShell writers' rule byte
-# for byte (LF only: a CRLF index still ends in LF, and no writer emits a bare CR),
-# so the runtimes accept exactly the same tails. In the one
-# pipeline here the surviving status is cmp's, and a failed printf feeds cmp an
-# empty stdin, which MISMATCHES -- this comparison's only failure direction is
-# toward refusing the append.
-crg_followup_index_is_terminated() {
-  [ -r "$1" ] || return 2
-  # An EMPTY index has no transaction that could have been cut off, so it is
-  # APPENDABLE -- and the runtimes have to say so with one voice or the parity
-  # claim above is false: the PowerShell predicate answers terminated at length
-  # zero, while the byte comparison below would see an empty tail, fail to match a
-  # literal LF, and call an untouched file torn. The promotion path happens to
-  # branch on emptiness before reaching here, so this arm is about the helper's own
-  # contract holding for every caller rather than about the caller it has today.
-  [ -s "$1" ] || return 0
-  _crg_t_tmp=$(mktemp 2>/dev/null) || return 2
-  if [ -L "$_crg_t_tmp" ] || [ ! -f "$_crg_t_tmp" ]; then
-    rm -f "$_crg_t_tmp"
-    return 2
-  fi
-  if ! tail -c 1 "$1" > "$_crg_t_tmp" 2>/dev/null; then
-    rm -f "$_crg_t_tmp"
-    return 2
-  fi
-  # cmp's three-way status is preserved: 0 = LF tail (terminated), 1 = a
-  # real byte mismatch (torn), >1 = cmp itself TROUBLED (I/O error, missing
-  # operand) -- an indeterminate probe, returned as 2 so the caller's
-  # cannot-verify path (retry/refuse) handles it instead of the torn path
-  # silently dropping the record.
-  printf '\n' | cmp -s - "$_crg_t_tmp" 2>/dev/null
-  _crg_t_cmp=$?
-  rm -f "$_crg_t_tmp"
-  if [ "$_crg_t_cmp" -eq 0 ]; then
-    return 0
-  fi
-  if [ "$_crg_t_cmp" -eq 1 ]; then
-    return 1
-  fi
-  return 2
-}
-
-crg_followup_frame_is_current() {
-  [ -r "$1" ] || return 2
-  # Versions are compared as DIGIT STRINGS (length, then lexicographic) inside
-  # awk: a version larger than the shell's integer range would make `[ -gt ]`
-  # fail with a syntax error, and awk's own numeric coercion would round two
-  # distinct huge versions onto one double. Marker lines are matched with the CR
-  # tolerated, but the frame BYTES below are compared raw -- the PowerShell
-  # validators keep the CR in the frame they extract, so stripping it here would
-  # make the two sides disagree on a CRLF-line-ended index.
-  _crg_state=$(awk -v sup="$CROSS_REVIEW_FOLLOWUP_DOCTRINE_VERSION" '
-    function normv(s) { sub(/^0+/, "", s); if (s == "") s = "0"; return s }
-    function vgt(a, b) { if (length(a) != length(b)) return length(a) > length(b); return (a > b) }
-    { line = $0; sub(/\r$/, "", line) }
-    line ~ /^<!-- review-followups: capture-doctrine v[0-9]+ BEGIN -->$/ {
-      v = line
-      sub(/^<!-- review-followups: capture-doctrine v/, "", v)
-      sub(/ BEGIN -->$/, "", v)
-      open[normv(v)] = NR
-      next
-    }
-    line ~ /^<!-- review-followups: capture-doctrine v[0-9]+ END -->$/ {
-      v = line
-      sub(/^<!-- review-followups: capture-doctrine v/, "", v)
-      sub(/ END -->$/, "", v)
-      v = normv(v)
-      if (open[v] > 0) {
-        if (maxv == "" || vgt(v, maxv) || v == maxv) { maxv = v; beg = open[v]; end = NR }
-        open[v] = 0
-      }
-      next
-    }
-    END {
-      if (maxv == "") { print "none 0 0"; exit }
-      s = normv(sup)
-      print (vgt(maxv, s) ? "newer" : (maxv == s ? "same" : "older")) " " beg + 0 " " end + 0
-    }
-  ' "$1" 2>/dev/null) || return 2
-  _crg_kind=${_crg_state%% *}
-  _crg_rest=${_crg_state#* }
-  _crg_beg=${_crg_rest%% *}
-  _crg_end=${_crg_rest##* }
-  case "$_crg_beg$_crg_end" in
-    ''|*[!0-9]*) return 2 ;;
-  esac
-  case "$_crg_kind" in
-    none)  return 1 ;;
-    older) return 1 ;;
-    newer) return 0 ;;
-    same)  ;;
-    *)     return 2 ;;
-  esac
-  # tail then head, coreutils rather than awk: the awk build Git for Windows
-  # ships reads in TEXT mode and silently drops CR bytes, which would make this
-  # side call a CRLF index CURRENT while the PowerShell validators (which see the
-  # raw bytes) call the same file STALE. The extraction runs SEQUENTIALLY
-  # through a temp file rather than piped: in a pipeline only the LAST stage's
-  # status survives, so a failing tail would look like an empty frame and take
-  # the stale-append path instead of the unknown-state path, and appending under
-  # an unverified contract is the one outcome this function exists to prevent.
-  _crg_count=$((_crg_end - _crg_beg + 1))
-  _crg_tmp=$(mktemp 2>/dev/null) || return 2
-  if [ -L "$_crg_tmp" ] || [ ! -f "$_crg_tmp" ]; then
-    rm -f "$_crg_tmp"
-    return 2
-  fi
-  if ! tail -n +"$_crg_beg" "$1" > "$_crg_tmp" 2>/dev/null; then
-    rm -f "$_crg_tmp"
-    return 2
-  fi
-  _crg_last_frame=$(head -n "$_crg_count" "$_crg_tmp" 2>/dev/null)
-  _crg_head_rc=$?
-  rm -f "$_crg_tmp"
-  [ "$_crg_head_rc" -eq 0 ] || return 2
-  [ -n "$_crg_last_frame" ] || return 1
-  # The frame proper: leading blank line dropped by sed, trailing blank lines by
-  # the command substitution -- the same trim the PowerShell side applies with
-  # .Trim(CR, LF), so the two compare the same span.
-  #
-  # STAGED AND CHECKED, never a pipeline. A `printf | sed` assignment reports only
-  # the LAST stage, so a failing `sed` yields an empty or partial expectation and
-  # the comparison below then returns 1 -- and 1 means STALE here, which sends the
-  # caller down the APPEND path. That is a transformer failure authorizing a write
-  # to the index under a contract this function never actually verified: the one
-  # outcome it exists to prevent. Each producer therefore lands in its own object
-  # with its own check, and every failure answers 2 (UNKNOWN) so the caller stops
-  # instead of guessing -- the same discipline crg_followup_hex_normalize applies
-  # to its own staged transform.
-  _crg_exp_tmp=$(mktemp 2>/dev/null) || return 2
-  if [ -L "$_crg_exp_tmp" ] || [ ! -f "$_crg_exp_tmp" ]; then
-    rm -f "$_crg_exp_tmp"
-    return 2
-  fi
-  if ! printf '%s' "$CROSS_REVIEW_FOLLOWUP_CAPTURE_DOCTRINE" > "$_crg_exp_tmp" 2>/dev/null; then
-    rm -f "$_crg_exp_tmp"
-    return 2
-  fi
-  _crg_expected=$(sed -e '/./,$!d' "$_crg_exp_tmp" 2>/dev/null)
-  _crg_exp_rc=$?
-  rm -f "$_crg_exp_tmp"
-  [ "$_crg_exp_rc" -eq 0 ] || return 2
-  # A frame this writer holds always trims to something. An EMPTY expectation is a
-  # broken toolchain, not a stale index, and comparing against it would call every
-  # index stale and re-append the frame forever.
-  [ -n "$_crg_expected" ] || return 2
-  [ "$_crg_last_frame" = "$_crg_expected" ] || return 1
-  return 0
-}
-CROSS_REVIEW_FOLLOWUP_CAPTURE_DOCTRINE='
-<!-- review-followups: capture-doctrine v6 BEGIN -->
-SUPERSESSION IS MONOTONIC BY VERSION: among this file'"'"'s capture-doctrine
-frames, the HIGHEST version'"'"'s last COMPLETE frame is authoritative wherever it
-sits, so a complete OLDER frame appended below a newer one is superseded, never
-a reinstatement of its guidance (an older frame'"'"'s prune-on-a-live-slug wording
-included). A frame whose version you do not know supersedes this one: prune
-NOTHING and leave every row at ordinary duty until a reader that knows that
-version handles the file.
-An entry tagged [scoped: <slug> tree: <oid> diff: <sha256> find: <sha256>]
-carries an
-UNTRUSTED ROUTING HINT, never a clearance -- nothing is pruned on the tag
-alone (operator ruling
-2026-07-30). The row'"'"'s slug + tree OID + diff SHA + FINDING DIGEST bind it to
-the content it came from, which defeats ACCIDENTAL misattribution: a reused
-or overwritten basename, a same-tree different-base race, and an edited
-finding body each mismatch a part and leave the row at ordinary duty. The
-binding does NOT establish authenticity. This index is workspace-writable --
-a local writer can edit or delete any row, and the verdict artifacts it
-names are equally local -- so these records carry framing, never proof. The
-gated tracked tree is the only trusted layer; check every claim there.
-A row names its artifact by a LOCATOR in its block header. A run whose output
-is centralized -- the default, and a merge-panel child whose run dir the merge
-gate consolidates -- names logs/<backend>/reviews/<file>; a run that centralizes
-nothing names the path it actually wrote, repo-relative when it sits under the
-repo and absolute otherwise. The field is whitespace-delimited, so the value is
-VERSIONED and ESCAPED: v1:<path>, where the path percent-encodes every byte
-outside the unreserved set A-Za-z0-9._/\:- as UTF-8 %XX triplets. A value
-WITHOUT that prefix is a pre-locator row'"'"'s bare basename; an unprefixed value that
-carries a separator or a percent matches no shape any writer emitted and is
-left unresolved rather than guessed at. An EXACT (v1:) locator identifies one
-directory and file, so the age-prune honors it whoever wrote the row, keyed by
-DIRECTORY AND stem -- a shared stem in another directory is not protected by
-proxy, while sidecars sharing the stem beside it are. A BARE name is
-location-AMBIGUOUS: the writers that emitted those rows basenamed every path,
-including runs that wrote outside the central dir, so its directory cannot be
-recovered. Such a row therefore retains its STEM in every directory the prune
-scans -- over-retention rather than a guess. That exemption persists until the
-bare ROW is removed: this index is append-only, so a later exact row for the
-same finding is added BESIDE it and does not retire it.
-That prune deletes only under a byte-valid frame of ITS OWN doctrine version: a
-legacy frame, an unreadable index, a corrupted frame, or a version from the
-future all stop it entirely, and a legacy index resumes pruning once the next
-write migrates it AND a valid legacy seal admits its unverifiable tail.
-COMPLETION IS POSITIVE FROM THIS VERSION ON. Every append a writer makes under
-THIS doctrine version is ONE TRANSACTION, bracketed by marker lines: it begins
-with `<!-- review-followups: transaction v1 OPEN -->` written before any other
-byte -- this file'"'"'s title and this frame included, when the append carries
-them -- and its block -- a header, its rows -- is closed by a TRANSACTION
-RECORD on its own line, spelled
-`<!-- review-followups: transaction v1 rows=<n> sha256=<hex> -->`, where <n>
-counts the block'"'"'s rows and the digest is SHA-256 over the block'"'"'s exact bytes
-from the first byte of its header line through the line break ending its last
-row -- its header line, when it has no rows. Below the first OPEN marker or
-complete, byte-valid frame of THIS version, every transaction is EXACTLY one
-OPEN, its prefix -- in order: this file'"'"'s title exactly as written, only when
-the OPEN begins the file; the doctrine frame, in the region'"'"'s first
-transaction or one raising the file'"'"'s version; a legacy seal, only over a
-legacy region -- and ONE record-closed block, complete at its record line'"'"'s
-line break (the blank line after it is presentation, not proof). A block that
-lacks a valid record -- absent or malformed, a count differing from the rows
-above it, or a digest that does not match -- an OPEN whose interval, running
-to the next OPEN or the end of the file, holds no record-closed block, holds
-prefix content beyond that admitted order, or holds anything past that
-block'"'"'s record other than a single blank line (a second block included) -- a
-frame whose OWN interval holds no such block, completion never being borrowed
-across an OPEN -- and a frame or block with no OPEN above it at all -- are
-each an INCOMPLETE transaction: a write was cut off, or something rewrote or
-appended over it without recomputing the record, and either way the record
-that would vouch for the content does not. Like the scoped-tag binding above,
-these markers defeat ACCIDENTAL damage and establish no authenticity, and
-they vouch only for content that STANDS: a transaction removed whole at its
-boundaries leaves no incomplete shape behind -- the gated tracked tree is the
-only trusted layer, as stated above. While any incomplete transaction stands,
-NOTHING in this file is pruned, and every affected row carries ordinary duty.
-Content ABOVE the first OPEN marker or complete, byte-valid frame of this
-version predates these markers, and nothing can PROVE its final write ran to
-completion. While such content is PRESENT and this file carries no LEGACY
-SEAL -- the line
-`<!-- review-followups: legacy-seal v1 bytes=<len> sha256=<hex> -->` in a
-transaction'"'"'s prefix, added only on the operator'"'"'s explicit go-ahead after
-inspecting that legacy tail, its length and digest matching the legacy bytes
-EXACTLY AS INSPECTED -- the nonempty legacy region is an unresolved state and
-NOTHING in this file is pruned. A file whose every byte sits inside a
-transaction has no legacy region and needs no seal. Under a MATCHING seal the
-legacy content keeps every duty rule stated here; a seal the current legacy
-bytes no longer match is INERT and the quarantine holds again. The seal, like
-every marker here, proves no authenticity. Writers REFUSE to append onto any
-tail whose last OPEN interval is not a COMPLETE transaction under every test
-above -- and equally onto a file with no OPEN at all that holds a byte-valid
-frame of this version or a complete frame of a higher one. (A CORRUPT copy of
-this version'"'"'s frame with no OPEN beside it leaves a file that is still
-legacy: the migration append, whose canonical frame is the repair, is how
-such a file heals.) Appending onto anything less would terminate a torn write
-and bury the evidence.
-DEREFERENCE IS A PRIVILEGE, NOT A CONSEQUENCE OF READING A ROW. This index is
-workspace-writable, so a row'"'"'s locator is attacker-supplied text. Canonicalize
-it FIRST, then AUTOMATICALLY open it only when it resolves inside the trusted
-review-log roots -- logs/<backend>/reviews under the resolved main repo. A
-locator outside those roots (UNC, device, extended-length, any external
-directory) is NEVER opened automatically. It may still serve as an exemption KEY
--- keying compares strings and opens nothing -- but ONLY when it is canonical
-and path-safe: a shape the validator rejects (a reserved device segment refused
-by its NAME, a segment ending in a dot or a space, a dot segment) is an
-unlocatable claim, which DENIES the
-prune rather than keying anything. A human who wants to inspect any of them does
-so only with the operator'"'"'s explicit go-ahead and the full path shown. No gate
-CODE reads bytes at a row-supplied locator today; the prune keys on locators and
-never opens them.
-Before any prune, establish first-hand against the tree:
-(0) PROVENANCE: read the row'"'"'s verdict artifact AT ITS LOCATOR -- subject to the
-    dereference rule above -- and compare its
-    REVIEW-TREE-OID and DIFF-SHA256 headers against the row'"'"'s pair, then RECOMPUTE
-    the finding digest over that artifact'"'"'s matching finding (its column-one
-    line plus the blank-or-indented body below it, trailing whitespace stripped,
-    trailing blank lines dropped, LF-joined, SHA-256) and require equality
-    BEFORE any gap-match reasoning. ARTIFACT ABSENT AT THE LOCATOR is its own
-    state, and its causes differ: a consolidation copy that never materialized
-    (the gate preserves that run'"'"'s output dir and says so loudly in its log --
-    recover it from there), a run-dir path from a route that centralizes
-    nothing, or a record deleted by hand. Absent, mismatched, or
-    unreadable all leave the row at ORDINARY DUTY. When
-    they match but that reviewed content never landed in the integration
-    history, the row is NOT ACTIONABLE YET -- a statement about when it can
-    be worked, never an exemption: it RETAINS ordinary uncaptured duty (never
-    cleared, never pruned), and once the content lands or its line is
-    abandoned it is actioned as ordinary duty.
-(1) CAPTURE RE-AUDIT: locate the live registry entry by slug and re-run the
-    review prompt'"'"'s CANONICAL numbered declaration audit against it -- live
-    placement and identity, field set, gap match against this row'"'"'s citation
-    and the finding text in its verdict artifact, authority, and SEPARABILITY
-    verified against the reviewed tree and diff. Only a PASSING full audit
-    clears the row for pruning; a partial check (gap match alone) can erase
-    duty for an inseparable, runtime-breaking gap. A slug resolving to an
-    entry whose gap does not cover the finding -- a reused slug included --
-    is MISMATCHED: capture never applied, so the row carries ordinary duty.
-(2) Entry gone AND the deferred work landed -> delivered; prune as obsolete.
-(3) Entry gone AND the work never landed -> capture withdrawn; ordinary duty.
-FAIL TOWARD DUTY: a row is cleared ONLY by a passing full audit. Every other
-row -- unbindable, ambiguous, mismatched, or merely not yet actionable --
-carries ordinary repair duty. There is no exempt state.
-<!-- review-followups: capture-doctrine v6 END -->
-
-'
-# The first-creation title is byte-pinned like the frame: the prefix production
-# admits exactly these bytes when an OPEN begins the file.
-CROSS_REVIEW_FOLLOWUP_INDEX_TITLE='# Review follow-ups (non-blocking QUALITY findings)
-
-Append-only index of QUALITY findings from completed passing adversarial-review verdicts and
-of seal-audit stamps (zero-row blocks recording the operator'"'"'s legacy-seal
-operation). Under the 2026-07 severity contract QUALITY does NOT block (only
-BLOCKER does), so a follow-up session works findings as CLASSES in one pass:
-an UNTAGGED row carries ordinary repair duty, while a [scoped: <slug> tree:
-<oid> diff: <sha256> find: <sha256>] row is a capture CLAIM the doctrine
-below resolves before anything is pruned. Gitignored execution-state.
-'
-
-# ---- capture-doctrine v6 transaction machinery (sh side) ----
-# ONE completeness specification (docs/capture-doctrine-v6.md), implemented per
-# runtime with the same accept set. Checks run on RAW BYTES wherever a text-mode line reader
-# could launder damage: CR presence compares byte counts through `tr -d`, byte
-# slices go through head/tail -c, and every laundering failure mode lands on
-# REFUSE, never on accept.
-CROSS_REVIEW_FOLLOWUP_TX_OPEN='<!-- review-followups: transaction v1 OPEN -->'
+# The follow-up index is written only by the PowerShell promoter
+# (promote_followups; docs/capture-doctrine-v6.md section 7).
 
 # The platform SHA-256 utility, discovered in a FIXED order (sha256sum, then
-# shasum -a 256) and required on the v6 production path: a writer that cannot
-# hash refuses rather than appending or promoting unverified bytes. Prints
-# lowercase hex; rc 2 when no tool answers with a plausible digest.
+# shasum -a 256). Every caller refuses when no utility answers, rather than
+# trusting bytes it could not hash. Prints lowercase hex; rc 2 when no tool
+# answers with a plausible digest.
 crg_followup_hash_file() {
   for _crg_hf_tool in sha256sum 'shasum -a 256'; do
     _crg_hf_out=$($_crg_hf_tool < "$1" 2>/dev/null) || continue
@@ -947,38 +295,14 @@ crg_followup_hash_file() {
   return 2
 }
 
-# Byte-true CR presence (0 = present, 1 = absent, 2 = unreadable): the awk on
-# some hosts strips CR on read, so a line inspection cannot be trusted with
-# this question.
-crg_followup_has_cr() {
-  _crg_cr_raw=$(wc -c < "$1" 2>/dev/null) || return 2
-  [ -n "$_crg_cr_raw" ] || return 2
-  # tr's status is checked on its own stage: piped into wc it was
-  # invisible, and a truncated strip miscounts toward a CR verdict that
-  # permanently drops the record.
-  _crg_cr_t=$(crg_followup_v6_tmp) || return 2
-  if ! tr -d '\r' < "$1" > "$_crg_cr_t" 2>/dev/null; then rm -f "$_crg_cr_t"; return 2; fi
-  _crg_cr_bare=$(wc -c < "$_crg_cr_t" 2>/dev/null) || { rm -f "$_crg_cr_t"; return 2; }
-  rm -f "$_crg_cr_t"
-  [ -n "$_crg_cr_bare" ] || return 2
-  [ "$_crg_cr_raw" -ne "$_crg_cr_bare" ]
-}
-
-# Strict UTF-8 gate over the block bytes, matching the PS validators' strict
-# decode: an invalid byte refuses even under a matching digest -- the digest
-# vouches for bytes, not for their decodability, and a block this hook
-# appended that the PS writers refuse would wedge the index against every
-# later append and prune. Any tooling failure refuses the same way a
-# missing hasher does -- verification never
-# silently narrows to grammar alone. rc 0 valid, 1 invalid, 2 tooling.
+# Strict UTF-8 check over a file's bytes, as strict as the .NET strict
+# decoder: overlongs, surrogates and truncated sequences all refuse. rc 0
+# valid, 1 invalid, 2 tooling failure, which callers refuse as well.
 crg_followup_utf8_check() {
   # A byte-level DFA over an od hex dump, not iconv: iconv folds every
-  # operational failure into the same nonzero status as invalid input, and
-  # a tooling failure misread as corruption drops a record for good where
-  # a bounded retry was owed. Here each stage is status-checked and the
-  # verdict rides as an explicit token, so BAD means VERIFIED-invalid.
-  # Strictness matches the PS decoder: overlongs, surrogates, and
-  # truncated sequences all refuse.
+  # operational failure into the same nonzero status as invalid input. Here
+  # each stage is status-checked and the verdict rides as an explicit token,
+  # so BAD means VERIFIED-invalid.
   [ -r "$1" ] || return 2
   _crg_u8=$(crg_followup_v6_tmp) || return 2
   if ! od -An -v -tx1 "$1" > "$_crg_u8" 2>/dev/null; then rm -f "$_crg_u8"; return 2; fi
@@ -1022,647 +346,11 @@ crg_followup_utf8_check() {
   esac
 }
 
-# head-c prefix compare with every stage status-checked: rc 0 match, 1
-# differ, 2 read/tooling failure. Piping head into cmp exposes only cmp's
-# status, so a failed read there would misread as a content mismatch -- a
-# refusal that drops a record for good where a bounded retry was owed.
-crg_followup_prefix_cmp() {
-  _crg_pc=$(crg_followup_v6_tmp) || return 2
-  if ! head -c "$2" "$1" > "$_crg_pc" 2>/dev/null; then rm -f "$_crg_pc"; return 2; fi
-  cmp -s "$_crg_pc" "$3" 2>/dev/null
-  _crg_pc_rc=$?
-  rm -f "$_crg_pc"
-  [ "$_crg_pc_rc" -ge 2 ] && return 2
-  return "$_crg_pc_rc"
-}
-
-# The OLDER-era doctrine-frame pair opened by the interval remainder's FIRST
-# BEGIN line: prints the byte offset just past its END line's terminator, or
-# -1 when that first BEGIN opens no older-era pair (a later pair is never
-# reconsidered -- mirrors the PS validators, where a current or future frame
-# at the first BEGIN answers none). $2 = 1 is the first-creation form: the
-# BEGIN may sit anywhere past the title span but must follow the span's
-# terminating LF plus the frame's leading blank separator; otherwise only
-# the canonical MIGRATED offset -- a BEGIN on line 2 behind the lone
-# separator LF every producer's frame constant leads with. The caller
-# enforces the REQUIRED trailing bounding blank line on the returned offset.
-# rc 0 with the offset on stdout, 2 on tooling failure.
-crg_followup_older_frame_end() {
-  _crg_ofe=$(LC_ALL=C awk -v BINMODE=3 -v anypos="$2" -v cur="$CROSS_REVIEW_FOLLOWUP_DOCTRINE_VERSION" '
-    function normv(s) { sub(/^0+/, "", s); if (s == "") s = "0"; return s }
-    function vlt(a, b) { if (length(a) != length(b)) return length(a) < length(b); return (a < b) }
-    BEGIN { off = 0; ver = ""; res = -1; prev = -1 }
-    {
-      line = $0
-      if (ver == "") {
-        # The FIRST BEGIN line decides: every failed test below exits the
-        # walk outright, so a malformed first marker refuses instead of
-        # being skipped in favor of a later pair (PS parity).
-        if (line ~ /^<!-- review-followups: capture-doctrine v[0-9]+ BEGIN -->$/) {
-          if (!((anypos == "1" && NR >= 3 && prev == 0) || (anypos != "1" && off == 1 && NR == 2))) { exit }
-          v = line; sub(/^<!-- review-followups: capture-doctrine v/, "", v); sub(/ BEGIN -->$/, "", v)
-          if (vlt(normv(v), normv(cur))) { ver = v } else { exit }
-        }
-      } else if (line == "<!-- review-followups: capture-doctrine v" ver " END -->") {
-        res = off + length(line) + 1; exit
-      }
-      off += length(line) + 1
-      prev = length(line)
-    }
-    END { print res }
-  ' "$1" 2>/dev/null) || return 2
-  # POSITIVE shape check: '-1' or pure digits only -- a malformed awk output
-  # ('-', '1-2') must answer tooling, never reach the caller's arithmetic.
-  case "$_crg_ofe" in
-    -1) ;;
-    ''|*[!0-9]*) return 2 ;;
-  esac
-  printf '%s' "$_crg_ofe"
-}
-
-# The destructive reader's stricter productions, enforced on NEW payloads at
-# promotion only: the tail gate keeps accepting historical blocks the reader
-# denies (buried damage is the prune's to deny), but a promoter authoring
-# new durable bytes must never append a block the reader cannot key -- that
-# would quarantine every later prune. Printable ASCII only (the reader
-# whitelists index bytes before any destructive scan); exactly one
-# non-empty verdict= token on the header; every row inside the reader's row
-# production; and for a SCOPED payload -- whose rows key retention on the
-# header's locator -- the wire itself must pass the reader's resolver:
-# v1-prefixed, canonically escaped (no over-long escape of an unreserved
-# byte), decoding to a path-safe value with no dot segments, no
-# root-relative or drive-relative shape, no Win32 device or trailing
-# dot/space segment, whose leaf is a review-verdict filename; or the
-# grandfathered bare verdict basename. One deliberate narrowing, applied
-# IDENTICALLY in every promoter (the PS payload validator carries the same
-# check): a decoded
-# byte outside printable ASCII refuses even though the reader accepts
-# escaped non-ASCII paths -- replicating the reader's Unicode device-name
-# folding in awk would drift, and refusing routes the record to the loud
-# WARN instead of risking a promoted block the reader reads differently.
-# rc 0 conforming, nonzero refused. Success is STATUS 0 PLUS the exact
-# token: an awk that examined nothing (an empty snapshot, a no-op run)
-# exits 0 with no token and is refused rather than promoted.
-crg_followup_promo_grammar() {
-  _crg_pg=$(LC_ALL=C awk '
-    function hex2n(h,   a, b) {
-      a = index("0123456789ABCDEF", substr(h, 1, 1)) - 1
-      b = index("0123456789ABCDEF", substr(h, 2, 1)) - 1
-      return a * 16 + b
-    }
-    # A body-rule exit still runs END, and an exit THERE overrides the
-    # earlier status -- so refusals set a flag the END block honors first.
-    /[^ -~]/ { bad = 1; exit }
-    NR == 1 {
-      n = split($0, toks, /[ \t]+/); v = 0
-      for (i = 1; i <= n; i++) { if (toks[i] ~ /^verdict=/) { v++; wire = substr(toks[i], 9) } }
-      if (v != 1 || wire == "") { bad = 1; exit }
-      hdrseen = 1
-      next
-    }
-    /^- (QUALITY|NON-BLOCKER): / {
-      if ($0 !~ /^- (QUALITY|NON-BLOCKER): [^][]*( \[scoped: [a-z0-9]+(-[a-z0-9]+)* tree: ([0-9a-f]{40}|[0-9a-f]{64}) diff: [0-9a-f]{64} find: [0-9a-f]{64}\])?$/) { bad = 1; exit }
-      if ($0 ~ /\[scoped: /) { scoped = 1 }
-    }
-    END {
-      if (bad) { exit 1 }
-      if (!hdrseen) { exit 1 }
-      if (!scoped) { print "PROMOGRAMMAR-OK"; exit 0 }
-      # Leaf matching is CASE-INSENSITIVE like the PowerShell readers
-      # (-match), or backend choice would change which follow-ups become
-      # durable.
-      # The v1 prefix is tested FIRST, mirroring the PS readers
-      # (Resolve-CaptureLocatorWire): a v1: payload carrying no separator is
-      # a valid leaf-only exact locator there, and a separator-first order
-      # sent it to the bare arm to be refused -- backend choice must not
-      # change whether the same payload becomes durable.
-      if (wire !~ /^v1:/) {
-        if (wire ~ /[\/\\%]/) { exit 1 }
-        if (tolower(wire) ~ /^review-[0-9]{8}-[0-9]{6}-..*\.md$/) { print "PROMOGRAMMAR-OK"; exit 0 }
-        exit 1
-      }
-      pay = substr(wire, 4)
-      if (pay == "") { exit 1 }
-      if (pay !~ /^([A-Za-z0-9._\/\\:-]|%[0-9A-F][0-9A-F])+$/) { exit 1 }
-      if (pay ~ /%(2[D-F]|3[0-9]|3A|4[1-9A-F]|5[0-9A]|5C|5F|6[1-9A-F]|7[0-9A])/) { exit 1 }
-      d = ""
-      while (length(pay) > 0) {
-        c = substr(pay, 1, 1)
-        if (c == "%") {
-          n2 = hex2n(substr(pay, 2, 2))
-          if (n2 < 32 || n2 > 126) { exit 1 }
-          d = d sprintf("%c", n2)
-          pay = substr(pay, 4)
-        } else { d = d c; pay = substr(pay, 2) }
-      }
-      gsub(/\\/, "/", d)
-      # Trailing separators are normalized away, matching the PS
-      # promoters TrimEnd -- backend choice must not change whether the
-      # same payload becomes durable.
-      sub(/\/+$/, "", d)
-      if (d ~ /[<>"|*]/) { exit 1 }
-      rest = d
-      if (substr(d, 1, 4) == "//?/") {
-        er = substr(d, 5)
-        if (er ~ /^[A-Za-z]:\//) { rest = substr(er, 3) }
-        else if (er ~ /^[Uu][Nn][Cc]\/[^\/]+\/[^\/]+\/[^\/]+/) { rest = substr(er, 5) }
-        else { exit 1 }
-      } else if (substr(d, 1, 2) == "//") {
-        if (d !~ /^\/\/[^\/]+\/[^\/]+\/[^\/]+/) { exit 1 }
-        rest = substr(d, 3)
-      } else if (substr(d, 1, 1) == "/") { exit 1 }
-      else if (d ~ /^[A-Za-z]:/) {
-        if (d !~ /^[A-Za-z]:\//) { exit 1 }
-        rest = substr(d, 3)
-      }
-      if (rest ~ /[:?]/) { exit 1 }
-      m = split(rest, segs, "/")
-      for (i = 1; i <= m; i++) {
-        s = segs[i]
-        if (s == "." || s == "..") { exit 1 }
-        if (s ~ /[. ]$/) { exit 1 }
-        stem = s; sub(/\..*$/, "", stem); sub(/ +$/, "", stem)
-        if (toupper(stem) ~ /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/) { exit 1 }
-      }
-      if (tolower(segs[m]) !~ /^review-[0-9]{8}-[0-9]{6}-..*\.md$/) { exit 1 }
-      print "PROMOGRAMMAR-OK"; exit 0
-    }
-  ' "$1" 2>/dev/null); _crg_pg_rc=$?
-  [ "$_crg_pg_rc" -eq 0 ] && [ "$_crg_pg" = 'PROMOGRAMMAR-OK' ]
-}
-
-# A private temp file with the same symlink guard the other helpers use.
 crg_followup_v6_tmp() {
   _crg_vt=$(mktemp 2>/dev/null) || return 1
   if [ -L "$_crg_vt" ] || [ ! -f "$_crg_vt" ]; then rm -f "$_crg_vt"; return 1; fi
   printf '%s' "$_crg_vt"
 }
-
-# EXACTLY one record-closed block, verified end to end: header line, row lines,
-# the record (row count and digest recomputed), then the separator or the end
-# of the bytes. Shared by the promoter (on a staged payload) and the tail gate
-# (on the final interval after its prefix) -- the same grammar governs both.
-# Prints the refusal reason (display-safe fixed strings, never the file's own
-# bytes); rc 0 valid, 1 invalid, 2 unreadable or tooling failure.
-crg_followup_block_check() {
-  _crg_bc=$1
-  [ -r "$_crg_bc" ] || return 2
-  [ -s "$_crg_bc" ] || { printf '%s' 'an empty block'; return 1; }
-  crg_followup_has_cr "$_crg_bc"; _crg_bc_cr=$?
-  [ "$_crg_bc_cr" -eq 2 ] && return 2
-  if [ "$_crg_bc_cr" -eq 0 ]; then printf '%s' 'a carriage return inside the block, a terminator no writer emits'; return 1; fi
-  # Each probe stage is status-checked separately: the pipeline form
-  # exposed only tr's status, and a partial od could misread a BOM into an
-  # authorized append.
-  _crg_bc_ldt=$(crg_followup_v6_tmp) || return 2
-  if ! head -c 3 "$_crg_bc" > "$_crg_bc_ldt" 2>/dev/null; then rm -f "$_crg_bc_ldt"; return 2; fi
-  _crg_bc_hex=$(crg_followup_v6_tmp) || { rm -f "$_crg_bc_ldt"; return 2; }
-  if ! od -An -tx1 "$_crg_bc_ldt" > "$_crg_bc_hex" 2>/dev/null; then rm -f "$_crg_bc_ldt" "$_crg_bc_hex"; return 2; fi
-  _crg_bc_lead=$(tr -d ' \n' < "$_crg_bc_hex" 2>/dev/null); _crg_bc_ldrc=$?
-  rm -f "$_crg_bc_ldt" "$_crg_bc_hex"
-  [ "$_crg_bc_ldrc" -eq 0 ] || return 2
-  [ -n "$_crg_bc_lead" ] || return 2
-  if [ "$_crg_bc_lead" = 'efbbbf' ]; then printf '%s' 'a UTF-8 BOM leads the block'; return 1; fi
-  crg_followup_utf8_check "$_crg_bc"; _crg_bc_u=$?
-  [ "$_crg_bc_u" -eq 2 ] && return 2
-  if [ "$_crg_bc_u" -eq 1 ]; then printf '%s' 'bytes inside the block that are not valid UTF-8'; return 1; fi
-  crg_followup_index_is_terminated "$_crg_bc"; _crg_bc_t=$?
-  [ "$_crg_bc_t" -eq 2 ] && return 2
-  if [ "$_crg_bc_t" -eq 1 ]; then printf '%s' 'a block cut before its record line completed'; return 1; fi
-  # LC_ALL=C throughout the v6 helpers: awk length() must count BYTES -- the
-  # values feed head/tail -c slices, and a multibyte locale would shift every
-  # offset the legacy region's bytes touch.
-  _crg_bc_meta=$(LC_ALL=C awk '
-    BEGIN { st = 0; rows = 0; hb = 0; sawblank = 0 }
-    {
-      if (st == 0) {
-        if ($0 !~ /^## [^ \t]/) { print "reason:a block that does not begin at its header line"; done = 1; exit 1 }
-        hb += length($0) + 1; st = 1; next
-      }
-      if (st == 1) {
-        if ($0 ~ /^- QUALITY: / || $0 ~ /^- NON-BLOCKER: /) { rows++; hb += length($0) + 1; next }
-        line = $0
-        if (line !~ /^<!-- review-followups: transaction v1 rows=(0|[1-9][0-9]*) sha256=[0-9a-f]+ -->$/) {
-          print "reason:a block without a valid record line where the record is due"; done = 1; exit 1
-        }
-        rrows = line; sub(/^<!-- review-followups: transaction v1 rows=/, "", rrows); sub(/ sha256=.*$/, "", rrows)
-        rsha = line; sub(/^.* sha256=/, "", rsha); sub(/ -->$/, "", rsha)
-        if (length(rsha) != 64) { print "reason:a block without a valid record line where the record is due"; done = 1; exit 1 }
-        if (rrows != rows "") { print "reason:a record whose row count does not match the rows above it"; done = 1; exit 1 }
-        st = 2; next
-      }
-      if ($0 == "" && sawblank == 0) { sawblank = 1; next }
-      print "reason:content past the block record beyond its single separator line"; done = 1; exit 1
-    }
-    # A body-rule exit still runs END, so the refusal paths mark themselves
-    # done -- otherwise END appends a second reason (or the meta line) to
-    # the already-printed one.
-    END {
-      if (done) { exit 1 }
-      if (st != 2) { print "reason:a block cut before its record line"; exit 1 }
-      print "meta:" rows ":" rsha ":" hb
-    }
-  ' "$_crg_bc" 2>/dev/null)
-  _crg_bc_mrc=$?
-  # Status and output are classified TOGETHER: a failing awk can still run
-  # END and print a valid-shaped meta line, and trusting the line alone
-  # would let unverified bytes cross a mutation boundary. meta demands
-  # status 0, reason demands the refusal status, anything else is tooling.
-  case "$_crg_bc_meta" in
-    reason:*) [ "$_crg_bc_mrc" -eq 1 ] || return 2; printf '%s' "${_crg_bc_meta#reason:}"; return 1 ;;
-    meta:*) [ "$_crg_bc_mrc" -eq 0 ] || return 2 ;;
-    *) return 2 ;;
-  esac
-  _crg_bc_hb=${_crg_bc_meta##*:}
-  _crg_bc_sha=${_crg_bc_meta#meta:*:}; _crg_bc_sha=${_crg_bc_sha%%:*}
-  _crg_bc_hr=$(crg_followup_v6_tmp) || return 2
-  if ! head -c "$_crg_bc_hb" "$_crg_bc" > "$_crg_bc_hr" 2>/dev/null; then rm -f "$_crg_bc_hr"; return 2; fi
-  _crg_bc_have=$(crg_followup_hash_file "$_crg_bc_hr"); _crg_bc_hrc=$?
-  rm -f "$_crg_bc_hr"
-  [ "$_crg_bc_hrc" -eq 0 ] || return 2
-  if [ "$_crg_bc_have" != "$_crg_bc_sha" ]; then
-    printf '%s' 'a record whose digest does not vouch for the block above it'
-    return 1
-  fi
-  return 0
-}
-
-# The append gate's tail classifier (§4 arms), raw bytes throughout. rc 0 with
-# the arm on stdout (empty | legacy | complete), rc 1 refused with the reason
-# on stdout, rc 2 unreadable or tooling failure (bounded retry). A BOM refuses
-# before any arm; no v6 presence leaves the retained legacy final-byte-LF rule;
-# any presence -- an OPEN marker, a byte-valid current frame, or a future
-# frame -- validates the FINAL OPEN interval end to end.
-crg_followup_tail_state() {
-  _crg_ts=$1
-  # Temp-path variables are reset per invocation: sh function locals are
-  # global, and a failure branch naming a STALE path from a prior call
-  # could remove a file this call never owned.
-  _crg_ts_iv=''; _crg_ts_rest=''; _crg_ts_want=''
-  [ -r "$_crg_ts" ] || return 2
-  [ -s "$_crg_ts" ] || { printf '%s' 'empty'; return 0; }
-  # Each probe stage is status-checked separately: the pipeline form
-  # exposed only tr's status, and a partial od could misread a BOM into an
-  # authorized append.
-  _crg_ts_ldt=$(crg_followup_v6_tmp) || return 2
-  if ! head -c 3 "$_crg_ts" > "$_crg_ts_ldt" 2>/dev/null; then rm -f "$_crg_ts_ldt"; return 2; fi
-  _crg_ts_hex=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_ldt"; return 2; }
-  if ! od -An -tx1 "$_crg_ts_ldt" > "$_crg_ts_hex" 2>/dev/null; then rm -f "$_crg_ts_ldt" "$_crg_ts_hex"; return 2; fi
-  _crg_ts_lead=$(tr -d ' \n' < "$_crg_ts_hex" 2>/dev/null); _crg_ts_ldrc=$?
-  rm -f "$_crg_ts_ldt" "$_crg_ts_hex"
-  [ "$_crg_ts_ldrc" -eq 0 ] || return 2
-  [ -n "$_crg_ts_lead" ] || return 2
-  if [ "$_crg_ts_lead" = 'efbbbf' ]; then
-    printf '%s' 'a UTF-8 BOM leads the file, bytes no writer of this index emits'
-    return 1
-  fi
-  # The canonical frame core: the constant minus its leading separator line and
-  # trailing blank line, each of which frames the APPEND, not the frame.
-  # Staged with each producer status-checked: a piped printf failure would
-  # leave a partial core that silently downgrades a framed index to legacy.
-  _crg_ts_raw=$(crg_followup_v6_tmp) || return 2
-  if ! printf '%s' "$CROSS_REVIEW_FOLLOWUP_CAPTURE_DOCTRINE" > "$_crg_ts_raw" 2>/dev/null; then rm -f "$_crg_ts_raw"; return 2; fi
-  [ -s "$_crg_ts_raw" ] || { rm -f "$_crg_ts_raw"; return 2; }
-  _crg_ts_core=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_raw"; return 2; }
-  if ! sed -e '1d' -e '$d' "$_crg_ts_raw" > "$_crg_ts_core" 2>/dev/null; then
-    rm -f "$_crg_ts_raw" "$_crg_ts_core"; return 2
-  fi
-  rm -f "$_crg_ts_raw"
-  [ -s "$_crg_ts_core" ] || { rm -f "$_crg_ts_core"; return 2; }
-  # One line-oriented pass computes byte offsets: the last OPEN line, the
-  # first line-start match of the frame core, and whether a frame of a
-  # version above this writer's is present. BINMODE=3 pins gawk to BINARY
-  # reads -- Git for Windows gawk otherwise strips the CR from CRLF lines,
-  # which silently shortens every byte offset a CRLF preamble sits above;
-  # an awk without the extension ignores the variable and reads binary
-  # already.
-  _crg_ts_scan=$(LC_ALL=C awk -v BINMODE=3 -v open="$CROSS_REVIEW_FOLLOWUP_TX_OPEN" -v corefile="$_crg_ts_core" -v ver="$CROSS_REVIEW_FOLLOWUP_DOCTRINE_VERSION" '
-    function normv(s) { sub(/^0+/, "", s); if (s == "") s = "0"; return s }
-    function vgt(a, b) { if (length(a) != length(b)) return length(a) > length(b); return (a > b) }
-    BEGIN {
-      ncore = 0
-      while ((getline cl < corefile) > 0) { core[++ncore] = cl }
-      close(corefile)
-      off = 0; lastopen = -1; opencount = 0; frameoff = -1; future = 0; futureoff = -1; ci = 0; cstart = 0
-    }
-    {
-      if ($0 == open) { opencount++; lastopen = off }
-      if (frameoff < 0) {
-        if (ci > 0) {
-          if ($0 == core[ci + 1]) { ci++; if (ci == ncore) { frameoff = cstart } }
-          else { ci = 0 }
-        }
-        if (ci == 0 && $0 == core[1]) { ci = 1; cstart = off; if (ncore == 1) { frameoff = cstart } }
-      }
-      # Future presence requires a COMPLETE (paired) frame: a stray future
-      # BEGIN line is damage, not governance by a later doctrine. Markers are
-      # recognized on a CR-STRIPPED COPY -- the PS frame-state parser
-      # tolerates a trailing CR on marker lines, and matching raw here would
-      # classify a CRLF future frame as legacy while PS sees governance --
-      # while off stays a RAW byte offset.
-      mline = $0
-      sub(/\r$/, "", mline)
-      if (mline ~ /^<!-- review-followups: capture-doctrine v[0-9]+ BEGIN -->$/) {
-        v = mline
-        sub(/^<!-- review-followups: capture-doctrine v/, "", v)
-        sub(/ BEGIN -->$/, "", v)
-        fopen[normv(v)] = off + 1
-      }
-      if (mline ~ /^<!-- review-followups: capture-doctrine v[0-9]+ END -->$/) {
-        v = mline
-        sub(/^<!-- review-followups: capture-doctrine v/, "", v)
-        sub(/ END -->$/, "", v)
-        v = normv(v)
-        if (fopen[v]) {
-          if (vgt(v, normv(ver))) {
-            future = 1
-            # The FIRST future pair BEGIN offset: frame admissibility asks
-            # whether a higher-version frame sits ABOVE, so position rides
-            # with presence.
-            if (futureoff < 0) futureoff = fopen[v] - 1
-          }
-          fopen[v] = 0
-        }
-      }
-      off += length($0) + 1
-    }
-    END { print lastopen " " opencount " " frameoff " " future " " futureoff }
-  ' "$_crg_ts" 2>/dev/null)
-  _crg_ts_src=$?
-  rm -f "$_crg_ts_core"
-  # The scan's status and its OUTPUT SHAPE are both verified: a failed awk,
-  # partial output, or a non-numeric field is tooling (rc 2), never an
-  # empty-region impression that would skip the required-frame rejection.
-  [ "$_crg_ts_src" -eq 0 ] || return 2
-  set -- $_crg_ts_scan
-  [ "$#" -eq 5 ] || return 2
-  for _crg_ts_f in "$1" "$2" "$3" "$4" "$5"; do
-    case "$_crg_ts_f" in
-      -1) ;;
-      ''|*[!0-9]*) return 2 ;;
-    esac
-  done
-  _crg_ts_lastopen=$1; _crg_ts_opens=$2; _crg_ts_frameoff=$3; _crg_ts_future=$4; _crg_ts_futoff=$5
-  if [ "$_crg_ts_lastopen" -lt 0 ] && [ "$_crg_ts_frameoff" -lt 0 ] && [ "$_crg_ts_future" -eq 0 ]; then
-    crg_followup_index_is_terminated "$_crg_ts"; _crg_ts_t=$?
-    [ "$_crg_ts_t" -eq 2 ] && return 2
-    if [ "$_crg_ts_t" -eq 1 ]; then
-      printf '%s' 'a legacy tail with no terminal line break'
-      return 1
-    fi
-    printf '%s' 'legacy'
-    return 0
-  fi
-  if [ "$_crg_ts_opens" -eq 0 ]; then
-    printf '%s' 'doctrine-version content with no OPEN marker at all'
-    return 1
-  fi
-  # The FINAL interval, sliced by bytes, then consumed element by element: the
-  # OPEN line, the prefix production (title only when the OPEN begins the file,
-  # the frame only in the region-first transaction, a seal only over a legacy
-  # region), then the block through crg_followup_block_check.
-  _crg_ts_iv=$(crg_followup_v6_tmp) || return 2
-  if ! tail -c +"$(( _crg_ts_lastopen + 1 ))" "$_crg_ts" > "$_crg_ts_iv" 2>/dev/null; then rm -f "$_crg_ts_iv"; return 2; fi
-  crg_followup_has_cr "$_crg_ts_iv"; _crg_ts_cr=$?
-  if [ "$_crg_ts_cr" -eq 2 ]; then rm -f "$_crg_ts_iv"; return 2; fi
-  if [ "$_crg_ts_cr" -eq 0 ]; then
-    rm -f "$_crg_ts_iv"
-    printf '%s' 'a carriage return inside a transaction, a terminator no writer emits'
-    return 1
-  fi
-  _crg_ts_want=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_iv"; return 2; }
-  if ! printf '%s\n' "$CROSS_REVIEW_FOLLOWUP_TX_OPEN" > "$_crg_ts_want" 2>/dev/null; then rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2; fi
-  # wc's own status is checked, and the value is validated as EXACTLY one
-  # whitespace-delimited field of digits via word splitting -- a stripping
-  # normalizer would reduce a malformed X47Y to 47, and a piped one could
-  # fail after partial numeric output. Cleanup names only the temps THIS
-  # site still owns.
-  _crg_ts_wraw=$(wc -c < "$_crg_ts_want" 2>/dev/null) || { rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2; }
-  set -- $_crg_ts_wraw
-  [ "$#" -eq 1 ] || { rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2; }
-  _crg_ts_wlen=$1
-  case "$_crg_ts_wlen" in ''|*[!0-9]*) rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2 ;; esac
-  crg_followup_prefix_cmp "$_crg_ts_iv" "$_crg_ts_wlen" "$_crg_ts_want"; _crg_ts_pc=$?
-  if [ "$_crg_ts_pc" -eq 2 ]; then rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2; fi
-  if [ "$_crg_ts_pc" -ne 0 ]; then
-    rm -f "$_crg_ts_iv" "$_crg_ts_want"
-    printf '%s' 'an interval that does not begin at an OPEN marker line'
-    return 1
-  fi
-  # The WHOLE final interval is UTF-8-gated BEFORE any prefix slicing,
-  # matching the PS strict decode of the interval: era-skipped span bytes
-  # must face the same gate the block bytes do, or an invalid byte buried
-  # in the skipped prefix would split the runtimes' accept sets.
-  crg_followup_utf8_check "$_crg_ts_iv"; _crg_ts_u=$?
-  if [ "$_crg_ts_u" -eq 2 ]; then rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2; fi
-  if [ "$_crg_ts_u" -eq 1 ]; then
-    rm -f "$_crg_ts_iv" "$_crg_ts_want"
-    printf '%s' 'bytes inside the final transaction that are not valid UTF-8'
-    return 1
-  fi
-  _crg_ts_rest=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_iv" "$_crg_ts_want"; return 2; }
-  # A failed slice is a TOOLING state (rc 2, bounded retry), never a
-  # content-invalid classification that would drop the record for good.
-  if ! tail -c +"$(( _crg_ts_wlen + 1 ))" "$_crg_ts_iv" > "$_crg_ts_rest" 2>/dev/null; then
-    rm -f "$_crg_ts_iv" "$_crg_ts_rest" "$_crg_ts_want"
-    return 2
-  fi
-  rm -f "$_crg_ts_iv"
-  # Region start (the first OPEN or the byte-valid frame, whichever comes
-  # first) is computed BEFORE the prefix walk: frame requiredness and seal
-  # admissibility both hang on it.
-  _crg_ts_first=$(LC_ALL=C awk -v BINMODE=3 -v open="$CROSS_REVIEW_FOLLOWUP_TX_OPEN" 'BEGIN { off = 0; f = -1 } { if ($0 == open) { f = off; exit } off += length($0) + 1 } END { print f }' "$_crg_ts" 2>/dev/null)
-  _crg_ts_frc=$?
-  case "$_crg_ts_first" in
-    -1) ;;
-    ''|*[!0-9]*) _crg_ts_frc=1 ;;
-  esac
-  # A failed or empty first-OPEN scan must not read as "no region": that
-  # impression is what suppresses the required-frame check.
-  if [ "$_crg_ts_frc" -ne 0 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-  _crg_ts_region=$_crg_ts_first
-  if [ "$_crg_ts_frameoff" -ge 0 ] && { [ "$_crg_ts_region" -lt 0 ] || [ "$_crg_ts_frameoff" -lt "$_crg_ts_region" ]; }; then
-    _crg_ts_region=$_crg_ts_frameoff
-  fi
-  _crg_ts_oeskip=0
-  _crg_ts_oe=-1
-  # Title: REQUIRED when this OPEN begins the file, inadmissible elsewhere.
-  if ! printf '%s' "$CROSS_REVIEW_FOLLOWUP_INDEX_TITLE" > "$_crg_ts_want" 2>/dev/null; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-  _crg_ts_wraw=$(wc -c < "$_crg_ts_want" 2>/dev/null) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-  set -- $_crg_ts_wraw
-  [ "$#" -eq 1 ] || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-  _crg_ts_wlen=$1
-  case "$_crg_ts_wlen" in ''|*[!0-9]*) rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2 ;; esac
-  crg_followup_prefix_cmp "$_crg_ts_rest" "$_crg_ts_wlen" "$_crg_ts_want"; _crg_ts_pc=$?
-  if [ "$_crg_ts_pc" -eq 2 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-  # The era is decided on the UN-CONSUMED first-creation remainder BEFORE
-  # any title bytes are cut: a legacy title span may BEGIN with the pinned
-  # title and continue with more prose, so cutting the match first would
-  # push an older frame past the offset the migrated probe demands while
-  # the PS validators (probing the un-consumed remainder) accept it. A
-  # CURRENT-frame first transaction answers none here (its first BEGIN is
-  # not older) and falls through to the byte-validated title+frame path;
-  # prefix rule 1's era skip leaves the span and frame bytes unvalidated
-  # (writers carry no retired canonical bytes) while the block below stays
-  # fully validated.
-  if [ "$_crg_ts_lastopen" -eq 0 ] && [ "$_crg_ts_region" -eq "$_crg_ts_lastopen" ] && [ "$_crg_ts_future" -eq 0 ]; then
-    _crg_ts_oe=$(crg_followup_older_frame_end "$_crg_ts_rest" 1); _crg_ts_oerc=$?
-    if [ "$_crg_ts_oerc" -ne 0 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-  fi
-  if [ "$_crg_ts_oe" -ge 0 ]; then
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-    if ! tail -c +"$(( _crg_ts_oe + 1 ))" "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest" "$_crg_ts_want"
-      return 2
-    fi
-    # The trailing bounding blank line is REQUIRED: the prefix production is
-    # exact (docs/capture-doctrine-v6.md section 2). The refusal message
-    # follows the title-compare answer, mirroring the PS fall-through.
-    if ! printf '\n' > "$_crg_ts_want" 2>/dev/null; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-    crg_followup_prefix_cmp "$_crg_ts_rest" 1 "$_crg_ts_want"; _crg_ts_bc=$?
-    if [ "$_crg_ts_bc" -eq 2 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-    if [ "$_crg_ts_bc" -ne 0 ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      if [ "$_crg_ts_pc" -eq 0 ]; then
-        printf '%s' 'a region-opening transaction without its doctrine frame'
-      else
-        printf '%s' 'a first-creation transaction without its pinned title prose'
-      fi
-      return 1
-    fi
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-    if ! tail -c +2 "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest" "$_crg_ts_want"
-      return 2
-    fi
-    _crg_ts_oeskip=1
-  elif [ "$_crg_ts_pc" -eq 0 ]; then
-    if [ "$_crg_ts_lastopen" -ne 0 ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      printf '%s' 'title prose in a transaction whose OPEN does not begin the file'
-      return 1
-    fi
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-    if ! tail -c +"$(( _crg_ts_wlen + 1 ))" "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest" "$_crg_ts_want"
-      return 2
-    fi
-  elif [ "$_crg_ts_lastopen" -eq 0 ]; then
-    rm -f "$_crg_ts_rest" "$_crg_ts_want"
-    printf '%s' 'a first-creation transaction without its pinned title prose'
-    return 1
-  fi
-  # Frame: REQUIRED in the region-opening transaction, admissible only there
-  # (nothing byte-valid above this OPEN). Skipped whole when the era branch
-  # above already consumed an older-era prefix.
-  if [ "$_crg_ts_oeskip" -ne 1 ]; then
-  if ! printf '%s' "$CROSS_REVIEW_FOLLOWUP_CAPTURE_DOCTRINE" > "$_crg_ts_want" 2>/dev/null; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-  _crg_ts_wraw=$(wc -c < "$_crg_ts_want" 2>/dev/null) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-  set -- $_crg_ts_wraw
-  [ "$#" -eq 1 ] || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-  _crg_ts_wlen=$1
-  case "$_crg_ts_wlen" in ''|*[!0-9]*) rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2 ;; esac
-  crg_followup_prefix_cmp "$_crg_ts_rest" "$_crg_ts_wlen" "$_crg_ts_want"; _crg_ts_pc=$?
-  if [ "$_crg_ts_pc" -eq 2 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-  if [ "$_crg_ts_pc" -eq 0 ]; then
-    if [ "$_crg_ts_frameoff" -ge 0 ] && [ "$_crg_ts_frameoff" -lt "$_crg_ts_lastopen" ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      printf '%s' 'a doctrine frame outside the transaction that begins the region or raises the version'
-      return 1
-    fi
-    # A frame is admissible only when it out-versions every complete frame
-    # ABOVE it: with a higher-version winner above this interval, this
-    # writer's frame raises nothing and is refused.
-    if [ "$_crg_ts_future" -eq 1 ] && [ "$_crg_ts_futoff" -ge 0 ] && [ "$_crg_ts_futoff" -lt "$_crg_ts_lastopen" ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      printf '%s' 'a doctrine frame outside the transaction that begins the region or raises the version'
-      return 1
-    fi
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-    if ! tail -c +"$(( _crg_ts_wlen + 1 ))" "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest" "$_crg_ts_want"
-      return 2
-    fi
-  elif [ "$_crg_ts_region" -eq "$_crg_ts_lastopen" ] && [ "$_crg_ts_future" -eq 0 ]; then
-    # Under a FUTURE frame this writer's frame is rightly absent; requiredness
-    # binds current-era regions only. A first creation already ran its era
-    # probe on the UN-CONSUMED remainder above, so reaching here with
-    # lastopen 0 means that probe answered none -- the missing frame refuses.
-    # Otherwise this is the mid-file MIGRATION form: the older BEGIN sits at
-    # offset 1 exactly, behind the lone separator LF the frame constant
-    # leads with.
-    if [ "$_crg_ts_lastopen" -eq 0 ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      printf '%s' 'a region-opening transaction without its doctrine frame'
-      return 1
-    fi
-    _crg_ts_oe=$(crg_followup_older_frame_end "$_crg_ts_rest" 0); _crg_ts_oerc=$?
-    if [ "$_crg_ts_oerc" -ne 0 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-    if [ "$_crg_ts_oe" -lt 0 ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      printf '%s' 'a region-opening transaction without its doctrine frame'
-      return 1
-    fi
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-    if ! tail -c +"$(( _crg_ts_oe + 1 ))" "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest" "$_crg_ts_want"
-      return 2
-    fi
-    # The trailing bounding blank line is REQUIRED: the prefix production is
-    # exact (docs/capture-doctrine-v6.md section 2).
-    if ! printf '\n' > "$_crg_ts_want" 2>/dev/null; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-    crg_followup_prefix_cmp "$_crg_ts_rest" 1 "$_crg_ts_want"; _crg_ts_pc=$?
-    if [ "$_crg_ts_pc" -eq 2 ]; then rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; fi
-    if [ "$_crg_ts_pc" -ne 0 ]; then
-      rm -f "$_crg_ts_rest" "$_crg_ts_want"
-      printf '%s' 'a region-opening transaction without its doctrine frame'
-      return 1
-    fi
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest" "$_crg_ts_want"; return 2; }
-    if ! tail -c +2 "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest" "$_crg_ts_want"
-      return 2
-    fi
-  fi
-  fi
-  rm -f "$_crg_ts_want"
-  _crg_ts_seal=$(head -n 1 "$_crg_ts_rest" 2>/dev/null) || { rm -f "$_crg_ts_rest"; return 2; }
-  # POSITIVE match only: an empty or absent line must never read as a seal
-  # through a vacuously-true negation -- and a FAILED matcher is tooling,
-  # never a no-seal impression that would misplace the line into the block.
-  _crg_ts_sealok=$(printf '%s\n' "$_crg_ts_seal" | LC_ALL=C awk '/^<!-- review-followups: legacy-seal v1 bytes=[1-9][0-9]* sha256=[0-9a-f]+ -->$/ { s = $0; sub(/^.* sha256=/, "", s); sub(/ -->$/, "", s); if (length(s) == 64) print "ok" }' 2>/dev/null)
-  if [ $? -ne 0 ]; then rm -f "$_crg_ts_rest"; return 2; fi
-  if [ "$_crg_ts_sealok" = 'ok' ]; then
-    if [ "$_crg_ts_region" -le 0 ]; then
-      rm -f "$_crg_ts_rest"
-      printf '%s' 'a legacy seal in a file with no legacy region'
-      return 1
-    fi
-    _crg_ts_slen=$(( ${#_crg_ts_seal} + 1 ))
-    _crg_ts_tmp2=$(crg_followup_v6_tmp) || { rm -f "$_crg_ts_rest"; return 2; }
-    if ! tail -c +"$(( _crg_ts_slen + 1 ))" "$_crg_ts_rest" > "$_crg_ts_tmp2" 2>/dev/null ||
-       ! mv -f "$_crg_ts_tmp2" "$_crg_ts_rest" 2>/dev/null; then
-      rm -f "$_crg_ts_tmp2" "$_crg_ts_rest"
-      return 2
-    fi
-  fi
-  _crg_ts_reason=$(crg_followup_block_check "$_crg_ts_rest"); _crg_ts_brc=$?
-  rm -f "$_crg_ts_rest"
-  [ "$_crg_ts_brc" -eq 2 ] && return 2
-  if [ "$_crg_ts_brc" -ne 0 ]; then
-    printf '%s' "$_crg_ts_reason"
-    return 1
-  fi
-  printf '%s' 'complete'
-  return 0
-}
-
 
 # Compatibility marker only: older installed dispatchers attest this tracked
 # hook before delegation. PROJECT-MODE is review context and has no enforcement
@@ -2149,8 +837,7 @@ crg_head_state() {
 # per-clone dispatcher), not HEAD. Fail-closed at every step -- no
 # manifest, an unknown manifest version, a missing entry, a hash-tool
 # absence, and a digest mismatch each answer "not verified". The digest
-# reuses crg_followup_hash_file, the v6 machinery's platform SHA-256
-# discovery.
+# reuses crg_followup_hash_file's platform SHA-256 discovery.
 crg_local_diagnostic() {
   printf '[CRG-LOCAL:%s] %s: %s\n' "$1" "$2" "$3" >&2
   return 1
@@ -3380,6 +2067,18 @@ run_backend() {
     echo "[pre-commit:$BACKEND_NAME] ERROR: auto-review.ps1 not found at $WRAPPER_PATH" >&2
     return 1
   fi
+  # promote_followups runs the review-common.ps1 copy this wrapper imports,
+  # so the promotion comes from the same trusted source as the review. It
+  # runs after every review, long after this capture, so the copy's SHA-256
+  # is pinned here and the promoter executes the bytes only if they still
+  # match; a copy that cannot be hashed leaves no promoter.
+  if [ -f "$TRUSTED_DIR/scripts/review-common.ps1" ]; then
+    if crg_pc_sha=$(crg_followup_hash_file "$TRUSTED_DIR/scripts/review-common.ps1"); then
+      PROMOTER_COMMON="$TRUSTED_DIR/scripts/review-common.ps1"
+      PROMOTER_COMMON_SHA256="$crg_pc_sha"
+    fi
+    unset crg_pc_sha
+  fi
 
   echo "[pre-commit:$BACKEND_NAME] Running $BACKEND_NAME adversarial review on staged changes..."
 
@@ -3458,7 +2157,7 @@ run_backend() {
   # retains the published candidate-review record, which is not proof that a
   # commit landed. Merge-side promotion remains after the ff-merge succeeds.
   # The path is pre-created empty; an empty file after the run means "no QUALITY
-  # follow-ups" ([ -s ] gates promotion). If even the pre-create fails the env
+  # follow-ups" (promote_followups skips only a file it read as empty). If even the pre-create fails the env
   # var still points the wrapper at the path (its own write attempt then warns
   # and degrades) -- losing one follow-up record beats the alternative failure
   # mode of the wrapper falling back to a premature direct append.
@@ -3913,8 +2612,8 @@ crg_success_projection_cleanup() {
 }
 
 # Review-feedback status (Write-ReviewFeedbackStatus in scripts/review-common.ps1)
-# for a passed commit: without it a passed gate hid task counts and feedback
-# work left undone (merge review, 2026-10-09). Kept apart from the strict
+# for a passed commit: without it a passed gate hid task counts, feedback
+# work left undone (merge review, 2026-10-09) and skipped housekeeping. Kept apart from the strict
 # projection above on purpose, and run only after every write a commit
 # depends on (the projection display and the follow-up append), straight to
 # the console with no file of its own: no step of it can fail the gate or
@@ -3950,9 +2649,10 @@ crg_feedback_status() {
     LC_ALL=C awk -v tag="$_crg_fs_tag" -v bad="$_crg_fs_bad" '
       function add(l) { if (l in seen) return; seen[l] = 1; n++; if (n <= 32) print tag l }
       BEGIN { if (bad) add("review-feedback WARN: the review-feedback lines of one review invocation could not be read") }
-      /^\[auto-review(:claude)?\] review-feedback WARN: / {
+      /^\[auto-review(:claude)?\] (review-feedback|housekeeping) WARN: / {
         line = $0; sub(/\r$/, "", line); sub(/^\[auto-review(:claude)?\] /, "", line)
-        if (length(line) > 4096 || line ~ /[[:cntrl:]]/ || line !~ /^review-feedback WARN: [^[:space:]](.*[^[:space:]])?$/) line = "review-feedback WARN: a review-feedback line was not in the expected form and is not shown"
+        kind = (line ~ /^housekeeping /) ? "housekeeping" : "review-feedback"
+        if (length(line) > 4096 || line ~ /[[:cntrl:]]/ || line !~ /^(review-feedback|housekeeping) WARN: [^[:space:]](.*[^[:space:]])?$/) line = kind " WARN: a " kind " line was not in the expected form and is not shown"
         add(line)
       }
       END { if (n > 32) print tag "review-feedback WARN: " (n - 32) " further review-feedback warnings are not shown" }
@@ -4105,29 +2805,6 @@ run_leg() {
   return 1
 }
 
-# The logs folder, chosen as Get-FollowupIndexDir chooses it:
-# the Git common directory's parent, or a submodule's own working tree, whose
-# common directory sits under the superproject's .git/modules. Prints nothing
-# when Git cannot say.
-crg_followup_logs_dir() {
-  _crg_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-  if [ -z "$_crg_common" ]; then
-    _crg_raw=$(git rev-parse --git-common-dir 2>/dev/null)
-    if [ -n "$_crg_raw" ] && [ -d "$_crg_raw" ]; then
-      _crg_common=$(cd "$_crg_raw" 2>/dev/null && pwd)
-    fi
-  fi
-  [ -n "$_crg_common" ] || return 0
-  case "$_crg_common" in
-    */.git/modules/*)
-      _crg_top=$(git rev-parse --show-toplevel 2>/dev/null)
-      [ -n "$_crg_top" ] && printf '%s\n' "$_crg_top/logs"
-      ;;
-    *) printf '%s\n' "$(dirname "$_crg_common")/logs" ;;
-  esac
-  return 0
-}
-
 # What a PASS covers (docs/review-feedback-v1.md section 4). The open
 # TASKS.md task counts come from the review wrapper's review-feedback line,
 # which crg_feedback_status carries to the passed gate's output,
@@ -4136,196 +2813,87 @@ crg_followup_logs_dir() {
 # this hook once disagreed with the PowerShell one (review, 2026-10-09).
 CRG_PASS_COVERAGE='covers this source diff only, not target execution or deployment readiness'
 
-# Prepare the append-only follow-up transaction while every review is known to
-# have succeeded, but do not publish a byte yet. The shared index lock is held
-# from the state read through the eventual single append, so another compliant
-# writer cannot invalidate the prepared prefix. A terminal staged-tree check in
-# the main flow decides whether this private batch may become durable.
-prepare_followup_promotion() {
-  PROMO_ANY=0
-  PROMO_PREPARED_COUNT=0
-  PROMO_BATCH=""
-  PROMO_LOCK_INDEX=""
-  PROMO_LOCK_TOKEN=""
-  for _crg_pf in "$FOLLOWUPS_PENDING_1" "$FOLLOWUPS_PENDING_2" "$FOLLOWUPS_PENDING_3" "$FOLLOWUPS_PENDING_4"; do
-    [ -n "$_crg_pf" ] && [ -s "$_crg_pf" ] && PROMO_ANY=1
-  done
-  [ "$PROMO_ANY" -eq 1 ] || return 0
-
-  PROMO_LOGS_DIR=$(crg_followup_logs_dir)
-  [ -n "$PROMO_LOGS_DIR" ] || PROMO_LOGS_DIR="logs"
-  if ! mkdir -p "$PROMO_LOGS_DIR" 2>/dev/null; then
-    echo "[pre-commit] WARN: could not create the follow-up index directory at $PROMO_LOGS_DIR - records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
-    return 0
-  fi
-  FOLLOWUP_INDEX="$PROMO_LOGS_DIR/review-followups.md"
-  PROMO_LOCK_INDEX="$FOLLOWUP_INDEX"
-  PROMO_LOCK_TOKEN=$(crg_followup_lock_acquire "$FOLLOWUP_INDEX")
-  if [ -z "$PROMO_LOCK_TOKEN" ]; then
-    PROMO_LOCK_INDEX=""
-    return 0
-  fi
-  PROMO_BATCH_SEED=$(crg_followup_tx_create "$FOLLOWUP_INDEX.lock")
-  if [ -z "$PROMO_BATCH_SEED" ]; then
-    echo "[pre-commit] WARN: could not create a private follow-up transaction batch under the held index lock - records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
-    crg_followup_lock_release "$PROMO_LOCK_INDEX" "$PROMO_LOCK_TOKEN"
-    PROMO_LOCK_INDEX=""; PROMO_LOCK_TOKEN=""
-    return 0
-  fi
-  PROMO_BATCH="${PROMO_BATCH_SEED}.batch"
-  if ! mv "$PROMO_BATCH_SEED" "$PROMO_BATCH" 2>/dev/null || [ ! -f "$PROMO_BATCH" ] || [ -L "$PROMO_BATCH" ]; then
-    echo "[pre-commit] WARN: could not create a private follow-up transaction batch under the held index lock - records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
-    [ -n "$PROMO_BATCH_SEED" ] && rm -f "$PROMO_BATCH_SEED" 2>/dev/null
-    [ -n "$PROMO_BATCH" ] && rm -f "$PROMO_BATCH" 2>/dev/null
-    PROMO_BATCH=""
-    crg_followup_lock_release "$PROMO_LOCK_INDEX" "$PROMO_LOCK_TOKEN"
-    PROMO_LOCK_INDEX=""; PROMO_LOCK_TOKEN=""
-    return 0
-  fi
-
-  PROMO_INDEX_REFUSED=0
-  PROMO_BATCH_INVALID=0
-  for _crg_pf in "$FOLLOWUPS_PENDING_1" "$FOLLOWUPS_PENDING_2" "$FOLLOWUPS_PENDING_3" "$FOLLOWUPS_PENDING_4"; do
-    [ -n "$_crg_pf" ] || continue
-    [ -s "$_crg_pf" ] || continue
-    PROMO_SNAP=$(crg_followup_v6_tmp)
-    if [ -z "$PROMO_SNAP" ] || ! cat "$_crg_pf" > "$PROMO_SNAP" 2>/dev/null; then
-      [ -n "$PROMO_SNAP" ] && rm -f "$PROMO_SNAP"
-      echo "[pre-commit] WARN: could not snapshot the staged follow-up payload at $_crg_pf - record dropped; the findings stay in the verdict artifact and the gate continues to its terminal identity check" >&2
-      continue
-    fi
-    PROMO_BAD_REASON=$(crg_followup_block_check "$PROMO_SNAP"); PROMO_BAD_RC=$?
-    if [ "$PROMO_BAD_RC" -ne 0 ]; then
-      rm -f "$PROMO_SNAP"
-      if [ "$PROMO_BAD_RC" -eq 2 ]; then
-        echo "[pre-commit] WARN: could not verify the staged follow-up payload at $_crg_pf (no SHA-256 utility answered, the UTF-8 validation could not run, or the file is unreadable) - record dropped rather than appended unverified; the findings stay in the verdict artifact and the gate continues to its terminal identity check" >&2
-      else
-        echo "[pre-commit] WARN: staged follow-ups at $_crg_pf refused promotion: $PROMO_BAD_REASON - record dropped; the findings stay in the verdict artifact and the gate continues to its terminal identity check" >&2
-      fi
-      continue
-    fi
-    if ! crg_followup_promo_grammar "$PROMO_SNAP"; then
-      rm -f "$PROMO_SNAP"
-      echo "[pre-commit] WARN: staged follow-ups at $_crg_pf refused promotion: a header or row outside the grammar the destructive reader accepts - record dropped; the findings stay in the verdict artifact and the gate continues to its terminal identity check" >&2
-      continue
-    fi
-
-    PROMO_TRIES=0
-    PROMOTED=0
-    PROMO_TORN=0
-    PROMO_TORN_REASON=''
-    while [ "$PROMO_TRIES" -lt 5 ]; do
-      PREFIX_OK=1
-      FRAME_UNREADABLE=0
-      TAIL_UNREADABLE=0
-      PROMO_TX=$(crg_followup_tx_create "$FOLLOWUP_INDEX.lock")
-      if [ -z "$PROMO_TX" ]; then
-        PREFIX_OK=0
-      elif [ "$PROMO_PREPARED_COUNT" -gt 0 ]; then
-        printf '%s\n' "$CROSS_REVIEW_FOLLOWUP_TX_OPEN" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-      elif [ ! -s "$FOLLOWUP_INDEX" ]; then
-        printf '%s\n' "$CROSS_REVIEW_FOLLOWUP_TX_OPEN" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-        printf '%s' "$CROSS_REVIEW_FOLLOWUP_INDEX_TITLE" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-        printf '%s' "$CROSS_REVIEW_FOLLOWUP_CAPTURE_DOCTRINE" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-      else
-        PROMO_TAIL=$(crg_followup_tail_state "$FOLLOWUP_INDEX")
-        TERM_RC=$?
-        if [ "$TERM_RC" -eq 1 ]; then
-          PREFIX_OK=0; PROMO_TORN=1; PROMO_TORN_REASON=$PROMO_TAIL
-        elif [ "$TERM_RC" -ge 2 ]; then
-          PREFIX_OK=0; TAIL_UNREADABLE=1
-        else
-          printf '%s\n' "$CROSS_REVIEW_FOLLOWUP_TX_OPEN" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-        fi
-        if [ "$PREFIX_OK" -eq 1 ] && [ "$PROMO_TAIL" != 'complete' ]; then
-          crg_followup_frame_is_current "$FOLLOWUP_INDEX"
-          FRAME_RC=$?
-          if [ "$FRAME_RC" -ge 2 ]; then
-            PREFIX_OK=0; FRAME_UNREADABLE=1
-          elif [ "$FRAME_RC" -eq 1 ]; then
-            printf '%s' "$CROSS_REVIEW_FOLLOWUP_CAPTURE_DOCTRINE" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-          fi
-        fi
-      fi
-      if [ "$PREFIX_OK" -eq 1 ]; then
-        cat "$PROMO_SNAP" >> "$PROMO_TX" 2>/dev/null || PREFIX_OK=0
-      fi
-      if [ "$PREFIX_OK" -eq 1 ]; then
-        if cat "$PROMO_TX" >> "$PROMO_BATCH" 2>/dev/null; then
-          PROMOTED=1
-        else
-          # The private append may have written a prefix before reporting its
-          # failure. Retrying onto an unknown batch length could turn that torn
-          # prefix plus a later full transaction into apparently publishable
-          # bytes, so the entire private batch is invalidated and dropped.
-          PROMO_BATCH_INVALID=1
-          PREFIX_OK=0
-        fi
-      fi
-      [ -n "$PROMO_TX" ] && rm -f "$PROMO_TX"
-      [ "$PROMO_BATCH_INVALID" -eq 1 ] && break
-      [ "$PROMOTED" -eq 1 ] && break
-      [ "$PROMO_TORN" -eq 1 ] && break
-      if [ "$TAIL_UNREADABLE" -eq 1 ]; then
-        echo "[pre-commit] WARN: could not classify the tail of $FOLLOWUP_INDEX (rc=$TERM_RC; the file is unreadable, no SHA-256 utility answered, or the UTF-8 validation could not run) - retrying" >&2
-      elif [ "$FRAME_UNREADABLE" -eq 1 ]; then
-        echo "[pre-commit] WARN: could not read $FOLLOWUP_INDEX to check the capture doctrine (frame check rc=$FRAME_RC) - retrying" >&2
-      else
-        echo "[pre-commit] WARN: building the private follow-up transaction for $FOLLOWUP_INDEX failed - retrying" >&2
-      fi
-      PROMO_TRIES=$((PROMO_TRIES + 1))
-      sleep 1
-    done
-    rm -f "$PROMO_SNAP"
-    if [ "$PROMO_BATCH_INVALID" -eq 1 ]; then
-      echo "[pre-commit] WARN: the private follow-up batch append failed and may be partial - the entire unreported batch is discarded rather than retried; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
-      PROMO_INDEX_REFUSED=1
-      break
-    elif [ "$PROMOTED" -eq 1 ]; then
-      PROMO_PREPARED_COUNT=$((PROMO_PREPARED_COUNT + 1))
-    elif [ "$PROMO_TORN" -eq 1 ]; then
-      echo "[pre-commit] WARN: $FOLLOWUP_INDEX refused the prepared append: ${PROMO_TORN_REASON:-its final transaction is incomplete}. The records are DROPPED rather than appended: appending would terminate the torn write and erase the evidence the age-prune denies on, after which it could resume deleting artifacts a cut capture claim may protect. REPAIR: inspect the file's tail by hand against the capture-doctrine frame it carries - complete or delete the damaged transaction (remove a leading BOM if one was added), leaving the file ending in a complete record-closed transaction. The findings stay in the verdict artifacts; the gate continues to its terminal identity check." >&2
-      PROMO_INDEX_REFUSED=1
-      break
-    else
-      echo "[pre-commit] WARN: could not prepare QUALITY follow-ups from $_crg_pf (index doctrine state unreadable or transaction build failed) - record dropped; the finding stays in the verdict artifact and the gate continues to its terminal identity check" >&2
-    fi
-  done
-
-  if [ "$PROMO_INDEX_REFUSED" -eq 1 ] || [ "$PROMO_PREPARED_COUNT" -eq 0 ]; then
-    rm -f "$PROMO_BATCH" 2>/dev/null
-    PROMO_BATCH=""; PROMO_PREPARED_COUNT=0
-    crg_followup_lock_release "$PROMO_LOCK_INDEX" "$PROMO_LOCK_TOKEN"
-    PROMO_LOCK_INDEX=""; PROMO_LOCK_TOKEN=""
-  fi
-  return 0
-}
-
-discard_prepared_followup_promotion() {
-  [ -n "$PROMO_BATCH" ] && [ -f "$PROMO_BATCH" ] && rm -f "$PROMO_BATCH" 2>/dev/null
-  PROMO_BATCH=""; PROMO_PREPARED_COUNT=0
-  if [ -n "$PROMO_LOCK_TOKEN" ] && [ -n "$PROMO_LOCK_INDEX" ]; then
-    crg_followup_lock_release "$PROMO_LOCK_INDEX" "$PROMO_LOCK_TOKEN"
-  fi
-  PROMO_LOCK_INDEX=""; PROMO_LOCK_TOKEN=""
-}
-
-publish_prepared_followup_promotion() {
+# Promotes the staged QUALITY follow-ups with the one PowerShell promoter the
+# merge gate also uses (Invoke-FollowupPromotion; docs/capture-doctrine-v6.md
+# section 7), loaded from the trusted review-common.ps1 the review wrappers ran
+# from. The index is opened only relative to its held, confirmed logs folder,
+# which a shell cannot do, so this hook no longer writes the index itself. The
+# promoter takes and releases the index lock inside its own process, so the
+# state read and the append happen in this one call, after the pre-append
+# tree check; a tree change during the call is caught by the post-append
+# check, and the rows stay indexed (they record a completed review, not a
+# landing).
+# The copy is executed from the bytes the child reads once and checks against
+# the SHA-256 pinned when the review snapshot was captured (run_backend).
+# Dot-sourcing the path was dropped (staged review, 2026-10-10): the reviews
+# run for minutes between that capture and this load, and whatever stood at
+# the path then would have run. The bytes are decoded as Windows PowerShell
+# decodes a script file (its byte-order mark, else the ANSI code page), so
+# they mean what they meant to the wrappers that dot-sourced the same copy.
+# The child is a PowerShell entry point of its own, so it first sets UTF-8
+# native-output decoding: Windows PowerShell otherwise decodes Git's UTF-8
+# paths with the console code page, and a non-ASCII repository path would
+# bind the wrong logs folder.
+# Exit statuses: 10 appended, 0 nothing appended (each drop already warned),
+# 11 an append failed and may be partial, 12 the decoding could not be set or
+# the copy could not be read or loaded or has no promoter (a trusted copy
+# older than this hook), 13 the
+# copy no longer matches the pinned bytes. Any other status (PowerShell did
+# not start, or stopped partway) leaves the index state unknown, so it is
+# reported as a possibly partial append.
+CRG_PROMOTER_ENV_NAMES='CRG_FOLLOWUP_PROMOTER_COMMON CRG_FOLLOWUP_PROMOTER_SHA256 CRG_FOLLOWUP_PENDING_1 CRG_FOLLOWUP_PENDING_2 CRG_FOLLOWUP_PENDING_3 CRG_FOLLOWUP_PENDING_4'
+promote_followups() {
   PROMO_PUBLISHED=0
   PROMO_APPEND_UNCERTAIN=0
-  if [ "$PROMO_PREPARED_COUNT" -gt 0 ] && [ -n "$PROMO_BATCH" ] && [ -f "$PROMO_BATCH" ]; then
-    # One append is the only durable operation after the second staged-tree
-    # equality check. Follow-up rows index a completed review finding; they are
-    # not evidence that the candidate commit later landed.
-    if cat "$PROMO_BATCH" >> "$PROMO_LOCK_INDEX" 2>/dev/null; then
-      PROMO_PUBLISHED=1
-      echo "[pre-commit] promoted QUALITY follow-ups to $PROMO_LOCK_INDEX"
-    else
-      PROMO_APPEND_UNCERTAIN=1
-      echo "[pre-commit] WARN: the single prepared follow-up append failed and may have left a partial candidate-bound suffix in $PROMO_LOCK_INDEX. The rows do not prove that a commit landed. Inspect the tail against the capture-doctrine frame and repair any incomplete transaction before later promotion; the findings remain in the verdict artifacts and the gate continues to its terminal identity check." >&2
-    fi
+  _crg_pr_any=0
+  # A pending file is skipped only when it was read and held zero bytes;
+  # `[ ! -s ]` was not used, since it is also true when the size query fails.
+  # Everything else reaches the promoter, which tells a missing record from
+  # one it could not read.
+  for _crg_pf in "$FOLLOWUPS_PENDING_1" "$FOLLOWUPS_PENDING_2" "$FOLLOWUPS_PENDING_3" "$FOLLOWUPS_PENDING_4"; do
+    [ -n "$_crg_pf" ] || continue
+    if [ -f "$_crg_pf" ] && _crg_pn=$(wc -c < "$_crg_pf" 2>/dev/null) && [ "$_crg_pn" -eq 0 ] 2>/dev/null; then continue; fi
+    _crg_pr_any=1
+  done
+  unset _crg_pn
+  [ "$_crg_pr_any" -eq 1 ] || return 0
+  if [ -z "$PROMOTER_COMMON" ] || [ -z "$PROMOTER_COMMON_SHA256" ] || [ ! -f "$PROMOTER_COMMON" ]; then
+    echo "[pre-commit] WARN: the review wrappers ran without a trusted review-common.ps1, so no follow-up promoter is available - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
+    return 0
   fi
-  discard_prepared_followup_promotion
+  # The paths reach PowerShell only under these names, so no inherited case
+  # variant may survive to compete with them.
+  if ! crg_clear_env_case_variants $CRG_PROMOTER_ENV_NAMES; then
+    echo "[pre-commit] WARN: could not clear every case variant of the follow-up promoter's environment names, so the promoter is not launched - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
+    return 0
+  fi
+  CRG_FOLLOWUP_PROMOTER_COMMON=$(to_win_path "$PROMOTER_COMMON")
+  CRG_FOLLOWUP_PROMOTER_SHA256="$PROMOTER_COMMON_SHA256"
+  CRG_FOLLOWUP_PENDING_1=''; CRG_FOLLOWUP_PENDING_2=''; CRG_FOLLOWUP_PENDING_3=''; CRG_FOLLOWUP_PENDING_4=''
+  [ -n "$FOLLOWUPS_PENDING_1" ] && CRG_FOLLOWUP_PENDING_1=$(to_win_path "$FOLLOWUPS_PENDING_1")
+  [ -n "$FOLLOWUPS_PENDING_2" ] && CRG_FOLLOWUP_PENDING_2=$(to_win_path "$FOLLOWUPS_PENDING_2")
+  [ -n "$FOLLOWUPS_PENDING_3" ] && CRG_FOLLOWUP_PENDING_3=$(to_win_path "$FOLLOWUPS_PENDING_3")
+  [ -n "$FOLLOWUPS_PENDING_4" ] && CRG_FOLLOWUP_PENDING_4=$(to_win_path "$FOLLOWUPS_PENDING_4")
+  export $CRG_PROMOTER_ENV_NAMES
+  # The script text is fixed and single-quoted; every path reaches it through
+  # the environment, never through the command line.
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$ErrorActionPreference = "Stop"; try { $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { exit 12 }; try { $b =[System.IO.File]::ReadAllBytes($env:CRG_FOLLOWUP_PROMOTER_COMMON); $h = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString("x2") }); if (-not [string]::Equals($h, $env:CRG_FOLLOWUP_PROMOTER_SHA256, [System.StringComparison]::Ordinal)) { exit 13 }; $text = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($b), [System.Text.Encoding]::Default, $true).ReadToEnd(); . ([scriptblock]::Create($text)) } catch { exit 12 }; if (-not (Get-Command -Name Invoke-FollowupPromotion -CommandType Function -ErrorAction SilentlyContinue)) { exit 12 }; exit ([int](Invoke-FollowupPromotion -PendingPaths @($env:CRG_FOLLOWUP_PENDING_1, $env:CRG_FOLLOWUP_PENDING_2, $env:CRG_FOLLOWUP_PENDING_3, $env:CRG_FOLLOWUP_PENDING_4) -LogTag "pre-commit"))'
+  _crg_pr_rc=$?
+  # The canonical names are unset before enumeration, and the pre-launch clear
+  # already removed every variant, so a failed enumeration here leaves nothing.
+  crg_clear_env_case_variants $CRG_PROMOTER_ENV_NAMES || :
+  case "$_crg_pr_rc" in
+    0) ;;
+    10) PROMO_PUBLISHED=1 ;;
+    11) PROMO_APPEND_UNCERTAIN=1 ;;
+    12) echo "[pre-commit] WARN: the follow-up promoter could not set UTF-8 decoding, or the trusted review-common.ps1 could not be read or loaded or has no follow-up promoter (it is older than this hook) - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
+    13) echo "[pre-commit] WARN: the trusted review-common.ps1 copy no longer matches the bytes captured for the review, so it was not executed - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
+    *)
+      PROMO_APPEND_UNCERTAIN=1
+      echo "[pre-commit] WARN: the follow-up promoter exited $_crg_pr_rc, so whether it appended to the follow-up index is unknown. The rows do not prove that a commit landed. Inspect the index tail against the capture-doctrine frame and repair any incomplete transaction before later promotion; the findings remain in the verdict artifacts and the gate continues to its terminal identity check." >&2
+      ;;
+  esac
+  return 0
 }
 
 # One cleanup routine removes all per-backend trusted-base tempdirs,
@@ -4343,7 +2911,6 @@ cleanup_trusted_dirs() {
     exec 9<&-
     SUCCESS_PROJECTION_FD_OPEN=0
   fi
-  discard_prepared_followup_promotion
   for d in "$TRUSTED_DIR_1" "$TRUSTED_DIR_2" "$TRUSTED_DIR_3" "$TRUSTED_DIR_4" "$TRUSTED_DIR_5"; do
     [ -n "$d" ] || continue
     [ -d "$d" ] || continue
@@ -4392,10 +2959,8 @@ PINNED_REVIEW_TREE=""
 PINNED_REVIEW_DIFF_SHA=""
 SUCCESS_PROJECTION_FILE=""
 SUCCESS_PROJECTION_FD_OPEN=0
-PROMO_BATCH=""
-PROMO_PREPARED_COUNT=0
-PROMO_LOCK_INDEX=""
-PROMO_LOCK_TOKEN=""
+PROMOTER_COMMON=""
+PROMOTER_COMMON_SHA256=""
 PROMO_PUBLISHED=0
 PROMO_APPEND_UNCERTAIN=0
 trap cleanup_trusted_dirs EXIT
@@ -4572,9 +3137,9 @@ if [ "$OVERALL_EXIT" -eq 0 ] && ! recheck_pinned_review_tree; then
   OVERALL_EXIT=1
 fi
 
-# Successful semantic output and follow-up transactions remain private while
-# they are parsed, normalized, sorted, and prepared. No success-shaped output
-# or durable follow-up is published before the second equality boundary.
+# Successful semantic output remains private while it is parsed, normalized
+# and sorted. No success-shaped output or durable follow-up is published
+# before the second equality boundary.
 if [ "$OVERALL_EXIT" -eq 0 ]; then
   if [ "$ACCEPTED_REVIEW_COUNT" -lt 1 ] || ! prepare_success_projection "$ACCEPTED_REVIEW_COUNT" "$SUCCESS_PROJECTION_FILE"; then
     echo "[pre-commit] successful-review semantic evidence was missing, malformed, conflicting, or identity-mismatched - commit ABORTED (fail closed)." >&2
@@ -4596,9 +3161,6 @@ if [ "$OVERALL_EXIT" -eq 0 ]; then
     OVERALL_EXIT=1
   fi
 fi
-if [ "$OVERALL_EXIT" -eq 0 ]; then
-  prepare_followup_promotion
-fi
 
 # Pre-append equality boundary: a mutation during private preparation refuses
 # before the append-only follow-up index or success output receives a byte.
@@ -4608,9 +3170,7 @@ if [ "$OVERALL_EXIT" -eq 0 ] && ! recheck_pinned_review_tree; then
 fi
 
 if [ "$OVERALL_EXIT" -eq 0 ]; then
-  publish_prepared_followup_promotion
-else
-  discard_prepared_followup_promotion
+  promote_followups
 fi
 
 # Post-append equality boundary: the single append above is non-authoritative,

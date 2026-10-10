@@ -31,9 +31,10 @@ observations remain evidence, not instructions to recreate or run code unit test
 
 Under v5, every runtime decided "is the index's last transaction complete?"
 the same way: is the file's final byte LF (`Test-FollowupIndexTerminated`,
-`crg_followup_index_is_terminated` — still exactly that final-byte test
-today; under v6 the COMPLETION question moved to the grammar validators,
-`Get-FollowupTailState`/`Test-FollowupIntervalComplete` and
+and `crg_followup_index_is_terminated` in the shell hook up to 2.6.0 —
+still exactly that final-byte test today; under v6 the COMPLETION question
+moved to the grammar validators, `Get-FollowupTailState`/
+`Test-FollowupIntervalComplete` and, in a 2.6.0 hook,
 `crg_followup_tail_state`/`crg_followup_block_check`, with the final-byte
 test kept as the cheap first check and as the whole test only for a legacy
 index with no v6 region). The v5 rule caught a write cut mid-line and
@@ -267,15 +268,14 @@ the wrappers' block renderers, in staging mode and direct-append mode alike,
 so every pending file they stage is already record-closed. The OPEN marker
 is emitted by the APPENDER — the writer holding the cross-writer lock, which
 alone knows whether title prose or a migration frame joins the buffer: the
-wrappers when they append directly, the promoters when they promote. The
-promoters — the sh pre-commit hook and the merge gate, which read staged
-pending files and append them — compose no block content and emit no record
-of their own (a promoter adding one would double the close, a shape the
-scanner denies); each verifies the staged block end to end before appending
-any bytes (§4). Digest COMPUTATION at composition stays in PowerShell; every
-promoter and every append gate RECOMPUTES it for verification, the sh hook
-via the platform's SHA-256 utility, refusing the promotion or the append
-when the tool is unavailable.
+wrappers when they append directly, the promoter when it promotes. The
+promoter — `Invoke-FollowupPromotion`, which the commit gate and the merge
+gate both run to read staged pending files and append them (§7) — composes
+no block content and emits no record of its own (a promoter adding one would
+double the close, a shape the scanner denies); it verifies each staged block
+end to end before appending any bytes (§4). Digest COMPUTATION at
+composition and its RECOMPUTATION at every promotion and append gate are
+PowerShell's.
 
 ## 3. Frame v6
 
@@ -470,15 +470,17 @@ a valid EARLIER tail — vouching covers what stands, per §2; a separator
 cut is the §2-stated content-free exception). Completeness is specified ONCE — this section's tests
 — and asked at every boundary: by the append gate on the final interval, by
 the promoter on the pending payload, by the destructive reader on every
-interval. Each runtime implements the specification separately; source
-review must preserve the same accept set across implementations. The
+interval. Since 2.6.1 only the PowerShell implementation ships, but a
+2.6.0 hook's shell implementation may still write the same index, so
+source review must keep the accept set this section specifies. The
 append gate validates the FINAL interval only: damage buried deeper in the
 file is already durable, cannot be hidden by a further append, and belongs
 to the destructive reader, which walks every interval. Repair is by hand,
 exactly as the current torn-tail warning already instructs.
 
-**Promotion validation** (the sh hook and the merge gate): a promoter is the
-last gate before staged content becomes durable, and a tail-shape check
+**Promotion validation** (`Invoke-FollowupPromotion`, run by the commit and
+merge gates, §7): a promoter is the last gate before staged content becomes
+durable, and a tail-shape check
 alone would pass a pending file whose header or rows were altered under an
 intact record — planting a block the prune scanner can only refuse forever.
 So each promoter parses the pending payload as EXACTLY ONE block and
@@ -638,8 +640,10 @@ Every writer belongs in one gated landing: the frame and first-creation
 title are byte-pinned, so partial updates violate the cross-writer
 identity contract. Preserve these production duties through source review:
 
-- Across the writer set (the commit-review wrappers, the merge gate, the sh
-  pre-commit hook): identical v6 frame bytes in every writer; the first-creation title
+- Across the writer set (the commit-review wrappers, the merge gate, the
+  pre-commit hook; since 2.6.1 the hook promotes through the shared
+  PowerShell promoter, §7, while a 2.6.0 hook still writes with its own shell
+  code): identical v6 frame bytes in every writer; the first-creation title
   bytes reworded and pinned per §3(d), preserving the same cross-writer
   byte identity as the frame; the doctrine version
   constant bumped to 6; the final-interval completeness check at the append
@@ -751,9 +755,104 @@ identity contract. Preserve these production duties through source review:
 - The sh hook's SHA-256 utility: the discovery order is named at
   implementation, and both promotion and append paths refuse when no
   utility is found. Historically, pre-v6 `sha256sum` ran only in the
-  self-test; v6 made the utility a production dependency. On a host without
-  a hasher every promotion drops PERMANENTLY, so the operator-documentation
-  bullet above covers this requirement too.
+  self-test; v6 made the utility a production dependency. Since 2.6.1 the
+  hook's promotion is PowerShell (§7), which hashes in-process; the hook
+  still needs the utility to pin the reviewed diff before any review.
 - Project-owned tracked rollout records are updated in a separate post-landing
   commit naming the landed SHA; a branch cannot truthfully assert its own
   landing, so such status never rides the slice itself.
+
+## 7. Index location, binding and lock
+
+Through 2.6.0 every writer opened `logs/review-followups.md` and its lock by
+path, and a commit gate's follow-ups were promoted by shell code that could
+only follow paths. Since 2.6.1 every writer is PowerShell and reaches the
+index only through a held folder, as the findings records are reached
+(`docs/review-feedback-v1.md`).
+
+**Location.** The logs folder is the one `Resolve-FollowupGitContext` derives
+from Git (the common Git directory's parent, or a submodule's working tree).
+`Enter-FollowupLogsBinding` holds that root, checked to be the folder whose
+identity (volume serial and file ID) was read when the context was resolved,
+and holds `logs` below it, creating it when missing. Every directory from
+the volume root down stays held, so none can be renamed or deleted until the
+caller lets go. When Git cannot name the folder, or a folder cannot be held
+or no longer has its identity, a follow-up record is dropped with a warning,
+the prune stays off, and the seal refuses. Nothing falls back to the current
+folder: a record filed under an unconfirmed folder could feed another
+repository's prune, while a dropped record's findings stay in its verdict
+file.
+
+**Index access.** Every open is by one name relative to the held logs folder,
+without following a link, and classified on the handle it returns:
+
+- append: read and write, no sharing, an existing ordinary single-link file
+  or a new one (`Open-FollowupIndexForAppend`);
+- prune read: read-only with all sharing, an ordinary file; a confirmed
+  absence allows the prune with no exemptions, and any other open failure
+  keeps it off;
+- seal: the append open, its provenance record created new below the held
+  logs folder, and the revalidation read reopened relative to it.
+
+**Lock.** The lock is still the directory `review-followups.md.lock` beside
+the index, holding an `owner` marker (`<unix-seconds> <tag>:<pid>:<seconds>`
+and LF), so a 2.6.0 writer, which takes it with `mkdir` or
+`CreateDirectoryW`, and a 2.6.1 writer exclude each other. A 2.6.1 writer:
+
+1. creates the directory new relative to the held logs folder, with DELETE
+   access and delete sharing withheld, so no other process can rename or
+   delete it while held;
+2. creates `owner` new through the directory's handle and writes and flushes
+   the marker;
+3. on release, deletes `owner` and then the directory through the handles
+   that created them, retrying the directory delete briefly while a reader's
+   handle keeps the deleted `owner` name present.
+
+A handle names only the object it created, so release needs no marker
+comparison and can never remove another writer's lock. The marker serves
+diagnostics: the holder warning shows it (as an ASCII whitelist) and its age,
+taken from its leading acquisition time, which every writer version records.
+
+| state | outcome |
+|---|---|
+| logs folder not held | no lock; the caller drops its records or keeps the prune off |
+| lock name taken | retried; then the holder warning, no lock |
+| `owner` create or write fails | both deleted through their handles and the acquisition retried; when that delete fails the lock is left (warning and housekeeping line) and no retry is made |
+| writer ends while holding | the lock stays until removed by hand |
+| release delete fails | the lock stays (warning and housekeeping line) |
+
+There is still no automatic takeover: a 2.6.0 writer holds the lock without
+any handle, so nothing distinguishes its live lock from a crashed writer's
+residue.
+
+**One promoter.** `Invoke-FollowupPromotion` in `scripts/review-common.ps1`
+promotes for both gates. It reads each pending file by path (the gate's own
+temporary file, validated whole before use), validates it with
+`Test-FollowupPendingPayload` (§4), and appends every valid payload in one
+write under one lock: the first transaction carries the prefix (title and
+frame for a new index, the migration when due), each later one its OPEN
+marker and its block. It returns 10 when the transactions were appended, 0
+when nothing was (each drop warned), and 11 when the write itself failed and
+part of it may be in the index. The merge gate calls it after its ff-merge.
+The pre-commit hook calls it once, between its pre-append and post-append
+staged-tree checks, as `powershell.exe -Command` with fixed text that runs
+the trusted `review-common.ps1` copy the review wrappers ran from. The hook
+pins that copy's SHA-256 when it captures the review snapshot; the child
+reads the copy once, runs those bytes from memory only if they still match,
+and receives the paths and the digest only through environment names the
+hook owns (every inherited case variant is removed first, since Windows
+PowerShell resolves environment names without case). The child first sets
+UTF-8 decoding of native-command output, so Git's paths are read as
+written. Status 12 means that decoding could not be
+set, or that copy could not be read or loaded or has no promoter (it is
+older than the hook), 13 that it no longer matches the pinned bytes; in both the records
+are dropped. Any status other than 0, 10, 11, 12 and 13 leaves the index
+state unknown and is reported as a possibly partial append. The hook no
+longer holds the lock across its pre-append check: the promoter takes and
+releases it inside its own process, so a staged-tree change during the call
+is caught by the post-append check, and the rows stay indexed (they record a
+completed review, not a landing).
+
+**Mixed versions.** A 2.6.0 hook keeps its own shell promotion, frame and
+grammar, which §2 through §4 still describe byte for byte; the shared lock
+directory keeps it and 2.6.1 writers from appending at once.

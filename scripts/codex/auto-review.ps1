@@ -207,9 +207,32 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Functions shared with the other review hosts. Dot-sourced so they run in
+# this script's own scope (the file's header gives the reason); every trusted
+# review copy carries scripts/review-common.ps1 beside this wrapper. The load
+# precedes the console code-page save and the replacement-suppression setup
+# below, which use its functions, and runs no Git command itself.
+try {
+  . (Join-Path (Split-Path -Parent $PSScriptRoot) 'review-common.ps1')
+} catch {
+  Write-Host "[auto-review] ERROR: the shared review functions could not be loaded ($($_.Exception.Message)) - failing closed."
+  exit 3
+}
+
 # Force UTF-8 for native command pipes. Default $OutputEncoding is ASCII on
 # Windows PowerShell 5.1, which mangles multi-byte glyphs (em-dashes in the
 # prompt template were corrupted to `???`).
+# The console code pages belong to the console window this script shares with
+# the invoking shell, so the finally at the end of the script puts back the
+# values saved here.
+try {
+  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+} catch {
+  Write-Host "[auto-review] ERROR: the console code pages could not be read ($($_.Exception.Message)) - failing closed."
+  exit 3
+}
+try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -234,18 +257,6 @@ if ($crgEffortCanonical.Count -ne 1) {
 $ReasoningEffort = $crgEffortCanonical[0]
 $pairedHostInput = $null
 $pairedProviderSnapshot = $null
-
-# Functions shared with the other review hosts. Dot-sourced so they run in
-# this script's own scope (the file's header gives the reason); every trusted
-# review copy carries scripts/review-common.ps1 beside this wrapper. The load
-# precedes the replacement-suppression setup below, which uses its functions,
-# and runs no Git command itself.
-try {
-  . (Join-Path (Split-Path -Parent $PSScriptRoot) 'review-common.ps1')
-} catch {
-  Write-Host "[auto-review] ERROR: the shared review functions could not be loaded ($($_.Exception.Message)) - failing closed."
-  exit 3
-}
 
 if (-not $isPreparedPair) {
 try {
@@ -655,7 +666,6 @@ $captureCentralExpected = Resolve-CaptureCentralExpected -OutDirAbs $outDirAbs `
 # describe different repos: the root IS the parent of the resolved index dir.
 $captureGitContext = Resolve-FollowupGitContext
 $captureLocatorRoot = if ($captureGitContext.Ok) { $captureGitContext.Root } else { '' }
-$captureIndexPath = if ($captureGitContext.Ok) { Join-Path $captureGitContext.LogsDir 'review-followups.md' } else { '' }
 }
 
 if ([string]::Equals($Scope, 'SealLegacy', [System.StringComparison]::Ordinal)) {
@@ -693,7 +703,6 @@ if ($isPreparedPair) {
     $outDirAbs = $pairedHostInput.OutDir
     $captureGitContext = $pairedHostInput.CaptureContext
     $captureLocatorRoot = $captureGitContext.Root
-    $captureIndexPath = Join-Path $captureGitContext.LogsDir 'review-followups.md'
     $captureCentralExpected = $false
   } catch {
     if ($null -ne $pairedHostInput) { $null = Complete-CrgPairedHostInput -HostInput $pairedHostInput -ProviderSnapshot $null }
@@ -1038,21 +1047,29 @@ $stderrFile  = Join-Path $outDirAbs "review-$timestamp-$scopeTag.stderr.log"
 # OFF entirely. Preserving log files costs disk; losing a referenced artifact
 # costs the capture. The name-shape guard that keeps a `-OutDir docs` invocation
 # from recycling unrelated .md/.jsonl files now lives in Get-ReviewLogPruneClass,
-# which mirrors the same `^review-\d{8}-\d{6}-` producer grammar
+# which mirrors the same `^review-[0-9]{8}-[0-9]{6}-` producer grammar
 # `scripts/shared/analyze-blocker-trends.ps1` scans with.
 if (-not $isPreparedPair) {
-$pruneLock = Enter-PruneIndexLock -IndexPath $captureIndexPath -LogTag 'auto-review'
+$pruneHeld = New-Object 'System.Collections.Generic.List[object]'
+$pruneLock = Enter-PruneIndexLock -GitContext $captureGitContext -Held $pruneHeld -LogTag 'auto-review'
 try {
 $prunePlan = if ($pruneLock.Locked) {
-  Resolve-PruneExemptionPlan -IndexPath $captureIndexPath -Backend 'codex' -RepoRoot $captureLocatorRoot
+  Resolve-PruneExemptionPlan -Binding $pruneLock.Binding -Backend 'codex' -RepoRoot $captureLocatorRoot
 } else {
-  @{ PruneAllowed = $false; Reason = 'the follow-up index lock is held elsewhere, so its exemption state cannot be pinned across the deletions'; Keys = @(); Stems = @(); Unresolved = @() }
+  @{ PruneAllowed = $false; Reason = $pruneLock.Reason; Keys = @(); Stems = @(); Unresolved = @() }
 }
+# Each housekeeping status line beside a plain WARN is fixed text: the WARN
+# names this provider's log folder and exception detail, which a passing gate
+# must not show (Write-ReviewFeedbackStatus).
 if (-not $prunePlan.PruneAllowed) {
   Write-Host "[auto-review] WARN: SKIPPING the review-log prune this run - $($prunePlan.Reason)."
+  Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the review-log age-prune was skipped this run: the follow-up index could not be locked, read or validated, or does not allow pruning yet; review logs are kept until a run can prune'
 }
 foreach ($pruneWarn in $prunePlan.Unresolved) {
-  Write-Host "[auto-review] WARN: the follow-up index carries $pruneWarn - the prune is disabled while a protected artifact cannot be identified."
+  Write-Host "[auto-review] WARN: the follow-up index carries $pruneWarn - the prune stays off until that entry is resolved."
+}
+if (@($prunePlan.Unresolved).Count -gt 0) {
+  Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the follow-up index carries entries the age-prune cannot resolve or validate, so the review-log age-prune is off'
 }
 $pruneExemptKeys = $prunePlan.Keys
 $pruneExemptStems = $prunePlan.Stems
@@ -1067,11 +1084,15 @@ if ($prunePlan.PruneAllowed) {
     }
   }
   $pruneEnumWarn = Get-PruneEnumerationWarning -ErrorRecords $pruneEnumErr -Directory $outDirAbs
-  if ($pruneEnumWarn) { Write-Host "[auto-review] WARN: $pruneEnumWarn" }
+  if ($pruneEnumWarn) {
+    Write-Host "[auto-review] WARN: $pruneEnumWarn"
+    Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the review-log folder could not be fully listed, so this run considers only the files it could list for pruning'
+  }
 }
 if ($pruneTargets.Count -gt 0) {
   $batchSize = 30
   $pruned = 0
+  $pruneToolUnusable = 'CROSS_REVIEW_PRUNE_TOOL is set but could not be used, so old review logs were not pruned this run'
   # Trim the env value, and DISTINGUISH "unset" from "set-but-empty-after-trim":
   # $env:... is $null when UNSET and a (possibly whitespace) string when SET.
   # Only a SET value that bash confirms names a regular file, with bash on
@@ -1087,6 +1108,7 @@ if ($pruneTargets.Count -gt 0) {
     $pruneTargets.Clear()
   } elseif ($pruneToolSetButEmpty) {
     Write-Host "[auto-review] WARN: CROSS_REVIEW_PRUNE_TOOL is set to a whitespace-only value; skipping auto-prune (pruning is housekeeping, not a gate). Set it to a valid tool path."
+    Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
     $pruneTargets.Clear()
   } else {
     # CONTRACT: every spelling that either PowerShell or bash resolves to a
@@ -1127,14 +1149,17 @@ if ($pruneTargets.Count -gt 0) {
     $pruneBash = @(Get-Command -Name bash -CommandType Application -ErrorAction SilentlyContinue)
     if ($pruneToolMode -ceq 'raw' -and $pruneTool.Contains('"')) {
       Write-Host "[auto-review] WARN: CROSS_REVIEW_PRUNE_TOOL is set to '$pruneTool', which contains a double quote that Windows PowerShell 5.1 cannot pass to bash intact; skipping auto-prune (pruning is housekeeping, not a gate). Fix the env var."
+      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
       $pruneTargets.Clear()
     } elseif ($pruneBash.Count -eq 0) {
       Write-Host "[auto-review] WARN: CROSS_REVIEW_PRUNE_TOOL is set but bash is not on PATH to run it; skipping auto-prune (pruning is housekeeping, not a gate)."
+      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
       $pruneTargets.Clear()
     } else {
       $pruneCheck = Invoke-PruneBash -Bash $pruneBash[0].Source -Arguments @('-c', $pruneToolCheck, 'prune-check', $pruneToolMode, $pruneToolArg)
       if ($pruneCheck.Exit -ne 0) {
         Write-Host "[auto-review] WARN: the bash check of CROSS_REVIEW_PRUNE_TOOL '$pruneTool' failed ($($pruneCheck.Reason); exit 126 means no regular file at that path or no cygpath/wslpath converter for a Windows path); skipping auto-prune (pruning is housekeeping, not a gate)."
+        Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
         $pruneTargets.Clear()
       }
     }
@@ -1155,11 +1180,13 @@ if ($pruneTargets.Count -gt 0) {
       $pruneFailureSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
       $pruneFailureUnique = @($pruneFailures | Where-Object { $pruneFailureSeen.Add($_) })
       Write-Host "[auto-review] WARN: $($pruneFailures.Count) prune batch(es) reported failure; files in those batches may be partially deleted: $($pruneFailureUnique -join '; ')"
+      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the prune tool reported failure for some batches, so some old review logs may be partly deleted'
     }
   }
 }
 } finally {
-  if ($pruneLock.Token) { [void](Exit-FollowupIndexLock -IndexPath $captureIndexPath -Token $pruneLock.Token -LogTag 'auto-review') }
+  [void](Exit-FollowupIndexLock -Lock $pruneLock.Lock -LogTag 'auto-review')
+  Exit-CrgHeldDirectories -Held $pruneHeld
 }
 }
 
@@ -2202,4 +2229,12 @@ finally {
     Remove-Item -LiteralPath $work -Force -ErrorAction SilentlyContinue
   }
   if ($isPreparedPair -and -not $workCleanupAllowed) { exit 3 }
+}
+} finally {
+  try {
+    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+  try {
+    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
 }

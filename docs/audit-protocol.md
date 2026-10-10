@@ -195,8 +195,9 @@ Each audit run consumes:
    or landing proofs, with fetch/unshallow as the remedy), the
    staged follow-up promotion
    (children stage QUALITY follow-ups via `CROSS_REVIEW_FOLLOWUPS_PENDING`;
-   `Publish-ReviewFollowups` promotes to `logs/review-followups.md` only
-   after the ff-merge succeeds), console messages, and the trusted-infra
+   one `Invoke-FollowupPromotion` call, the promoter the pre-commit hook
+   also uses, promotes them to `logs/review-followups.md` only after the
+   ff-merge succeeds), console messages, and the trusted-infra
    snapshot extracted from base. This is the single merge gate for BOTH
    providers (the required `-Backend` names the preferred initial provider,
    and positively identified exhaustion can substitute the whole panel); there is no separate

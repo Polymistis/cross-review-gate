@@ -16,8 +16,9 @@
 # with git's exit code, or 1 on a pre-commit abort before `git commit` runs: a
 # bypass-flag rejection, a `-CrgImplementer` value other than codex, an
 # ambient Git selector, a set core.hooksPath that would redirect the
-# pre-commit dispatcher, a missing/foreign/tampered default dispatcher, or a
-# failure to prepare the controlled Git environment.
+# pre-commit dispatcher, a missing/foreign/tampered default dispatcher, a
+# failure to prepare the controlled Git environment, or a console code page
+# that could not be read, switched to UTF-8 or put back for a Git path capture.
 #
 # Usage examples (from a Claude session; a Codex session uses
 # scripts/codex/commit.ps1 the same way):
@@ -1439,6 +1440,72 @@ if ($bypassResult.Bypass) {
   exit 1
 }
 
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
+# Git reports paths in UTF-8, and Windows PowerShell decodes native output with
+# its cached [Console]::OutputEncoding; setting that encoding also sets the
+# output code page of the console window this worker shares with the invoking
+# shell. A path-bearing capture therefore sets it to UTF-8 for its one call and
+# puts back the page the console had; a read or switch that fails stops the commit, since the
+# attestation below must read the path Git uses. Setting the code pages for the whole worker and only
+# warning when that failed was tried and dropped (staged review, 2026-10-10):
+# a half-applied change left the path decoded with the old code page, where a
+# non-ASCII path can name another directory whose dispatcher would be
+# attested instead of the one Git runs.
+function Invoke-CrgCommitGitUtf8 {
+  param([string[]]$GitArgs)
+  try {
+    $prior = Get-CrgConsoleRestoreEncoding
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+  }
+  catch { throw "could not read the console output code page or switch it to UTF-8 to read Git's path output ($($_.Exception.Message))" }
+  try { & git @GitArgs 2>$null }
+  finally {
+    try { [Console]::OutputEncoding = $prior }
+    catch { throw "could not restore the console output code page after a Git path capture ($($_.Exception.Message)); run chcp to reset it" }
+  }
+}
+
+# A child the hook launches can leave the shared console's code pages changed,
+# so the finally below puts back the values saved here.
+try {
+  $savedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+  $savedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+}
+catch {
+  Write-Error "$($script:CrgCommitLabel): ABORT -- the console code pages could not be read ($($_.Exception.Message))."
+  exit 1
+}
+
 $prevBackend = [Environment]::GetEnvironmentVariable('REVIEW_BACKEND')
 $prevBackendWasSet = $null -ne $prevBackend
 
@@ -1496,8 +1563,8 @@ try {
   Assert-CrgRawCommitPathSingleton -Entries $commitEnvironment
 
   # Prepare the Git Unix-tool PATH for the pre-commit dispatcher, INSIDE this
-  # restore-covered try: a throw here runs the finally (restoring
-  # REVIEW_BACKEND + PATH) before the abort propagates.
+  # restore-covered try: a throw here runs the finally before the abort
+  # propagates.
   Enable-GitUnixToolPathForHook
 
   # PRIMARY config-redirect guard: validate the EFFECTIVE core.hooksPath.
@@ -1514,9 +1581,9 @@ try {
   # so this passes identically in the main checkout and linked worktrees
   # (both leave it unset).
   #
-  # This guard runs INSIDE the try so the finally below restores
-  # REVIEW_BACKEND and PATH even when the guard aborts.
-  $effectiveHooksPath = (& git config --get core.hooksPath 2>$null)
+  # This guard runs INSIDE the try so the finally below restores what the
+  # worker changed even when the guard aborts.
+  $effectiveHooksPath = (Invoke-CrgCommitGitUtf8 -GitArgs @('config', '--get', 'core.hooksPath'))
   $hooksPathExit = $LASTEXITCODE
   # Exit-status decides this, NOT stdout: the mapping lives in the shared,
   # Resolve-HooksPathGuard (exit 1 = unset -> proceed; exit 0
@@ -1539,7 +1606,7 @@ try {
   # production commit boundary. Relative `--git-path` output is anchored to
   # PowerShell's current filesystem location explicitly; .NET's process current
   # directory does not reliably follow Set-Location in Windows PowerShell.
-  $defaultHookRows = @(& git rev-parse --git-path hooks/pre-commit 2>$null)
+  $defaultHookRows = @(Invoke-CrgCommitGitUtf8 -GitArgs @('rev-parse', '--git-path', 'hooks/pre-commit'))
   $defaultHookExit = $LASTEXITCODE
   if ($defaultHookExit -ne 0 -or $defaultHookRows.Count -ne 1 -or
       [string]::IsNullOrWhiteSpace([string]$defaultHookRows[0])) {
@@ -1569,9 +1636,7 @@ try {
   & git commit @args
   $gitExit = $LASTEXITCODE
 } catch {
-  # A controlled-Git-environment or PATH-prep failure reaches here; the finally
-  # below still restores the environment, then the commit aborts with exit 1.
-  Write-Error "$($script:CrgCommitLabel): ABORT -- failed to prepare the controlled Git environment or Unix-tool PATH for the pre-commit dispatcher ($($_.Exception.Message))."
+  Write-Error "$($script:CrgCommitLabel): ABORT -- failed to prepare the controlled Git environment, the Unix-tool PATH or UTF-8 reading of Git's path output for the pre-commit dispatcher ($($_.Exception.Message))."
   $gitExit = 1
 } finally {
   if ($prevBackendWasSet) {
@@ -1589,5 +1654,9 @@ try {
       Set-CanonicalProcessPathEnvironment -Value $savedProcessPath
     } catch { Write-Warning "$($script:CrgCommitLabel): failed to restore PATH in the commit worker after the commit ($($_.Exception.Message))." }
   }
+  try { [Console]::InputEncoding = $savedConsoleInputEncoding }
+  catch { Write-Warning "$($script:CrgCommitLabel): failed to restore the console input code page after the commit ($($_.Exception.Message)); run chcp to reset it." }
+  try { [Console]::OutputEncoding = $savedConsoleOutputEncoding }
+  catch { Write-Warning "$($script:CrgCommitLabel): failed to restore the console output code page after the commit ($($_.Exception.Message)); run chcp to reset it." }
 }
 exit $gitExit

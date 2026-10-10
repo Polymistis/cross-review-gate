@@ -568,13 +568,23 @@ tasks not added and why, recovery copies or `.partial` files left, a
 findings file not written, findings files skipped (counted, not named),
 carried findings unavailable, QUALITY follow-ups not staged, and a
 blocked-retry check or prior blocked findings unavailable (section 5).
+Housekeeping the review skipped or left half done is printed the same way
+as a `housekeeping WARN: ` line (`-Housekeeping`), with fixed text beside the
+plain WARN that carries the detail: the review-log age-prune skipped, off
+for unidentifiable index entries, limited to a partial folder listing, or
+not run because `CROSS_REVIEW_PRUNE_TOOL` cannot be used; prune batches that
+failed; and a follow-up index lock that could not be removed and stays. The
+rules below apply to both kinds.
 
 - Each gate collects these lines apart from the strict projection
   (`crg_feedback_status` in the hook, `Get-CrgReviewFeedbackStatusLines` in
   the merge gate) and prints them as `review result:` lines. They are read
   from every launched review invocation, not only the accepted one: an
   exhausted leg, or a passing child of a panel whose provider was replaced,
-  may still have written records or staged follow-ups.
+  may still have written records or staged follow-ups. The follow-up
+  promotion each gate runs itself (`docs/capture-doctrine-v6.md` section 7)
+  is not a review invocation: its plain WARN and `housekeeping WARN: ` lines
+  print directly on the console, pass or fail, and are not collected.
 - Neither collecting nor printing them can fail a passed gate: a line that
   cannot be shown (over 4096 bytes without the tag, with a control character,
   or not in the form) becomes a fixed notice, an unreadable or missing
@@ -594,12 +604,13 @@ blocked-retry check or prior blocked findings unavailable (section 5).
 - The writer keeps each message to at most 600 UTF-16 units, shortened with
   a marker and never inside a surrogate pair; with the tag and prefix the
   line stays under 4096 bytes in any console encoding. It prints at most 12
-  warnings per review, then one line saying more were left out.
+  warnings of each kind per review, then one line saying more were left out.
 - A successful gate's output must read the same whichever provider
   reviewed, so these texts name `TASKS.md`, the Git directory, the logs
-  folder or Git's own messages, never a findings file or a verdict, whose
-  names carry the backend; detail that could (an exception message) stays
-  on a plain WARN line, which a failed gate shows. The collectors remove the
+  folder, a setting, the shared follow-up index lock or Git's own messages,
+  never a findings file, a verdict or a per-provider log folder, whose
+  names carry the backend; detail that could (a path, an exception message)
+  stays on a plain WARN line, which a failed gate shows. The collectors remove the
   tag naming the wrapper.
 - The commit gate shows the last count line of the last accepted review,
   read after every leg added its tasks; the merge gate shows no child count

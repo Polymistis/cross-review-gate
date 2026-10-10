@@ -1,4 +1,36 @@
 # Release-local status and paired Git capture, never paired review authority.
+
+# Windows PowerShell caches the [Console] encodings when they are first read,
+# and a code page changed later by chcp or by a child process on the same
+# console does not update that cache, so the encoding to restore is taken from
+# the console's own code page: the cached object while it still names that
+# page (or when no console is attached), otherwise the encoding of the page.
+function Get-CrgConsoleRestoreEncoding {
+  param([switch]$ConsoleInput)
+  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgConsoleCodePage {
+  public static class NativeV1 {
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleCP();
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    public static extern uint GetConsoleOutputCP();
+  }
+}
+'@
+    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  }
+  if ($ConsoleInput) {
+    $cached = [Console]::InputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
+  } else {
+    $cached = [Console]::OutputEncoding
+    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  }
+  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
+  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+}
+
 function Invoke-CrgStatusGit {
   param([string[]]$Arguments, [int]$Maximum = 65536, [string]$GitExe, [string]$IndexPath, [string]$HistoryControlPath,
     [AllowNull()][AllowEmptyCollection()][byte[]]$InputBytes)
@@ -42,7 +74,7 @@ function Invoke-CrgStatusGit {
     # available. Reuse bootstrap's no-preamble construction and restore rule.
     $priorInputEncoding = $null
     if ($null -ne $InputBytes -and $null -eq $start.PSObject.Properties['StandardInputEncoding']) {
-      $priorInputEncoding = [Console]::InputEncoding
+      $priorInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
       [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
     } elseif ($null -ne $InputBytes) { $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false) }
     try { $started = $process.Start() }
@@ -531,7 +563,7 @@ function Read-CrgCentralObjectBatch {
   try {
     $priorEncoding = $null
     if ($null -eq $start.PSObject.Properties['StandardInputEncoding']) {
-      $priorEncoding = [Console]::InputEncoding; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+      $priorEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
     } else { $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false) }
     try { $started = $process.Start() }
     finally { if ($null -ne $priorEncoding) { [Console]::InputEncoding = $priorEncoding } }

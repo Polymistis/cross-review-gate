@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.0** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.1** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -27,15 +27,29 @@ named folders. Reviews apply the scope the preceding approved configuration
 selects. Once any project's retained history holds such a record, rollback
 below 2.5 is unsupported (see `docs/private-governance-v1.md`).
 
-Version 2.6 keeps review findings: a passing ordinary (not paired) Codex
-or Claude review adds its QUALITY and NOTE findings as tasks in the
-per-user `TASKS.md` and shows them to the next review of the same files,
-and a blocked commit's retry needs a remediation record first (both
-described below and in `docs/review-feedback-v1.md`). Reviews also show a
-fix-on-fix advisory when a change rewrites recently added lines, and
-identity decisions over outside data (verdict and record fields, Git
-output, paths, internal parameters) compare ordinally rather than by
-culture. The bootstrap changed; take its hash from the release record.
+Version 2.6 keeps review findings. These features belong to the ordinary
+(not paired) Codex and Claude reviews: a passing review adds its QUALITY
+and NOTE findings as tasks in the per-user `TASKS.md` and shows them to the
+next review of the same files, and the retry of a blocked staged review
+needs a remediation record first (both described below and in
+`docs/review-feedback-v1.md`). Ordinary reviews other than Branch reviews
+also show a fix-on-fix advisory when a change rewrites recently added
+lines. Identity decisions and comparisons of outside field values (verdict
+and record fields, Git output, paths) are ordinal rather than by culture;
+the review wrappers' `-Scope`, the Codex wrapper's `-ReasoningEffort` and
+the launcher's `-AuthoringAgent` keep `ValidateSet` binding (a culture
+match) and are then mapped ordinally to the exact listed spelling, and
+2.6.0 still found verdict lines with culture matches. The
+bootstrap changed; take its hash from the release record.
+Version 2.6.1 accepts a verdict line only in its exact form at the start of
+its line, in the review hosts as in the log readers, and refuses near-miss
+severity prefixes in any culture; reaches the follow-up index, its lock and
+the seal records only through the held logs folder Git names, with one
+PowerShell promoter for the commit and merge gates; shows skipped
+housekeeping on a passing gate; and reads non-ASCII Git paths and reference
+names as Git reports them. Its PowerShell entry points put back the console
+code pages they change; the hook's promoter child leaves that to the commit
+wrapper. The bootstrap changed again; take its hash from the release record.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running
@@ -65,12 +79,14 @@ NOTE findings (one per severity and citation) to the main checkout's
 per-user `TASKS.md` (QUALITY first,
 never committed) and shows its findings to the next review of the same
 files; PASS lines state that a review covers the source diff only, not
-target execution or deployment readiness. A retry of a blocked commit is
+target execution or deployment readiness. In an ordinary staged review, a
+retry of a blocked commit is
 refused before review until a remediation record names, for each earlier
 BLOCKER it is asked to cover (from the blocked rounds of the last 14 days,
 the newest 20 rounds, up to 256 findings newest first), the invariant
 broken, the sweep made and the sites fixed, and the
-reviewer is shown those findings and the record
+reviewer is shown those findings and the record; when the earlier rounds
+cannot be looked up, the review runs without them and says so
 (`docs/review-feedback-v1.md`).
 
 This package contains the Codex and Claude backend wrappers, the optional
@@ -222,10 +238,9 @@ can be slotted in as a backend.
   both backends in a shallow clone; Codex `-Scope Uncommitted` remains
   available too (Claude does not support Uncommitted scope)
 - a SHA-256 utility (`sha256sum` or `shasum`) on the
-  pre-commit hook's PATH — shipped with Git for Windows; capture
-  doctrine v6 makes it a production dependency of follow-up
-  promotion (its absence drops staged follow-ups permanently, with
-  a warning — see INSTALL.md)
+  pre-commit hook's PATH — shipped with Git for Windows; the hook
+  digests the reviewed diff before any review starts and refuses the
+  commit without one
 - [Codex CLI](https://github.com/openai/codex) installed and
   authenticated, OR
 - [Claude Code CLI](https://claude.com/claude-code) 2.1.248 or later
