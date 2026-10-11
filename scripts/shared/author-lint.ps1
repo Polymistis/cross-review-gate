@@ -470,40 +470,53 @@ $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 # opened. A pathname this tool cannot represent faithfully is a STOP, not a guess.
 $script:Utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
 
-# Windows PowerShell caches the [Console] encodings when they are first read,
-# and a code page changed later by chcp or by a child process on the same
-# console does not update that cache, so the encoding to restore is taken from
-# the console's own code page: the cached object while it still names that
-# page (or when no console is attached), otherwise the encoding of the page.
-# Several scripts carry their own copy and one process can load more than one,
-# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name, and each copy refuses a
-# loaded type that lacks a member it calls.
-function Get-CrgConsoleRestoreEncoding {
-  param([switch]$ConsoleInput)
-  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
-    Add-Type -ErrorAction Stop -TypeDefinition @'
-namespace CrgConsoleCodePage {
-  public static class NativeV1 {
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleCP();
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleOutputCP();
+# Windows PowerShell's Process.Start builds a redirected child's input writer
+# from the cached [Console]::InputEncoding, and PowerShell decodes native
+# output with the cached [Console]::OutputEncoding. The public setters also
+# set the code page of the console window this process shares with the
+# invoking shell, and a process killed before putting it back leaves that
+# console changed, so the private cache field is set instead: the change stays
+# in this process, and passing back the returned prior value (null when the
+# cache was never filled) restores the earlier state exactly. For output, a
+# redirected standard stream's writer that was not replaced through SetOut or
+# SetError is flushed and dropped, as the setter drops it, so it is rebuilt
+# with the new encoding for whoever reads the pipe. A stream attached to the
+# console keeps a writer in the console's own code page, created now if it
+# does not exist yet: that code page does not change, so a writer rebuilt in
+# the new encoding would garble non-ASCII text there. These scripts read
+# standard input only as a raw stream, never through Console.In, so the input
+# reader is left alone. The fields are private (_name in .NET Framework,
+# s_name in .NET Core), so a runtime with neither is refused rather than
+# changing the console in their place. Several scripts carry an identical
+# copy.
+function Set-CrgProcessConsoleEncoding {
+  param([switch]$ConsoleInput, [System.Text.Encoding]$Encoding)
+  $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+  $name = if ($ConsoleInput) { 'inputEncoding' } else { 'outputEncoding' }
+  $prefix = @('_', 's_') | Where-Object { $null -ne [Console].GetField($_ + $name, $flags) } | Select-Object -First 1
+  if ($null -eq $prefix) { throw "this .NET runtime has no private console $name cache to set" }
+  $field = [Console].GetField($prefix + $name, $flags)
+  $streams = @()
+  if (-not $ConsoleInput) {
+    foreach ($spec in @(@('out', 'isOutTextWriterRedirected', 'Out', [Console]::IsOutputRedirected), @('error', 'isErrorTextWriterRedirected', 'Error', [Console]::IsErrorRedirected))) {
+      $writer = [Console].GetField($prefix + $spec[0], $flags)
+      $replaced = [Console].GetField($prefix + $spec[1], $flags)
+      if ($null -eq $writer -or $null -eq $replaced) { throw "this .NET runtime has no private console $($spec[0]) writer to rebuild" }
+      $streams += [pscustomobject]@{ Writer = $writer; Replaced = $replaced; Property = $spec[2]; Redirected = [bool]$spec[3] }
+    }
   }
-}
-'@
-    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  $prior = $field.GetValue($null)
+  foreach ($stream in $streams) {
+    if ($stream.Redirected) {
+      $current = $stream.Writer.GetValue($null)
+      if ($null -ne $current -and -not [bool]$stream.Replaced.GetValue($null)) {
+        $current.Flush()
+        $stream.Writer.SetValue($null, $null)
+      }
+    } else { $null = [Console]::($stream.Property) }
   }
-  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
-  if ($ConsoleInput) {
-    $cached = [Console]::InputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
-  } else {
-    $cached = [Console]::OutputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
-  }
-  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
-  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+  $field.SetValue($null, $Encoding)
+  return $prior
 }
 
 # Pin UTF-8 for native command pipes BEFORE any git read. Windows PowerShell 5.1
@@ -518,22 +531,24 @@ namespace CrgConsoleCodePage {
 # linter exists to prevent. (Codex BLOCKER: swallowed encoding setup defeated
 # the UTF-8 contract.) A failure is named and exits 1, the linter-crash status
 # the pre-commit pre-pass already reads as "the linter itself broke".
-# The console code pages belong to the console window this script shares with
-# the invoking shell, so a run that switches them saves them first and the
-# finally at the end of the script puts them back; captured-input runs leave
-# them alone.
+# Only this process's cached encodings change, never the console window shared
+# with the invoking shell; the finally at the end of the script puts back the
+# values a switching run saved so the script leaves the process as it found
+# it. Captured-input runs leave them alone.
 $crgSavedConsoleInputEncoding = $null
 $crgSavedConsoleOutputEncoding = $null
+$crgConsoleInputSwitched = $false
+$crgConsoleOutputSwitched = $false
 try {
 if (-not $PSBoundParameters.ContainsKey('PairedInput') -and -not $PSBoundParameters.ContainsKey('FirstAttachmentInput')) {
   try {
-    $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-    $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
     $OutputEncoding = $script:Utf8NoBom
-    [Console]::InputEncoding = $script:Utf8NoBom
-    [Console]::OutputEncoding = $script:Utf8NoBom
+    $crgSavedConsoleInputEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $script:Utf8NoBom
+    $crgConsoleInputSwitched = $true
+    $crgSavedConsoleOutputEncoding = Set-CrgProcessConsoleEncoding -Encoding $script:Utf8NoBom
+    $crgConsoleOutputSwitched = $true
   } catch {
-    Write-Host "[author-lint] ERROR: the console code pages could not be read or switched to UTF-8 ($($_.Exception.Message))."
+    Write-Host "[author-lint] ERROR: the console encodings could not be switched to UTF-8 ($($_.Exception.Message))."
     exit 1
   }
 }
@@ -6267,12 +6282,12 @@ if ($OutPath) {
 $errorCount = @($allFindings | Where-Object { [string]::Equals($_.Tier, 'ERROR', [System.StringComparison]::Ordinal) }).Count
 if ($errorCount -gt 0) { exit 3 } else { exit 0 }
 } finally {
-  if ($null -ne $crgSavedConsoleInputEncoding) {
-    try { [Console]::InputEncoding = $crgSavedConsoleInputEncoding }
-    catch { Write-Warning "author-lint.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+  if ($crgConsoleInputSwitched) {
+    try { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding }
+    catch { Write-Warning "author-lint.ps1: could not put back the cached console input encoding ($($_.Exception.Message))." }
   }
-  if ($null -ne $crgSavedConsoleOutputEncoding) {
-    try { [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding }
-    catch { Write-Warning "author-lint.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+  if ($crgConsoleOutputSwitched) {
+    try { $null = Set-CrgProcessConsoleEncoding -Encoding $crgSavedConsoleOutputEncoding }
+    catch { Write-Warning "author-lint.ps1: could not put back the cached console output encoding ($($_.Exception.Message))." }
   }
 }

@@ -349,40 +349,53 @@ param(
 $ErrorActionPreference = 'Stop'
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
-# Windows PowerShell caches the [Console] encodings when they are first read,
-# and a code page changed later by chcp or by a child process on the same
-# console does not update that cache, so the encoding to restore is taken from
-# the console's own code page: the cached object while it still names that
-# page (or when no console is attached), otherwise the encoding of the page.
-# Several scripts carry their own copy and one process can load more than one,
-# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name, and each copy refuses a
-# loaded type that lacks a member it calls.
-function Get-CrgConsoleRestoreEncoding {
-  param([switch]$ConsoleInput)
-  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
-    Add-Type -ErrorAction Stop -TypeDefinition @'
-namespace CrgConsoleCodePage {
-  public static class NativeV1 {
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleCP();
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleOutputCP();
+# Windows PowerShell's Process.Start builds a redirected child's input writer
+# from the cached [Console]::InputEncoding, and PowerShell decodes native
+# output with the cached [Console]::OutputEncoding. The public setters also
+# set the code page of the console window this process shares with the
+# invoking shell, and a process killed before putting it back leaves that
+# console changed, so the private cache field is set instead: the change stays
+# in this process, and passing back the returned prior value (null when the
+# cache was never filled) restores the earlier state exactly. For output, a
+# redirected standard stream's writer that was not replaced through SetOut or
+# SetError is flushed and dropped, as the setter drops it, so it is rebuilt
+# with the new encoding for whoever reads the pipe. A stream attached to the
+# console keeps a writer in the console's own code page, created now if it
+# does not exist yet: that code page does not change, so a writer rebuilt in
+# the new encoding would garble non-ASCII text there. These scripts read
+# standard input only as a raw stream, never through Console.In, so the input
+# reader is left alone. The fields are private (_name in .NET Framework,
+# s_name in .NET Core), so a runtime with neither is refused rather than
+# changing the console in their place. Several scripts carry an identical
+# copy.
+function Set-CrgProcessConsoleEncoding {
+  param([switch]$ConsoleInput, [System.Text.Encoding]$Encoding)
+  $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+  $name = if ($ConsoleInput) { 'inputEncoding' } else { 'outputEncoding' }
+  $prefix = @('_', 's_') | Where-Object { $null -ne [Console].GetField($_ + $name, $flags) } | Select-Object -First 1
+  if ($null -eq $prefix) { throw "this .NET runtime has no private console $name cache to set" }
+  $field = [Console].GetField($prefix + $name, $flags)
+  $streams = @()
+  if (-not $ConsoleInput) {
+    foreach ($spec in @(@('out', 'isOutTextWriterRedirected', 'Out', [Console]::IsOutputRedirected), @('error', 'isErrorTextWriterRedirected', 'Error', [Console]::IsErrorRedirected))) {
+      $writer = [Console].GetField($prefix + $spec[0], $flags)
+      $replaced = [Console].GetField($prefix + $spec[1], $flags)
+      if ($null -eq $writer -or $null -eq $replaced) { throw "this .NET runtime has no private console $($spec[0]) writer to rebuild" }
+      $streams += [pscustomobject]@{ Writer = $writer; Replaced = $replaced; Property = $spec[2]; Redirected = [bool]$spec[3] }
+    }
   }
-}
-'@
-    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  $prior = $field.GetValue($null)
+  foreach ($stream in $streams) {
+    if ($stream.Redirected) {
+      $current = $stream.Writer.GetValue($null)
+      if ($null -ne $current -and -not [bool]$stream.Replaced.GetValue($null)) {
+        $current.Flush()
+        $stream.Writer.SetValue($null, $null)
+      }
+    } else { $null = [Console]::($stream.Property) }
   }
-  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
-  if ($ConsoleInput) {
-    $cached = [Console]::InputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
-  } else {
-    $cached = [Console]::OutputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
-  }
-  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
-  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+  $field.SetValue($null, $Encoding)
+  return $prior
 }
 
 # Force UTF-8 for native `git` output captured via `&`: Windows PowerShell 5.1
@@ -390,22 +403,18 @@ namespace CrgConsoleCodePage {
 # rather than UTF-8, which mojibakes multi-byte glyphs in commit subjects. Same
 # defect class fixed in auto-merge.ps1 / auto-review.ps1. A failed switch ends
 # the audit instead of reporting subjects decoded with the old page.
-# The console output code page belongs to the console window this script
-# shares with the invoking shell, so the finally at the end of the script puts
-# back the value saved here; the input code page is never changed.
+# Only this process's cached output encoding changes, never the console window
+# shared with the invoking shell; the finally at the end of the script puts
+# back the value returned here so the script leaves the process as it found
+# it. The input encoding is never changed.
 try {
-  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+  $crgSavedConsoleOutputEncoding = Set-CrgProcessConsoleEncoding -Encoding ([System.Text.UTF8Encoding]::new($false))
 } catch {
-  Write-Host "[worker-audit] ERROR: [class:operational] the console output code page could not be read ($($_.Exception.Message))."
+  Write-Host "[worker-audit] ERROR: [class:operational] the console output encoding could not be switched to UTF-8 ($($_.Exception.Message))."
   exit 1
 }
 try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) }
-catch {
-  Write-Host "[worker-audit] ERROR: [class:operational] the console output code page could not be switched to UTF-8 ($($_.Exception.Message))."
-  exit 1
-}
 
 # ---------------------------------------------------------------------------
 # Multi-directory input has TWO representations, each unambiguous BY GRAMMAR and
@@ -4165,6 +4174,6 @@ Write-Host "[worker-audit]   first-attempt-CLEAN (best-effort)=$firstAttemptClea
 exit 0
 } finally {
   try {
-    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
-  } catch { Write-Warning "worker-audit.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -Encoding $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "worker-audit.ps1: could not put back the cached console output encoding ($($_.Exception.Message))." }
 }

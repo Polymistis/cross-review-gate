@@ -16,40 +16,53 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Windows PowerShell caches the [Console] encodings when they are first read,
-# and a code page changed later by chcp or by a child process on the same
-# console does not update that cache, so the encoding to restore is taken from
-# the console's own code page: the cached object while it still names that
-# page (or when no console is attached), otherwise the encoding of the page.
-# Several scripts carry their own copy and one process can load more than one,
-# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name, and each copy refuses a
-# loaded type that lacks a member it calls.
-function Get-CrgConsoleRestoreEncoding {
-  param([switch]$ConsoleInput)
-  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
-    Add-Type -ErrorAction Stop -TypeDefinition @'
-namespace CrgConsoleCodePage {
-  public static class NativeV1 {
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleCP();
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleOutputCP();
+# Windows PowerShell's Process.Start builds a redirected child's input writer
+# from the cached [Console]::InputEncoding, and PowerShell decodes native
+# output with the cached [Console]::OutputEncoding. The public setters also
+# set the code page of the console window this process shares with the
+# invoking shell, and a process killed before putting it back leaves that
+# console changed, so the private cache field is set instead: the change stays
+# in this process, and passing back the returned prior value (null when the
+# cache was never filled) restores the earlier state exactly. For output, a
+# redirected standard stream's writer that was not replaced through SetOut or
+# SetError is flushed and dropped, as the setter drops it, so it is rebuilt
+# with the new encoding for whoever reads the pipe. A stream attached to the
+# console keeps a writer in the console's own code page, created now if it
+# does not exist yet: that code page does not change, so a writer rebuilt in
+# the new encoding would garble non-ASCII text there. These scripts read
+# standard input only as a raw stream, never through Console.In, so the input
+# reader is left alone. The fields are private (_name in .NET Framework,
+# s_name in .NET Core), so a runtime with neither is refused rather than
+# changing the console in their place. Several scripts carry an identical
+# copy.
+function Set-CrgProcessConsoleEncoding {
+  param([switch]$ConsoleInput, [System.Text.Encoding]$Encoding)
+  $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+  $name = if ($ConsoleInput) { 'inputEncoding' } else { 'outputEncoding' }
+  $prefix = @('_', 's_') | Where-Object { $null -ne [Console].GetField($_ + $name, $flags) } | Select-Object -First 1
+  if ($null -eq $prefix) { throw "this .NET runtime has no private console $name cache to set" }
+  $field = [Console].GetField($prefix + $name, $flags)
+  $streams = @()
+  if (-not $ConsoleInput) {
+    foreach ($spec in @(@('out', 'isOutTextWriterRedirected', 'Out', [Console]::IsOutputRedirected), @('error', 'isErrorTextWriterRedirected', 'Error', [Console]::IsErrorRedirected))) {
+      $writer = [Console].GetField($prefix + $spec[0], $flags)
+      $replaced = [Console].GetField($prefix + $spec[1], $flags)
+      if ($null -eq $writer -or $null -eq $replaced) { throw "this .NET runtime has no private console $($spec[0]) writer to rebuild" }
+      $streams += [pscustomobject]@{ Writer = $writer; Replaced = $replaced; Property = $spec[2]; Redirected = [bool]$spec[3] }
+    }
   }
-}
-'@
-    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  $prior = $field.GetValue($null)
+  foreach ($stream in $streams) {
+    if ($stream.Redirected) {
+      $current = $stream.Writer.GetValue($null)
+      if ($null -ne $current -and -not [bool]$stream.Replaced.GetValue($null)) {
+        $current.Flush()
+        $stream.Writer.SetValue($null, $null)
+      }
+    } else { $null = [Console]::($stream.Property) }
   }
-  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
-  if ($ConsoleInput) {
-    $cached = [Console]::InputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
-  } else {
-    $cached = [Console]::OutputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
-  }
-  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
-  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+  $field.SetValue($null, $Encoding)
+  return $prior
 }
 
 # A write-only stream that keeps the first bytes up to its limit and discards
@@ -1144,30 +1157,31 @@ function Invoke-CrgRendererGit {
   # map addition cannot restore replacement or repository-selection authority.
   Assert-CrgGitChildEnvironment -Environment $environment -AllowedInternalSelectors $allowedInternal.ToArray()
 
-  # A restore of the shared console's input code page that fails is written
-  # to stderr when it happens, since a caller's catch can replace the raised
-  # message, and raised only once the child's exit is confirmed: its input
-  # writer was built before the restore, and raising first would skip the
-  # confirmation below and let scratch cleanup run under a live child. Start
-  # sits inside the try whose finally confirms the exit, so no failure after
-  # a successful start can bypass it.
+  # A restore of this process's cached console input encoding that fails is
+  # written to stderr when it happens, since a caller's catch can replace the
+  # raised message, and raised only once the child's exit is confirmed: its
+  # input writer was built before the restore, and raising first would skip
+  # the confirmation below and let scratch cleanup run under a live child.
+  # Start sits inside the try whose finally confirms the exit, so no failure
+  # after a successful start can bypass it.
   Initialize-CrgBoundedSinkNative
   $errors = New-Object CrgBoundedCapture.SinkV1 ([long]1048576)
   $priorInputEncoding = $null
+  $switchedInput = $false
   if ($null -ne $InputBytes -and $null -eq $psi.PSObject.Properties['StandardInputEncoding']) {
-    $priorInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-    [Console]::InputEncoding = $script:CrgUtf8NoBom
+    $priorInputEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $script:CrgUtf8NoBom
+    $switchedInput = $true
   } elseif ($null -ne $InputBytes) { $psi.StandardInputEncoding = $script:CrgUtf8NoBom }
   $process = $null
   $restoreFailure = $null
   try {
     try { $process = [System.Diagnostics.Process]::Start($psi) }
     finally {
-      if ($null -ne $priorInputEncoding) {
-        try { [Console]::InputEncoding = $priorInputEncoding }
+      if ($switchedInput) {
+        try { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $priorInputEncoding }
         catch {
           $restoreFailure = $_.Exception.Message
-          [Console]::Error.WriteLine("render-project-values: could not restore the console input code page around a Git start ($restoreFailure); run chcp to reset it")
+          [Console]::Error.WriteLine("render-project-values: could not put back the cached console input encoding around a Git start ($restoreFailure)")
         }
       }
     }
@@ -1209,7 +1223,7 @@ function Invoke-CrgRendererGit {
       }
       $process.Dispose()
     }
-    if ($null -ne $restoreFailure) { throw "the console input code page could not be restored around a Git start ($restoreFailure); run chcp to reset it" }
+    if ($null -ne $restoreFailure) { throw "the cached console input encoding could not be put back around a Git start ($restoreFailure)" }
   }
   return $result
 }

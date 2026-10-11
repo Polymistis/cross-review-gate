@@ -44,6 +44,7 @@ function Get-CrgPairedGitDiffEvidence {
   }
   $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = 'attribute-neutral evidence did not run' }
   $state = @{ Phase = 'input validation' }
+  $retainCustody = $false
   try {
     Initialize-CrgAttributeNeutralNative
     # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
@@ -72,13 +73,26 @@ function Get-CrgPairedGitDiffEvidence {
   } catch {
     # Failure keeps the exception, whose Data can mark an unconfirmed Git child
     # that a caller holding namespace pins must see (docs/paired-retention-v1.md).
+    # Such a child can still be using the owned context, so the context is
+    # kept open on the failure (CrgAttributeNeutralCustody) instead of being
+    # removed under it.
     $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = "$($state.Phase) failed: $($_.Exception.Message)"; Failure = $_.Exception }
+    $marked = $_.Exception
+    while ($null -ne $marked) {
+      foreach ($key in $marked.Data.Keys) {
+        if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgUncertainGitChild', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $retainCustody = $true }
+      }
+      $marked = $marked.InnerException
+    }
+    if ($retainCustody) { $_.Exception.Data['CrgAttributeNeutralCustody'] = $custody }
   } finally {
-    $cleanup = Close-CrgAttributeNeutralContext -Custody $custody
-    if (-not $cleanup.Ok) {
-      $cleanupReason = "exact private-context cleanup failed: $($cleanup.Reason)"
-      if ($result.Ok) { $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = $cleanupReason } }
-      else { $result.Reason = "$($result.Reason); $cleanupReason" }
+    if (-not $retainCustody) {
+      $cleanup = Close-CrgAttributeNeutralContext -Custody $custody
+      if (-not $cleanup.Ok) {
+        $cleanupReason = "exact private-context cleanup failed: $($cleanup.Reason)"
+        if ($result.Ok) { $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = $cleanupReason } }
+        else { $result.Reason = "$($result.Reason); $cleanupReason" }
+      }
     }
   }
   return $result

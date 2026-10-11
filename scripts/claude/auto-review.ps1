@@ -200,20 +200,21 @@ $pairedSnapshot = $null
 
 # UTF-8 for native command pipes so git diff/show output is not mojibaked
 # by Windows-1252 default. Same pattern as scripts/shared/auto-merge.ps1.
-# The console code pages belong to the console window this script shares with
-# the invoking shell, so the finally at the end of the script puts back the
-# values saved here.
+# Only this process's cached encodings change, never the console window shared
+# with the invoking shell; the finally at the end of the script puts back the
+# values returned here so the script leaves the process as it found it.
+$crgConsoleInputSwitched = $false
 try {
-  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+  $crgSavedConsoleInputEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding ([System.Text.UTF8Encoding]::new($false))
+  $crgConsoleInputSwitched = $true
+  $crgSavedConsoleOutputEncoding = Set-CrgProcessConsoleEncoding -Encoding ([System.Text.UTF8Encoding]::new($false))
 } catch {
-  Write-Host "[auto-review:claude] ERROR: the console code pages could not be read ($($_.Exception.Message)) - failing closed."
+  Write-Host "[auto-review:claude] ERROR: the console encodings could not be set to UTF-8 ($($_.Exception.Message)) - failing closed."
+  if ($crgConsoleInputSwitched) { try { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding } catch { } }
   exit 3
 }
 try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-[Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 # Git reference-backend redirects, replacement refs, grafts, and shallow boundaries can make every
 # successful HEAD/parent/tree read describe a caller-selected history. Inspect
@@ -659,12 +660,24 @@ function Get-ClaudeCodeReviewCapability {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
+    # A version line is short, so each stream keeps its first 4 KiB and an
+    # overflow fails the probe.
+    Initialize-CrgBoundedSinkNative
+    $stdoutSink = New-Object CrgBoundedCapture.SinkV1 ([long]4096)
+    $stderrSink = New-Object CrgBoundedCapture.SinkV1 ([long]4096)
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($stdoutSink)
+    $stderrTask = $proc.StandardError.BaseStream.CopyToAsync($stderrSink)
     $proc.WaitForExit()
-    $stdout = $stdoutTask.Result
-    $stderr = $stderrTask.Result
+    if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), 10000)) {
+      return [pscustomobject]@{ Ok = $false; ExePath = ''; Version = ''; Reason = 'claude --version output did not end after the process exited' }
+    }
+    $null = $stdoutTask.GetAwaiter().GetResult(); $null = $stderrTask.GetAwaiter().GetResult()
+    if ($stdoutSink.Exceeded -or $stderrSink.Exceeded) {
+      return [pscustomobject]@{ Ok = $false; ExePath = ''; Version = ''; Reason = 'claude --version printed more than its 4096-byte capture bound' }
+    }
+    $stdout = [System.Text.UTF8Encoding]::new($false).GetString($stdoutSink.ToArray())
+    $stderr = [System.Text.UTF8Encoding]::new($false).GetString($stderrSink.ToArray())
     if ($proc.ExitCode -ne 0 -or -not [string]::IsNullOrEmpty($stderr)) {
       return [pscustomobject]@{ Ok = $false; ExePath = ''; Version = ''; Reason = 'claude --version did not complete cleanly' }
     }
@@ -2012,9 +2025,9 @@ finally {
 }
 } finally {
   try {
-    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
-  } catch { Write-Warning "auto-review.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not put back the cached console input encoding ($($_.Exception.Message))." }
   try {
-    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
-  } catch { Write-Warning "auto-review.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -Encoding $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not put back the cached console output encoding ($($_.Exception.Message))." }
 }

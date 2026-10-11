@@ -1,39 +1,52 @@
 # Immutable closed-origin storage only. No branch, handoff or completed-pair activation.
 
-# Windows PowerShell caches the [Console] encodings when they are first read,
-# and a code page changed later by chcp or by a child process on the same
-# console does not update that cache, so the encoding to restore is taken from
-# the console's own code page: the cached object while it still names that
-# page (or when no console is attached), otherwise the encoding of the page.
-# Several scripts carry their own copy and one process can load more than one,
-# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name, and each copy refuses a
-# loaded type that lacks a member it calls.
-function Get-CrgConsoleRestoreEncoding {
-  param([switch]$ConsoleInput)
-  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
-    Add-Type -ErrorAction Stop -TypeDefinition @'
-namespace CrgConsoleCodePage {
-  public static class NativeV1 {
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleCP();
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleOutputCP();
+# Windows PowerShell's Process.Start builds a redirected child's input writer
+# from the cached [Console]::InputEncoding, and PowerShell decodes native
+# output with the cached [Console]::OutputEncoding. The public setters also
+# set the code page of the console window this process shares with the
+# invoking shell, and a process killed before putting it back leaves that
+# console changed, so the private cache field is set instead: the change stays
+# in this process, and passing back the returned prior value (null when the
+# cache was never filled) restores the earlier state exactly. For output, a
+# redirected standard stream's writer that was not replaced through SetOut or
+# SetError is flushed and dropped, as the setter drops it, so it is rebuilt
+# with the new encoding for whoever reads the pipe. A stream attached to the
+# console keeps a writer in the console's own code page, created now if it
+# does not exist yet: that code page does not change, so a writer rebuilt in
+# the new encoding would garble non-ASCII text there. These scripts read
+# standard input only as a raw stream, never through Console.In, so the input
+# reader is left alone. The fields are private (_name in .NET Framework,
+# s_name in .NET Core), so a runtime with neither is refused rather than
+# changing the console in their place. Several scripts carry an identical
+# copy.
+function Set-CrgProcessConsoleEncoding {
+  param([switch]$ConsoleInput, [System.Text.Encoding]$Encoding)
+  $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+  $name = if ($ConsoleInput) { 'inputEncoding' } else { 'outputEncoding' }
+  $prefix = @('_', 's_') | Where-Object { $null -ne [Console].GetField($_ + $name, $flags) } | Select-Object -First 1
+  if ($null -eq $prefix) { throw "this .NET runtime has no private console $name cache to set" }
+  $field = [Console].GetField($prefix + $name, $flags)
+  $streams = @()
+  if (-not $ConsoleInput) {
+    foreach ($spec in @(@('out', 'isOutTextWriterRedirected', 'Out', [Console]::IsOutputRedirected), @('error', 'isErrorTextWriterRedirected', 'Error', [Console]::IsErrorRedirected))) {
+      $writer = [Console].GetField($prefix + $spec[0], $flags)
+      $replaced = [Console].GetField($prefix + $spec[1], $flags)
+      if ($null -eq $writer -or $null -eq $replaced) { throw "this .NET runtime has no private console $($spec[0]) writer to rebuild" }
+      $streams += [pscustomobject]@{ Writer = $writer; Replaced = $replaced; Property = $spec[2]; Redirected = [bool]$spec[3] }
+    }
   }
-}
-'@
-    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  $prior = $field.GetValue($null)
+  foreach ($stream in $streams) {
+    if ($stream.Redirected) {
+      $current = $stream.Writer.GetValue($null)
+      if ($null -ne $current -and -not [bool]$stream.Replaced.GetValue($null)) {
+        $current.Flush()
+        $stream.Writer.SetValue($null, $null)
+      }
+    } else { $null = [Console]::($stream.Property) }
   }
-  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
-  if ($ConsoleInput) {
-    $cached = [Console]::InputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
-  } else {
-    $cached = [Console]::OutputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
-  }
-  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
-  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+  $field.SetValue($null, $Encoding)
+  return $prior
 }
 
 # A write-only stream that keeps the first bytes up to its limit and discards
@@ -162,6 +175,39 @@ function Get-CrgRetentionGitArguments {
   return ,([string[]]@("--git-dir=$($selected.GitDir)", "--work-tree=$($ProjectContext.Root)"))
 }
 
+# Whether a started Git child has exited and every holder of its output pipes
+# has closed them. The root's exit alone does not show that: Git for
+# Windows' launcher can be stopped while its worker, which inherits the pipes
+# and holds them until it exits, runs on. Stdout and stderr reach end of file
+# only once every holder of their write ends has closed them; a process that
+# holds neither pipe is outside what this shows. The stop is
+# attempted first, whatever follows: the root is killed and its input closed,
+# so a child waiting for more input can end. A stdout read the caller
+# abandoned (PendingRead) must settle before stdout is drained, since a
+# stream takes one read at a time; then a stream whose copy was never started
+# is drained, and the root's exit and both copies' completion at end of file
+# are awaited, each within the bound. A wait that runs out, a copy that ended
+# in a read error, or a probe that throws returns $false; the caller then
+# keeps what the child could be using and raises the failure as uncertain.
+# Several scripts carry an identical copy.
+function Test-CrgGitChildQuiescent {
+  param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
+  try {
+    if (-not $Process.HasExited) { try { $Process.Kill() } catch { } }
+    if ($Process.StartInfo.RedirectStandardInput) { try { $Process.StandardInput.Close() } catch { } }
+    if ($null -ne $PendingRead) {
+      try { if (-not $PendingRead.Wait($Milliseconds)) { return $false } } catch { }
+    }
+    if ($null -eq $OutputCopy) { $OutputCopy = $Process.StandardOutput.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if ($null -eq $ErrorCopy) { $ErrorCopy = $Process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if (-not $Process.WaitForExit($Milliseconds)) { return $false }
+    $copies = [System.Threading.Tasks.Task[]]@($OutputCopy, $ErrorCopy)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($copies, $Milliseconds)) { return $false }
+    foreach ($copy in $copies) { if ($copy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $false } }
+    return $true
+  } catch { return $false }
+}
+
 function Invoke-CrgRetentionGit {
   param([object]$ProjectContext, [string]$Domain, [string[]]$Arguments,
     [int]$Maximum = 16384, [byte[]]$InputBytes, [int[]]$AllowedExitCodes = @(0))
@@ -186,15 +232,16 @@ function Invoke-CrgRetentionGit {
   Initialize-CrgBoundedSinkNative
   $process = New-Object Diagnostics.Process
   $process.StartInfo = $start; $started = $false
+  $confirmed = $false; $copy = $null; $errorCopy = $null; $failure = $null
   $output = New-Object CrgBoundedCapture.SinkV1 ([long]$Maximum)
   $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   try {
     # Match the existing capture transport's PS5 no-preamble binary stdin rule.
-    $priorEncoding = $null
+    $priorEncoding = $null; $switchedInput = $false
     if ($null -ne $InputBytes -and $null -eq $start.PSObject.Properties['StandardInputEncoding']) {
-      $priorEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+      $priorEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding ([Text.UTF8Encoding]::new($false)); $switchedInput = $true
     } elseif ($null -ne $InputBytes) { $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false) }
-    try { $started = $process.Start() } finally { if ($null -ne $priorEncoding) { [Console]::InputEncoding = $priorEncoding } }
+    try { $started = $process.Start() } finally { if ($switchedInput) { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $priorEncoding } }
     if (-not $started) { throw 'retention Git launch failed' }
     $copy = $process.StandardOutput.BaseStream.CopyToAsync($output)
     $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
@@ -211,23 +258,27 @@ function Invoke-CrgRetentionGit {
       if ($errors.Exceeded) { throw 'retention Git error output exceeds its bound' }
       throw 'retention Git command timed out'
     }
+    # Bounded even after the root's exit: a worker that outlives the root can
+    # hold a pipe open, and the cleanup check then decides.
+    if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($copy, $errorCopy), 10000)) { throw 'retention Git output did not reach end of file after the root exited' }
     $null = $copy.GetAwaiter().GetResult(); $null = $errorCopy.GetAwaiter().GetResult()
+    $confirmed = $true
     if ($process.ExitCode -notin $AllowedExitCodes) { throw "retention Git failed ($($process.ExitCode)): $([Text.UTF8Encoding]::new($false).GetString($errors.ToArray()))" }
     if ($output.Exceeded) { throw 'retention Git output exceeds its bound' }
     if ($errors.Exceeded) { throw 'retention Git error output exceeds its bound' }
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Bytes = [byte[]]$output.ToArray() }
-  } finally {
-    # The wait is bounded so a child that survives its stop cannot hang
-    # retention. A child whose exit it cannot confirm can still be using the
-    # pinned namespace, so it is raised as uncertain with its process object
-    # undisposed (Save-CrgRetentionUncertainPins).
-    if ($started -and -not $process.HasExited) {
-      try { $process.Kill() } catch { }
-      if (-not $process.WaitForExit(2000)) {
-        $uncertain = [InvalidOperationException]::new('retention Git root exit is unconfirmed; preserve prepared objects')
-        $uncertain.Data['CrgUncertainGitChild'] = $process
-        throw $uncertain
-      }
+  } catch { $failure = $_.Exception; throw }
+  finally {
+    # The root has exited and both pipes reached end of file only where
+    # $confirmed is set. Otherwise Test-CrgGitChildQuiescent decides within its
+    # bound, so a child that survives its stop cannot hang retention. A child
+    # it cannot confirm can still be using the pinned namespace, so it is
+    # raised as uncertain with its process object undisposed and the original
+    # failure inside (Save-CrgRetentionUncertainPins).
+    if ($started -and -not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $process -OutputCopy $copy -ErrorCopy $errorCopy)) {
+      $uncertain = New-Object InvalidOperationException -ArgumentList 'retention Git child exit is unconfirmed; preserve prepared objects', $failure
+      $uncertain.Data['CrgUncertainGitChild'] = $process
+      throw $uncertain
     }
     $process.Dispose()
   }

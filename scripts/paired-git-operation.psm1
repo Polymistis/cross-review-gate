@@ -848,6 +848,7 @@ function Initialize-CrgPairedPrivateDatabase {
     $directories = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
     foreach ($layout in @('', 'objects', 'objects\info', 'objects\pack', 'refs', 'refs\heads', 'refs\tags')) { $directories.Add($layout, $null) }
     $present = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $retainPins = $false
     try {
       $root = Enter-CrgAttributeNeutralDirectoryChain -Path $Owner.Path -Pins $pins -DenyLeafRename
       if ($Owner.Handle -isnot [Microsoft.Win32.SafeHandles.SafeFileHandle] -or $Owner.Handle.IsClosed -or $Owner.Handle.IsInvalid -or
@@ -927,7 +928,21 @@ function Initialize-CrgPairedPrivateDatabase {
         if ($refs.Length -ne 0) { throw 'new private initialization contains an existing ref' }
       } $Project
       Assert-CrgPairedOperationLock -Lock $Lock
-    } finally { for ($index = $pins.Count - 1; $index -ge 0; $index--) { $pins[$index].Handle.Dispose() } }
+    } catch {
+      # The layout probes raise a Git child whose exit they cannot confirm as
+      # an uncertain failure; that child can still be reading the new private
+      # namespace, so its directory pins stay open on the failure
+      # (CrgPrivateInitializationPins) instead of being released under it.
+      $marked = $_.Exception
+      while ($null -ne $marked) {
+        foreach ($key in $marked.Data.Keys) {
+          if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgUncertainGitChild', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $retainPins = $true }
+        }
+        $marked = $marked.InnerException
+      }
+      if ($retainPins) { $_.Exception.Data['CrgPrivateInitializationPins'] = $pins }
+      throw
+    } finally { if (-not $retainPins) { for ($index = $pins.Count - 1; $index -ge 0; $index--) { $pins[$index].Handle.Dispose() } } }
   } $ProjectContext $OperationLock $OwnedDirectory $texts $capture
   return [pscustomobject]@{ GitDir = $domain.GitDir; ReadyForPublication = $false }
 }

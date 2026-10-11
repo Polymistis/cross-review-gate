@@ -12,40 +12,117 @@
 # review-preparation.psm1 and paired-diff.psm1 dot-source this file too; there
 # it runs in that module's scope.
 
-# Windows PowerShell caches the [Console] encodings when they are first read,
-# and a code page changed later by chcp or by a child process on the same
-# console does not update that cache, so the encoding to restore is taken from
-# the console's own code page: the cached object while it still names that
-# page (or when no console is attached), otherwise the encoding of the page.
-# Several scripts carry their own copy and one process can load more than one,
-# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name, and each copy refuses a
-# loaded type that lacks a member it calls.
-function Get-CrgConsoleRestoreEncoding {
-  param([switch]$ConsoleInput)
-  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
+# Windows PowerShell's Process.Start builds a redirected child's input writer
+# from the cached [Console]::InputEncoding, and PowerShell decodes native
+# output with the cached [Console]::OutputEncoding. The public setters also
+# set the code page of the console window this process shares with the
+# invoking shell, and a process killed before putting it back leaves that
+# console changed, so the private cache field is set instead: the change stays
+# in this process, and passing back the returned prior value (null when the
+# cache was never filled) restores the earlier state exactly. For output, a
+# redirected standard stream's writer that was not replaced through SetOut or
+# SetError is flushed and dropped, as the setter drops it, so it is rebuilt
+# with the new encoding for whoever reads the pipe. A stream attached to the
+# console keeps a writer in the console's own code page, created now if it
+# does not exist yet: that code page does not change, so a writer rebuilt in
+# the new encoding would garble non-ASCII text there. These scripts read
+# standard input only as a raw stream, never through Console.In, so the input
+# reader is left alone. The fields are private (_name in .NET Framework,
+# s_name in .NET Core), so a runtime with neither is refused rather than
+# changing the console in their place. Several scripts carry an identical
+# copy.
+function Set-CrgProcessConsoleEncoding {
+  param([switch]$ConsoleInput, [System.Text.Encoding]$Encoding)
+  $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+  $name = if ($ConsoleInput) { 'inputEncoding' } else { 'outputEncoding' }
+  $prefix = @('_', 's_') | Where-Object { $null -ne [Console].GetField($_ + $name, $flags) } | Select-Object -First 1
+  if ($null -eq $prefix) { throw "this .NET runtime has no private console $name cache to set" }
+  $field = [Console].GetField($prefix + $name, $flags)
+  $streams = @()
+  if (-not $ConsoleInput) {
+    foreach ($spec in @(@('out', 'isOutTextWriterRedirected', 'Out', [Console]::IsOutputRedirected), @('error', 'isErrorTextWriterRedirected', 'Error', [Console]::IsErrorRedirected))) {
+      $writer = [Console].GetField($prefix + $spec[0], $flags)
+      $replaced = [Console].GetField($prefix + $spec[1], $flags)
+      if ($null -eq $writer -or $null -eq $replaced) { throw "this .NET runtime has no private console $($spec[0]) writer to rebuild" }
+      $streams += [pscustomobject]@{ Writer = $writer; Replaced = $replaced; Property = $spec[2]; Redirected = [bool]$spec[3] }
+    }
+  }
+  $prior = $field.GetValue($null)
+  foreach ($stream in $streams) {
+    if ($stream.Redirected) {
+      $current = $stream.Writer.GetValue($null)
+      if ($null -ne $current -and -not [bool]$stream.Replaced.GetValue($null)) {
+        $current.Flush()
+        $stream.Writer.SetValue($null, $null)
+      }
+    } else { $null = [Console]::($stream.Property) }
+  }
+  $field.SetValue($null, $Encoding)
+  return $prior
+}
+
+# A write-only stream that keeps the first bytes up to its limit and discards
+# the rest, so a Git child copying its stderr into it never blocks on a full
+# pipe and never makes the capture buffer more than the limit. Exceeded means
+# bytes were discarded: once the copy has finished, every caller refuses an
+# exceeded capture whatever the exit code, since a short or empty capture
+# alone never shows that nothing was discarded. Several scripts carry their
+# own copy under the same name and one process can load more than one, so
+# whichever compiles first serves them all: a change to its members needs a
+# new type name, and each copy refuses a loaded type that lacks a member it
+# calls.
+function Initialize-CrgBoundedSinkNative {
+  if (-not ('CrgBoundedCapture.SinkV1' -as [type])) {
     Add-Type -ErrorAction Stop -TypeDefinition @'
-namespace CrgConsoleCodePage {
-  public static class NativeV1 {
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleCP();
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleOutputCP();
+namespace CrgBoundedCapture {
+  using System;
+  using System.IO;
+
+  public sealed class SinkV1 : Stream {
+    private readonly MemoryStream kept = new MemoryStream();
+    private readonly long limit;
+    private bool exceeded;
+
+    public SinkV1(long limit) {
+      if (limit < 0) { throw new ArgumentOutOfRangeException("limit"); }
+      this.limit = limit;
+    }
+
+    public bool Exceeded { get { lock (kept) { return exceeded; } } }
+
+    public byte[] ToArray() { lock (kept) { return kept.ToArray(); } }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+      lock (kept) {
+        if (exceeded) { return; }
+        long room = limit - kept.Length;
+        if (count > room) {
+          kept.Write(buffer, offset, (int)room);
+          exceeded = true;
+          return;
+        }
+        kept.Write(buffer, offset, count);
+      }
+    }
+
+    public override bool CanRead { get { return false; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return true; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
   }
 }
 '@
-    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+    if (-not ('CrgBoundedCapture.SinkV1' -as [type])) { throw 'the bounded capture stream could not be compiled' }
   }
-  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
-  if ($ConsoleInput) {
-    $cached = [Console]::InputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
-  } else {
-    $cached = [Console]::OutputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
+  $sinkType = [CrgBoundedCapture.SinkV1]
+  if ($null -eq $sinkType.GetConstructor([type[]]@([long])) -or $null -eq $sinkType.GetProperty('Exceeded') -or $null -eq $sinkType.GetMethod('ToArray')) {
+    throw 'a loaded CrgBoundedCapture.SinkV1 lacks a member this copy calls; a changed copy needs a new type name'
   }
-  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
-  return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
 # PURE path-selection for the default review-output dir: given an already-resolved
@@ -6252,10 +6329,12 @@ function Get-PlanConsistencyReport {
 # Grammar parse of a declaration's BYTES (all-or-nothing; first offense wins).
 # Returns @{ Ok; Mode; Campaign; Surfaces; ErrReason; ErrAnchor } where
 # ErrAnchor is 'line <n>', 'file', or 'mode-line' per the doctrine's
-# deterministic no-line anchoring. Pure.
+# deterministic no-line anchoring. Pure. -OversizeLength names a declaration
+# whose reader kept only its size because the size alone passes the bound.
 function ConvertFrom-ProjectModeDeclaration {
-  param([byte[]]$Bytes)
+  param([byte[]]$Bytes, [long]$OversizeLength = 0)
   $r = @{ Ok = $false; Mode = ''; Campaign = ''; Surfaces = @(); ErrReason = ''; ErrAnchor = '' }
+  if ($OversizeLength -gt 8192) { $r.ErrReason = "file exceeds the 8 KiB bound ($OversizeLength bytes)"; $r.ErrAnchor = 'file'; return $r }
   if ($null -eq $Bytes) { $r.ErrReason = 'missing required project-mode: v1 sentinel (empty file)'; $r.ErrAnchor = 'file'; return $r }
   if ($Bytes.Length -gt 8192) { $r.ErrReason = "file exceeds the 8 KiB bound ($($Bytes.Length) bytes)"; $r.ErrAnchor = 'file'; return $r }
   if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
@@ -6433,59 +6512,37 @@ function Get-ProjectModeEntryKind {
   return 'error'
 }
 
-# The declaration blob's BYTES at a ref, or $null on absence/failure. Read
-# through a raw process stream, never PowerShell's decoded pipeline -- the
-# grammar validates BYTES (BOM, CR, control, non-ASCII), and PS decoding
-# would erase exactly the evidence those checks need. The caller
-# distinguishes absence from failure via Get-ProjectModeEntryKind first.
-# WorkingDirectory is pinned to the PS location: Process.Start defaults to
-# [Environment]::CurrentDirectory, which does NOT follow Push-Location, so
-# an unpinned child git would silently read whatever repo the process was
-# LAUNCHED from.
+# The declaration blob at a ref as @{ Bytes; OversizeLength }, or $null on
+# failure, for ConvertFrom-ProjectModeDeclaration. Read as raw bytes through
+# Read-CrgGitBytes, never PowerShell's decoded pipeline -- the grammar
+# validates BYTES (BOM, CR, control, non-ASCII), and PS decoding would erase
+# exactly the evidence those checks need -- and kept to the grammar's 8 KiB
+# bound. A blob past the bound comes back as its size alone, so the parser
+# still reports the file-anchored size malformation (a governing declaration
+# falls back to shipped defaults) rather than a read failure (which refuses).
+# The caller distinguishes absence from failure via Get-ProjectModeEntryKind
+# first. Git runs in the PS location: Process.Start defaults to
+# [Environment]::CurrentDirectory, which does NOT follow Push-Location. Every
+# failure is reported with its cause, because callers refuse on $null and a
+# refusal that wedges every governed run must not report causeless.
 function Get-ProjectModeBytes {
   param([string]$TreeRef, [string]$LogTag = 'auto-review')
-  try {
-    $p = New-Object System.Diagnostics.ProcessStartInfo
-    $p.FileName = 'git'
-    $p.Arguments = "cat-file blob ${TreeRef}:PROJECT-MODE.md"
-    $p.WorkingDirectory = (Get-Location).Path
-    $p.RedirectStandardOutput = $true
-    $p.RedirectStandardError = $true
-    $p.UseShellExecute = $false
-    $proc = [System.Diagnostics.Process]::Start($p)
-    $ms = New-Object System.IO.MemoryStream
-    # Drain stderr ASYNCHRONOUSLY while stdout is copied: a synchronous
-    # stderr read after a full stdout drain deadlocks when the child fills
-    # the stderr pipe buffer (child blocks writing stderr, parent blocks
-    # reading stdout).
-    $errTask = $proc.StandardError.ReadToEndAsync()
-    $proc.StandardOutput.BaseStream.CopyTo($ms)
-    $proc.WaitForExit()
-    $errText = $errTask.Result
-    if ($proc.ExitCode -ne 0) {
-      # Surface the cause UNCONDITIONALLY: callers refuse (fail closed) on
-      # $null, and a refusal that wedges every governed run must not report
-      # causeless -- the exit code is the one datum always available.
-      $errTrim = ("$errText".Trim() -replace '[^\x20-\x7E]', ' ')
-      if ($errTrim.Length -gt 300) { $errTrim = $errTrim.Substring(0, 300) }
-      if (-not $errTrim) { $errTrim = '(no stderr)' }
-      Write-Host "[$LogTag] WARN: raw git read failed (exit $($proc.ExitCode); git $($p.Arguments)): $errTrim"
-      return $null
-    }
-    # `,` preserves an EMPTY byte[] through PS return enumeration: without it
-    # a 0-byte blob unrolls to $null and an empty declaration would be
-    # misreported as a read failure instead of the file-anchored
-    # missing-sentinel malformation the parser names.
-    return , ([byte[]]$ms.ToArray())
-  } catch {
-    # A THROWN failure (git absent from PATH, Process.Start fault, stream
-    # error) must not report causeless either -- same rule as the exit-code
-    # branch above, sanitization and bound included.
-    $exTrim = ("$($_.Exception.GetType().Name): $($_.Exception.Message)".Trim() -replace '[^\x20-\x7E]', ' ')
-    if ($exTrim.Length -gt 300) { $exTrim = $exTrim.Substring(0, 300) }
-    Write-Host "[$LogTag] WARN: raw git read threw (git $($p.Arguments)): $exTrim"
-    return $null
+  $object = "${TreeRef}:PROJECT-MODE.md"
+  $here = (Get-Location).Path
+  $read = Read-CrgGitBytes -GitArgs @('cat-file', 'blob', $object) -WorkingDirectory $here -MaxBytes 8192
+  if ($read.Ok) { return @{ Bytes = [byte[]]$read.Bytes; OversizeLength = 0 } }
+  $reason = $read.Reason
+  # Only a complete read that Git ended with exit 0 is a size malformation; an
+  # overflow followed by any other failure stays a read failure, which
+  # refuses.
+  if ($read.Overflow -and $read.ExitCode -eq 0) {
+    $size = Read-CrgGitBytes -GitArgs @('cat-file', '-s', $object) -WorkingDirectory $here -MaxBytes 64
+    $sizeText = if ($size.Ok) { [System.Text.Encoding]::ASCII.GetString($size.Bytes) } else { '' }
+    if ($sizeText -cmatch '\A([0-9]{1,18})\n\z' -and [long]$Matches[1] -gt 8192) { return @{ Bytes = $null; OversizeLength = [long]$Matches[1] } }
+    $reason = "$reason, and its size could not be read back"
   }
+  Write-Host "[$LogTag] WARN: raw git read failed (git cat-file blob $object): $reason"
+  return $null
 }
 
 # Does a name-status listing touch the declaration path? Every path column
@@ -6617,8 +6674,8 @@ function Resolve-ProjectModeRun {
       $candidateState = 'invalid'
       $candidateDetail = "candidate declaration is a $candKind, not a regular file"
     } else {
-      $candBytes = Get-ProjectModeBytes -TreeRef $CandidateTreeRef -LogTag $LogTag
-      if ($null -eq $candBytes) {
+      $candRead = Get-ProjectModeBytes -TreeRef $CandidateTreeRef -LogTag $LogTag
+      if ($null -eq $candRead) {
         $detail = "candidate declaration blob could not be read in $Scope scope (Git evidence unavailable)"
         return @{
           Action = 'refuse'; Reason = $detail
@@ -6626,7 +6683,7 @@ function Resolve-ProjectModeRun {
           Block = ''; Warns = $warns
         }
       } else {
-        $candParse = ConvertFrom-ProjectModeDeclaration -Bytes $candBytes
+        $candParse = ConvertFrom-ProjectModeDeclaration -Bytes $candRead.Bytes -OversizeLength $candRead.OversizeLength
         if ($candParse.Ok) {
           $candidateState = 'valid'
           $candidateDetail = "mode=$($candParse.Mode)"
@@ -6676,8 +6733,8 @@ function Resolve-ProjectModeRun {
       Warns = $warns
     }
   }
-  $govBytes = Get-ProjectModeBytes -TreeRef $GoverningRef -LogTag $LogTag
-  if ($null -eq $govBytes) {
+  $govRead = Get-ProjectModeBytes -TreeRef $GoverningRef -LogTag $LogTag
+  if ($null -eq $govRead) {
     $detail = "governing declaration blob at $GoverningRef could not be read (Git evidence unavailable)"
     return @{
       Action = 'refuse'; Reason = $detail
@@ -6686,7 +6743,7 @@ function Resolve-ProjectModeRun {
       Warns = $warns
     }
   }
-  $parse = ConvertFrom-ProjectModeDeclaration -Bytes $govBytes
+  $parse = ConvertFrom-ProjectModeDeclaration -Bytes $govRead.Bytes -OversizeLength $govRead.OversizeLength
   if (-not $parse.Ok) {
     $detail = "governing declaration at $GoverningRef is malformed: $($parse.ErrReason); anchor: $($parse.ErrAnchor)"
     $warns += "$detail; using shipped defaults"
@@ -6913,27 +6970,17 @@ function Get-CrgGitTreePathList {
     return [pscustomobject]@{ Ok = $false; Reason = 'invalid tree object id'; Paths = @(); DirectoryLeafPaths = @() }
   }
 
-  $proc = $null
-  $ms = $null
   try {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'git'
-    $psi.Arguments = "ls-tree --full-tree -r -t -z $TreeOid"
-    $psi.WorkingDirectory = (Get-Location).Path
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $ms = New-Object System.IO.MemoryStream
-    $errTask = $proc.StandardError.ReadToEndAsync()
-    $proc.StandardOutput.BaseStream.CopyTo($ms)
-    $proc.WaitForExit()
-    [void]$errTask.Result
-    if ($proc.ExitCode -ne 0) {
-      return [pscustomobject]@{ Ok = $false; Reason = 'Git tree path enumeration failed'; Paths = @(); DirectoryLeafPaths = @() }
+    # The inventory must be complete, so a listing past the bound is refused,
+    # never truncated. The bound is the 64 MiB the central index capture
+    # accepts for a whole index, whose entries are about the size of these
+    # records.
+    $read = Read-CrgGitBytes -GitArgs @('ls-tree', '--full-tree', '-r', '-t', '-z', $TreeOid) -WorkingDirectory (Get-Location).Path -MaxBytes 67108864
+    if (-not $read.Ok) {
+      return [pscustomobject]@{ Ok = $false; Reason = "Git tree path enumeration failed: $($read.Reason)"; Paths = @(); DirectoryLeafPaths = @() }
     }
 
-    [byte[]]$raw = $ms.ToArray()
+    [byte[]]$raw = $read.Bytes
     $paths = New-Object 'System.Collections.Generic.List[string]'
     $directoryLeafPaths = New-Object 'System.Collections.Generic.List[string]'
     $gitlinkPaths = New-Object 'System.Collections.Generic.List[string]'
@@ -6994,9 +7041,6 @@ function Get-CrgGitTreePathList {
     return [pscustomobject]@{ Ok = $true; Reason = ''; Paths = @($paths); DirectoryLeafPaths = @($directoryLeafPaths); GitlinkPaths = @($gitlinkPaths) }
   } catch {
     return [pscustomobject]@{ Ok = $false; Reason = 'Git tree path enumeration could not be completed'; Paths = @(); DirectoryLeafPaths = @() }
-  } finally {
-    if ($ms) { $ms.Dispose() }
-    if ($proc) { $proc.Dispose() }
   }
 }
 
@@ -7244,9 +7288,12 @@ function Get-CrgGitSelectorEnvironmentKeys {
 # memory. Stdout and stderr are drained in one loop so neither pipe can fill
 # and stall Git.
 #
-# Returns @{ Ok; Bytes; Overflow; Started; Reason }. Started is set once a Git
-# process has been created, so a caller can tell a Git that never ran (absent,
-# or a command refused before launch) from a Git run that failed. Every
+# Returns @{ Ok; Bytes; Overflow; Started; ExitCode; Reason }. Started is set
+# once a Git process has been created, so a caller can tell a Git that never
+# ran (absent, or a command refused before launch) from a Git run that failed.
+# ExitCode is set only once both pipes drained and the root exited, so an
+# overflow with ExitCode 0 is a complete, successful run that printed too
+# much, and any other overflow is an operational failure as well. Every
 # failure carries a cause
 # (the exit code at least), sanitized and bounded, because callers refuse on
 # it.
@@ -7262,7 +7309,7 @@ function Get-CrgGitSelectorEnvironmentKeys {
 function Read-CrgGitBytes {
   param([string[]]$GitArgs, [string]$WorkingDirectory, [long]$MaxBytes, [int]$StderrBytes = 4096, [string]$ShallowFile = '',
     [switch]$IsolateRepository, [string]$CommonDir = '')
-  $r = @{ Ok = $false; Bytes = $null; Overflow = $false; Started = $false; Reason = '' }
+  $r = @{ Ok = $false; Bytes = $null; Overflow = $false; Started = $false; ExitCode = $null; Reason = '' }
   $proc = $null
   $drained = $false
   try {
@@ -7308,6 +7355,7 @@ function Read-CrgGitBytes {
     }
     $drained = $true
     $proc.WaitForExit()
+    $r.ExitCode = $proc.ExitCode
     if ($r.Overflow) { $r.Reason = "git output passed $MaxBytes bytes"; return $r }
     if ($proc.ExitCode -ne 0) {
       $errTrim = ([System.Text.Encoding]::UTF8.GetString($errMs.ToArray()).Trim() -replace '[^\x20-\x7E]', ' ')
@@ -8362,6 +8410,39 @@ function Close-CrgAttributeNeutralContext {
   return @{ Ok = ($failures.Count -eq 0); Reason = ($failures -join '; ') }
 }
 
+# Whether a started Git child has exited and every holder of its output pipes
+# has closed them. The root's exit alone does not show that: Git for
+# Windows' launcher can be stopped while its worker, which inherits the pipes
+# and holds them until it exits, runs on. Stdout and stderr reach end of file
+# only once every holder of their write ends has closed them; a process that
+# holds neither pipe is outside what this shows. The stop is
+# attempted first, whatever follows: the root is killed and its input closed,
+# so a child waiting for more input can end. A stdout read the caller
+# abandoned (PendingRead) must settle before stdout is drained, since a
+# stream takes one read at a time; then a stream whose copy was never started
+# is drained, and the root's exit and both copies' completion at end of file
+# are awaited, each within the bound. A wait that runs out, a copy that ended
+# in a read error, or a probe that throws returns $false; the caller then
+# keeps what the child could be using and raises the failure as uncertain.
+# Several scripts carry an identical copy.
+function Test-CrgGitChildQuiescent {
+  param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
+  try {
+    if (-not $Process.HasExited) { try { $Process.Kill() } catch { } }
+    if ($Process.StartInfo.RedirectStandardInput) { try { $Process.StandardInput.Close() } catch { } }
+    if ($null -ne $PendingRead) {
+      try { if (-not $PendingRead.Wait($Milliseconds)) { return $false } } catch { }
+    }
+    if ($null -eq $OutputCopy) { $OutputCopy = $Process.StandardOutput.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if ($null -eq $ErrorCopy) { $ErrorCopy = $Process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if (-not $Process.WaitForExit($Milliseconds)) { return $false }
+    $copies = [System.Threading.Tasks.Task[]]@($OutputCopy, $ErrorCopy)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($copies, $Milliseconds)) { return $false }
+    foreach ($copy in $copies) { if ($copy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $false } }
+    return $true
+  } catch { return $false }
+}
+
 # Run one local Git command in the owned attribute-neutral repository context.
 # Environment construction is allowlist-only: no caller Git/config selector can
 # leak back into evidence extraction.
@@ -8414,29 +8495,53 @@ function Invoke-CrgAttributeNeutralGitChild {
   $childEnvironment['LC_ALL'] = 'C'
   $childEnvironment['LANG'] = 'C'
   Set-CrgNoReplaceObjectsInChildEnvironment -EnvEntries $childEnvironment
-  try {
-    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-  } catch { }
 
+  # Stdout is kept whole: it is the review evidence, and the compared trees
+  # bound its size. Stderr only feeds failure messages, so it keeps its first
+  # 64 KiB and an overflow is refused.
+  Initialize-CrgBoundedSinkNative
   $proc = New-Object System.Diagnostics.Process
   $proc.StartInfo = $psi
   $output = New-Object IO.MemoryStream
+  $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
+  $started = $false; $confirmed = $false; $stdoutTask = $null; $stderrTask = $null; $failure = $null
   try {
     if (-not $proc.Start()) { throw 'Git process did not start' }
+    $started = $true
     $proc.StandardInput.Close()
     $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($output)
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    $proc.WaitForExit()
+    $stderrTask = $proc.StandardError.BaseStream.CopyToAsync($errors)
+    # A Git that never exits must not stall the review; the deadline sits far
+    # above any diff the compared trees produce, and the cleanup check below
+    # stops the child.
+    if (-not $proc.WaitForExit(600000)) { throw 'attribute-neutral Git did not exit within 10 minutes' }
+    # Bounded even after the root's exit: a worker that outlives the root can
+    # hold a pipe open, and the cleanup check then decides.
+    if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), 10000)) { throw 'attribute-neutral Git output did not reach end of file after the root exited' }
     $null = $stdoutTask.GetAwaiter().GetResult()
+    $null = $stderrTask.GetAwaiter().GetResult()
+    $confirmed = $true
+    if ($errors.Exceeded) { throw "attribute-neutral Git stderr exceeded the 65536-byte capture bound (exit $($proc.ExitCode))" }
     [byte[]]$stdoutBytes = $output.ToArray()
     $result = @{
       ExitCode = $proc.ExitCode
       Stdout = [Text.UTF8Encoding]::new($false).GetString($stdoutBytes)
       StdoutBytes = $stdoutBytes
-      Stderr = $stderrTask.Result
+      Stderr = [Text.UTF8Encoding]::new($false).GetString($errors.ToArray())
     }
-  } finally {
+  } catch { $failure = $_.Exception; throw }
+  finally {
+    # A failure above can leave the child, or the worker of a stopped Git for
+    # Windows launcher, running in the owned context. Where $confirmed is not
+    # set, a child Test-CrgGitChildQuiescent cannot confirm is raised as
+    # uncertain (CrgUncertainGitChild, its process object and capture left
+    # undisposed, the original failure inside), so the context's owner keeps
+    # the context instead of removing it under the child.
+    if ($started -and -not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $proc -OutputCopy $stdoutTask -ErrorCopy $stderrTask)) {
+      $uncertain = New-Object InvalidOperationException -ArgumentList 'attribute-neutral Git cleanup could not confirm that the child exited and every holder of its output pipes closed them', $failure
+      $uncertain.Data['CrgUncertainGitChild'] = $proc
+      throw $uncertain
+    }
     $output.Dispose()
     $proc.Dispose()
   }
@@ -8447,10 +8552,16 @@ function Invoke-CrgAttributeNeutralGitChild {
 # Shared so the owned bare-Git diff context (control files, attribute reset,
 # child environment) cannot drift between the PowerShell callers of this
 # file; the pre-commit hook and auto-merge.ps1 keep their own setups. Contract: the caller resolves and pins the source object directory,
-# chooses the Git executable and the scratch parent, owns Custody and closes
-# it (Close-CrgAttributeNeutralContext) on every path, and builds its result
-# from the returned runs, each of which has exited 0. State.Phase names the
-# step under way when a step throws.
+# chooses the Git executable and the scratch parent, owns Custody, and builds
+# its result from the returned runs, each of which has exited 0. The caller
+# closes Custody (Close-CrgAttributeNeutralContext) on success and on any
+# failure that does not carry CrgUncertainGitChild, which is when each child's
+# root process has exited and every holder of its output pipes has closed
+# them. A failure
+# carrying it can leave a child using the context, so the caller keeps Custody strongly referenced (attached to a
+# failure its owner retains, or in a list that lasts as long as the process)
+# instead of closing it. State.Phase names the step under way when a step
+# throws.
 function Invoke-CrgAttributeNeutralDiffRuns {
   param([hashtable]$Custody, [string]$GitExe, [string]$SourceObjects, [string]$ObjectFormat,
     [string]$TempParent, [string[]]$CompareArgs, [hashtable]$State)
@@ -8582,6 +8693,7 @@ function Get-CrgAttributeNeutralDiffEvidence {
   }
   $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = 'attribute-neutral evidence did not run' }
   $state = @{ Phase = 'input validation' }
+  $retainCustody = $false
   try {
     Initialize-CrgAttributeNeutralNative
     if ([string]::IsNullOrWhiteSpace($RepoRoot)) { throw 'repository root is empty' }
@@ -8656,12 +8768,28 @@ function Get-CrgAttributeNeutralDiffEvidence {
     }
   } catch {
     $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = "$($state.Phase) failed: $($_.Exception.Message)" }
+    # A Git child whose exit could not be confirmed can still be using the
+    # owned context, so it is left in place rather than removed under the
+    # child. Skipping the close alone would leave its handles to the garbage
+    # collector, so the failure and custody are held in a list in the scope
+    # that loaded this file (the wrapper script or module) until that scope
+    # ends with the process.
+    for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+      if ($cause.Data.Contains('CrgUncertainGitChild')) { $retainCustody = $true }
+    }
+    if ($retainCustody) {
+      if ($null -eq $script:CrgRetainedUncertainGitOwners) { $script:CrgRetainedUncertainGitOwners = New-Object 'System.Collections.Generic.List[object]' }
+      $script:CrgRetainedUncertainGitOwners.Add([pscustomobject]@{ Failure = $_.Exception; Custody = $custody })
+      $result.Reason = "$($result.Reason); the owned attribute-neutral context is kept because a Git child's exit is unconfirmed"
+    }
   } finally {
-    $cleanup = Close-CrgAttributeNeutralContext -Custody $custody
-    if (-not $cleanup.Ok) {
-      $cleanupReason = "exact private-context cleanup failed: $($cleanup.Reason)"
-      if ($result.Ok) { $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = $cleanupReason } }
-      else { $result.Reason = "$($result.Reason); $cleanupReason" }
+    if (-not $retainCustody) {
+      $cleanup = Close-CrgAttributeNeutralContext -Custody $custody
+      if (-not $cleanup.Ok) {
+        $cleanupReason = "exact private-context cleanup failed: $($cleanup.Reason)"
+        if ($result.Ok) { $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = $cleanupReason } }
+        else { $result.Reason = "$($result.Reason); $cleanupReason" }
+      }
     }
   }
   return $result

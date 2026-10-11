@@ -107,12 +107,30 @@ Complete descendant exit is required; timeout/uncertain cleanup preserves
 operation state without claiming completion.
 An unconfirmed Stop/Close carries CrgPairedProcessSession and the fixed uncertain
 reference in exception state. A Git child of the retention helper
-(`Invoke-CrgRetentionGit`) or of the central object batch or status reader
-whose exit the bounded wait after its stop cannot confirm carries
-CrgUncertainGitChild, its undisposed process object. For either marker, every
+(`Invoke-CrgRetentionGit`), of the central object batch or status reader, or
+of the attribute-neutral diff runner (`Invoke-CrgAttributeNeutralGitChild`)
+that fails before its exit is confirmed carries CrgUncertainGitChild, its
+undisposed process object, unless `Test-CrgGitChildQuiescent` shows within
+its bound that the root exited and every holder of its output pipes closed
+them: stdout and stderr both reached end of file. The root's exit alone
+is not enough, since a stopped Git for Windows launcher can leave its worker
+running. For either marker, every
 retention custody open at the time (the context opener's verification, the
 reader and the writer) adds its pins to CrgPairRetentionNamespacePins, with
 CrgPairRetentionProjectContext, on that exception and does not dispose them.
+The other owners a possibly live child can use do the same on a failure that
+carries any marker `Save-CrgUncertainCentralOperation` retains: the central
+index copy (CrgCentralIndexCopy) and history control file
+(CrgCentralHistoryControl), project admission's reads, lock and Git
+executable lease (CrgProjectAdmissionOwners), private initialization's
+directory pins (CrgPrivateInitializationPins) and the paired diff's
+attribute-neutral context (CrgAttributeNeutralCustody). The launcher's runtime
+owners are kept at both ends, because an installed launcher's bytes stay fixed
+across activations while a newer launcher can still select an older compatible
+release: the release-local `Invoke-CrgCentralOperation` adds them as
+CrgCentralRuntimeOwners through the context's `RetainFailure` callback, and
+the launcher keeps them until its process ends when the failure it receives
+carries one of those markers.
 The marker travels on the exception or an inner exception of it. The paired
 diff capture (`Get-CrgPairedGitDiffEvidence`) reports failure as a result
 that carries the exception as `Failure`; retention's first-attachment

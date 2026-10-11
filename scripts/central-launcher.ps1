@@ -366,6 +366,19 @@ try {
   Import-Module -Name $selected.Payloads['scripts/central-context.psm1'].Path -Force -ErrorAction Stop
   $selected = Add-CrgLaunchContext -Selection $selected
   Invoke-CrgCentralOperation -TargetRepo $TargetRepo -Operation $operation -Context $selected
+} catch {
+  # Admission and status failures come before any operation owner can call
+  # RetainFailure. One raised for a Git child or native session whose exit was
+  # not confirmed keeps the runtime leases, as RetainFailure does, until this
+  # process ends rather than releasing them under that child.
+  $marked = $_.Exception
+  while ($null -ne $marked) {
+    foreach ($key in $marked.Data.Keys) {
+      if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgUncertainGitChild', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $script:CrgLaunchRetainOwners = $true }
+    }
+    $marked = $marked.InnerException
+  }
+  throw
 } finally {
   if ($null -ne $lock) { $lock.Dispose() }
   if (-not $script:CrgLaunchRetainOwners) {

@@ -222,20 +222,21 @@ try {
 # Force UTF-8 for native command pipes. Default $OutputEncoding is ASCII on
 # Windows PowerShell 5.1, which mangles multi-byte glyphs (em-dashes in the
 # prompt template were corrupted to `???`).
-# The console code pages belong to the console window this script shares with
-# the invoking shell, so the finally at the end of the script puts back the
-# values saved here.
+# Only this process's cached encodings change, never the console window shared
+# with the invoking shell; the finally at the end of the script puts back the
+# values returned here so the script leaves the process as it found it.
+$crgConsoleInputSwitched = $false
 try {
-  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+  $crgSavedConsoleInputEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding ([System.Text.UTF8Encoding]::new($false))
+  $crgConsoleInputSwitched = $true
+  $crgSavedConsoleOutputEncoding = Set-CrgProcessConsoleEncoding -Encoding ([System.Text.UTF8Encoding]::new($false))
 } catch {
-  Write-Host "[auto-review] ERROR: the console code pages could not be read ($($_.Exception.Message)) - failing closed."
+  Write-Host "[auto-review] ERROR: the console encodings could not be set to UTF-8 ($($_.Exception.Message)) - failing closed."
+  if ($crgConsoleInputSwitched) { try { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding } catch { } }
   exit 3
 }
 try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-[Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 $isPreparedPair = $PSCmdlet.ParameterSetName -ceq 'PreparedPair'
@@ -1754,11 +1755,16 @@ param([Parameter(Mandatory=$true)][int]$PassIndex)
 $ErrorActionPreference = 'Continue'
 # Re-pin UTF-8 exactly like the parent wrapper so the native pipe to codex and
 # the -o verdict output preserve multi-byte glyphs (em-dashes etc.). A
-# Start-Job child would lose this; a fresh powershell.exe child must redo it.
+# Start-Job child would lose this; a fresh powershell.exe child must redo it,
+# through the parent's process-local helper, inserted below when this file is
+# written, since a runner sharing the parent's console would otherwise leave
+# that console's code pages changed. A switch that fails ends the runner
+# before its exit file is written, which the parent fails closed.
+#CRG-PROCESS-CONSOLE-ENCODING-HELPER#
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $utf8NoBom
-[Console]::InputEncoding  = $utf8NoBom
-[Console]::OutputEncoding = $utf8NoBom
+$null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $utf8NoBom
+$null = Set-CrgProcessConsoleEncoding -Encoding $utf8NoBom
 $work = $PSScriptRoot
 $promptShared  = Join-Path $work 'prompt.txt'
 $codexArgsFile = Join-Path $work 'codex-args.txt'
@@ -1781,6 +1787,7 @@ $realExit = $LASTEXITCODE
 [System.IO.File]::WriteAllText($exitPath, ([string]$realExit), $utf8NoBom)
 exit $realExit
 '@
+    $runnerBody = $runnerBody.Replace('#CRG-PROCESS-CONSOLE-ENCODING-HELPER#', ("function Set-CrgProcessConsoleEncoding {" + ${function:Set-CrgProcessConsoleEncoding}.ToString() + "}"))
     [System.IO.File]::WriteAllText($runnerPath, $runnerBody, $utf8NoBom)
 
     # Launch all N children concurrently AFTER the git-env scrub above, so each
@@ -2232,9 +2239,9 @@ finally {
 }
 } finally {
   try {
-    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
-  } catch { Write-Warning "auto-review.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not put back the cached console input encoding ($($_.Exception.Message))." }
   try {
-    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
-  } catch { Write-Warning "auto-review.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -Encoding $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "auto-review.ps1: could not put back the cached console output encoding ($($_.Exception.Message))." }
 }

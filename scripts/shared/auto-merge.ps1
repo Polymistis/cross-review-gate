@@ -260,20 +260,21 @@ try {
 # UTF-8 multi-byte glyphs (em-dashes, smart quotes) before this script
 # writes the trusted-infra copies. Same defect class as the verdict + prompt reads in
 # auto-review.ps1 (fixed in a prior round). Pin explicitly here too.
-# The console code pages belong to the console window this script shares with
-# the invoking shell, so the finally at the end of the script puts back the
-# values saved here.
+# Only this process's cached encodings change, never the console window shared
+# with the invoking shell; the finally at the end of the script puts back the
+# values returned here so the script leaves the process as it found it.
+$crgConsoleInputSwitched = $false
 try {
-  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+  $crgSavedConsoleInputEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding ([System.Text.UTF8Encoding]::new($false))
+  $crgConsoleInputSwitched = $true
+  $crgSavedConsoleOutputEncoding = Set-CrgProcessConsoleEncoding -Encoding ([System.Text.UTF8Encoding]::new($false))
 } catch {
-  Write-Host "[auto-merge] ERROR: the console code pages could not be read ($($_.Exception.Message)) - merge ABORTED (fail closed)."
+  Write-Host "[auto-merge] ERROR: the console encodings could not be set to UTF-8 ($($_.Exception.Message)) - merge ABORTED (fail closed)."
+  if ($crgConsoleInputSwitched) { try { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding } catch { } }
   exit 3
 }
 try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-[Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -1842,7 +1843,8 @@ function Get-CrgBranchReviewExpectedIdentity {
     [Parameter(Mandatory = $true)][string]$TipSha,
     [Parameter(Mandatory = $true)][string]$RunDir
   )
-  $bad = { param([string]$Code) @{ Ok = $false; Code = $Code; TreeOid = ''; DiffSha = '' } }
+  $childState = @{ Unconfirmed = $false }
+  $bad = { param([string]$Code) @{ Ok = $false; Code = $Code; TreeOid = ''; DiffSha = ''; ChildUnconfirmed = $childState.Unconfirmed } }
   $oidPattern = '\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z'
   if ($BaseSha -cnotmatch $oidPattern -or $TipSha -cnotmatch $oidPattern -or $BaseSha.Length -ne $TipSha.Length) {
     return (& $bad 'input')
@@ -1934,16 +1936,40 @@ function Get-CrgBranchReviewExpectedIdentity {
       $childEnvironment['LC_ALL'] = 'C'
       $childEnvironment['LANG'] = 'C'
       Set-CrgNoReplaceObjectsInChildEnvironment -EnvEntries $childEnvironment
-      try { $psi.StandardOutputEncoding = $utf8; $psi.StandardErrorEncoding = $utf8 } catch { }
+      # The probe prints one line and the diff writes its patch to a file, so
+      # each stream keeps its first 64 KiB and an overflow is refused.
+      Initialize-CrgBoundedSinkNative
+      $outSink = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
+      $errSink = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
       $proc = [System.Diagnostics.Process]::new()
       $proc.StartInfo = $psi
+      $started = $false; $confirmed = $false; $outTask = $null; $errTask = $null
       try {
         if (-not $proc.Start()) { throw 'private Git process did not start' }
-        $outTask = $proc.StandardOutput.ReadToEndAsync()
-        $errTask = $proc.StandardError.ReadToEndAsync()
-        $proc.WaitForExit()
-        return @{ Exit = $proc.ExitCode; Out = $outTask.Result; Err = $errTask.Result }
-      } finally { $proc.Dispose() }
+        $started = $true
+        $outTask = $proc.StandardOutput.BaseStream.CopyToAsync($outSink)
+        $errTask = $proc.StandardError.BaseStream.CopyToAsync($errSink)
+        # A Git that never exits must not stall the merge; the deadline sits
+        # far above the probe and the diff of the merged range, and the
+        # cleanup check below stops the child.
+        if (-not $proc.WaitForExit(600000)) { throw 'private Git did not exit within 10 minutes' }
+        # Bounded even after the root's exit: a worker that outlives the root
+        # can hold a pipe open, and the cleanup check then decides.
+        if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($outTask, $errTask), 10000)) { throw 'private Git output did not reach end of file after the root exited' }
+        $null = $outTask.GetAwaiter().GetResult(); $null = $errTask.GetAwaiter().GetResult()
+        $confirmed = $true
+        if ($outSink.Exceeded -or $errSink.Exceeded) { throw 'private Git output exceeded its 65536-byte capture bound' }
+        return @{ Exit = $proc.ExitCode; Out = $utf8.GetString($outSink.ToArray()); Err = $utf8.GetString($errSink.ToArray()) }
+      } finally {
+        # A failure above can leave the child, or the worker of a stopped Git
+        # for Windows launcher, running in the run directory's private Git
+        # directory. Where $confirmed is not set, a child
+        # Test-CrgGitChildQuiescent cannot confirm is recorded, so the
+        # caller preserves the run directory instead of deleting it under the
+        # child.
+        if ($started -and -not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $proc -OutputCopy $outTask -ErrorCopy $errTask)) { $childState.Unconfirmed = $true }
+        else { $proc.Dispose() }
+      }
     }
 
     $probePath = 'nested/crg-success-projection-probe.txt'
@@ -2769,7 +2795,11 @@ $reviewExpectedIdentity = Get-CrgBranchReviewExpectedIdentity -RepoRoot $reviewR
 if (-not $reviewExpectedIdentity.Ok) {
   Write-Host '[auto-merge] ERROR: the provider-neutral successful-review identity could not be pinned before child launch - merge ABORTED (fail closed).'
   Remove-TreeNoRecurse -Path $trustedDir
-  Remove-TreeNoRecurse -Path $runDir
+  if ($reviewExpectedIdentity.ChildUnconfirmed) {
+    Write-Host "[auto-merge] forensics: run dir '$runDir' PRESERVED (a private Git child's exit is unconfirmed); it is not auto-deleted this run - inspect/reap it manually once resolved."
+  } else {
+    Remove-TreeNoRecurse -Path $runDir
+  }
   exit 3
 }
 
@@ -3653,9 +3683,9 @@ finally {
 }
 } finally {
   try {
-    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
-  } catch { Write-Warning "auto-merge.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $crgSavedConsoleInputEncoding
+  } catch { Write-Warning "auto-merge.ps1: could not put back the cached console input encoding ($($_.Exception.Message))." }
   try {
-    [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
-  } catch { Write-Warning "auto-merge.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }
+    $null = Set-CrgProcessConsoleEncoding -Encoding $crgSavedConsoleOutputEncoding
+  } catch { Write-Warning "auto-merge.ps1: could not put back the cached console output encoding ($($_.Exception.Message))." }
 }

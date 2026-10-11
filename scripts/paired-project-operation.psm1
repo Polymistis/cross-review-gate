@@ -29,7 +29,7 @@ function Open-CrgPairedProjectOperation {
     @{ Module = 'paired-retention'; Names = @('Read-CrgCompletedPairRetention') }
   )) { foreach ($name in $item.Names) { $commands[$name] = Get-CrgProjectOperationCommand -Module $item.Module -Name $name } }
   $roots = New-Object 'System.Collections.Generic.List[string]'
-  $lock = $null; $reads = $null; $initialReads = $null; $gitOwner = $null; $complete = $false
+  $lock = $null; $reads = $null; $initialReads = $null; $gitOwner = $null; $complete = $false; $retainOwners = $false
   try {
     # Installed Git may legitimately have hard-linked executable aliases. Hold
     # a dedicated read-only owner before any Git probe; project/payload files
@@ -118,8 +118,23 @@ function Open-CrgPairedProjectOperation {
       AttachmentBytes = [byte[]]$attachmentFile.Bytes.Clone(); PointerBytes = [byte[]]$pointerFile.Bytes.Clone()
       PreviousReceiptBytes = $record.ReceiptBytes; PreviousReceipt = $record.Receipt
       ValidationState = 'held-project-and-preceding-pair'; ReadyForPublication = $false }
+  } catch {
+    # Admission's status, capture and retention Git reads raise a child whose
+    # exit they cannot confirm as an uncertain failure. That child can still be
+    # running under the held reads, lock and Git executable lease, so they stay
+    # open on the failure (CrgProjectAdmissionOwners) instead of being released
+    # under it.
+    $marked = $_.Exception
+    while ($null -ne $marked) {
+      foreach ($key in $marked.Data.Keys) {
+        if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgUncertainGitChild', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $retainOwners = $true }
+      }
+      $marked = $marked.InnerException
+    }
+    if ($retainOwners) { $_.Exception.Data['CrgProjectAdmissionOwners'] = [pscustomobject]@{ Reads = $reads; InitialReads = $initialReads; OperationLock = $lock; GitExecutableOwner = $gitOwner } }
+    throw
   } finally {
-    if (-not $complete) {
+    if (-not $complete -and -not $retainOwners) {
       # No reviewer or hook child is launched by admission. If a future caller
       # has admitted children, that caller must establish quiescence separately.
       try {

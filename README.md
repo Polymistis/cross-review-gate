@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.4** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.5** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -88,6 +88,20 @@ owners when a Git child's exit cannot be confirmed; and runs the follow-up
 promoter in a hidden console of its own, showing its output as Unicode on a
 console without changing the committer's code pages. The bootstrap changed
 again; take its hash from the release record.
+Version 2.6.5 switches console encodings only inside the running process,
+never on the console window it shares with the invoking shell, so a killed
+run leaves that console as it was (Git input setup, the review wrappers,
+author-lint, auto-merge and worker-audit); in the central status,
+object-batch and retention runners, the attribute-neutral diff runner and
+auto-merge's identity runner, confirms that a failed Git child
+has exited and every holder of its output pipes has closed them before
+anything it uses is released, keeping the index copy, history control file, admission owners,
+private initialization pins, attribute-neutral context and the launcher's runtime
+owners when that cannot be shown; and bounds the remaining Git captures (the
+project-mode declaration, the reviewed tree listing, the attribute-neutral
+runner's errors, auto-merge's identity runner and the claude version probe)
+and the waits for the attribute-neutral and identity runners to exit.
+The bootstrap changed again; take its hash from the release record.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running

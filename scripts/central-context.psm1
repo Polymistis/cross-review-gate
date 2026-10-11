@@ -1,39 +1,52 @@
 # Release-local status and paired Git capture, never paired review authority.
 
-# Windows PowerShell caches the [Console] encodings when they are first read,
-# and a code page changed later by chcp or by a child process on the same
-# console does not update that cache, so the encoding to restore is taken from
-# the console's own code page: the cached object while it still names that
-# page (or when no console is attached), otherwise the encoding of the page.
-# Several scripts carry their own copy and one process can load more than one,
-# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name, and each copy refuses a
-# loaded type that lacks a member it calls.
-function Get-CrgConsoleRestoreEncoding {
-  param([switch]$ConsoleInput)
-  if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
-    Add-Type -ErrorAction Stop -TypeDefinition @'
-namespace CrgConsoleCodePage {
-  public static class NativeV1 {
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleCP();
-    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
-    public static extern uint GetConsoleOutputCP();
+# Windows PowerShell's Process.Start builds a redirected child's input writer
+# from the cached [Console]::InputEncoding, and PowerShell decodes native
+# output with the cached [Console]::OutputEncoding. The public setters also
+# set the code page of the console window this process shares with the
+# invoking shell, and a process killed before putting it back leaves that
+# console changed, so the private cache field is set instead: the change stays
+# in this process, and passing back the returned prior value (null when the
+# cache was never filled) restores the earlier state exactly. For output, a
+# redirected standard stream's writer that was not replaced through SetOut or
+# SetError is flushed and dropped, as the setter drops it, so it is rebuilt
+# with the new encoding for whoever reads the pipe. A stream attached to the
+# console keeps a writer in the console's own code page, created now if it
+# does not exist yet: that code page does not change, so a writer rebuilt in
+# the new encoding would garble non-ASCII text there. These scripts read
+# standard input only as a raw stream, never through Console.In, so the input
+# reader is left alone. The fields are private (_name in .NET Framework,
+# s_name in .NET Core), so a runtime with neither is refused rather than
+# changing the console in their place. Several scripts carry an identical
+# copy.
+function Set-CrgProcessConsoleEncoding {
+  param([switch]$ConsoleInput, [System.Text.Encoding]$Encoding)
+  $flags = [System.Reflection.BindingFlags]'NonPublic, Static'
+  $name = if ($ConsoleInput) { 'inputEncoding' } else { 'outputEncoding' }
+  $prefix = @('_', 's_') | Where-Object { $null -ne [Console].GetField($_ + $name, $flags) } | Select-Object -First 1
+  if ($null -eq $prefix) { throw "this .NET runtime has no private console $name cache to set" }
+  $field = [Console].GetField($prefix + $name, $flags)
+  $streams = @()
+  if (-not $ConsoleInput) {
+    foreach ($spec in @(@('out', 'isOutTextWriterRedirected', 'Out', [Console]::IsOutputRedirected), @('error', 'isErrorTextWriterRedirected', 'Error', [Console]::IsErrorRedirected))) {
+      $writer = [Console].GetField($prefix + $spec[0], $flags)
+      $replaced = [Console].GetField($prefix + $spec[1], $flags)
+      if ($null -eq $writer -or $null -eq $replaced) { throw "this .NET runtime has no private console $($spec[0]) writer to rebuild" }
+      $streams += [pscustomobject]@{ Writer = $writer; Replaced = $replaced; Property = $spec[2]; Redirected = [bool]$spec[3] }
+    }
   }
-}
-'@
-    if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
+  $prior = $field.GetValue($null)
+  foreach ($stream in $streams) {
+    if ($stream.Redirected) {
+      $current = $stream.Writer.GetValue($null)
+      if ($null -ne $current -and -not [bool]$stream.Replaced.GetValue($null)) {
+        $current.Flush()
+        $stream.Writer.SetValue($null, $null)
+      }
+    } else { $null = [Console]::($stream.Property) }
   }
-  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
-  if ($ConsoleInput) {
-    $cached = [Console]::InputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
-  } else {
-    $cached = [Console]::OutputEncoding
-    $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleOutputCP()
-  }
-  if ($codePage -eq 0 -or $cached.CodePage -eq $codePage) { return $cached }
-  return [System.Text.Encoding]::GetEncoding([int]$codePage)
+  $field.SetValue($null, $Encoding)
+  return $prior
 }
 
 # A write-only stream that keeps the first bytes up to its limit and discards
@@ -100,6 +113,39 @@ namespace CrgBoundedCapture {
   }
 }
 
+# Whether a started Git child has exited and every holder of its output pipes
+# has closed them. The root's exit alone does not show that: Git for
+# Windows' launcher can be stopped while its worker, which inherits the pipes
+# and holds them until it exits, runs on. Stdout and stderr reach end of file
+# only once every holder of their write ends has closed them; a process that
+# holds neither pipe is outside what this shows. The stop is
+# attempted first, whatever follows: the root is killed and its input closed,
+# so a child waiting for more input can end. A stdout read the caller
+# abandoned (PendingRead) must settle before stdout is drained, since a
+# stream takes one read at a time; then a stream whose copy was never started
+# is drained, and the root's exit and both copies' completion at end of file
+# are awaited, each within the bound. A wait that runs out, a copy that ended
+# in a read error, or a probe that throws returns $false; the caller then
+# keeps what the child could be using and raises the failure as uncertain.
+# Several scripts carry an identical copy.
+function Test-CrgGitChildQuiescent {
+  param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
+  try {
+    if (-not $Process.HasExited) { try { $Process.Kill() } catch { } }
+    if ($Process.StartInfo.RedirectStandardInput) { try { $Process.StandardInput.Close() } catch { } }
+    if ($null -ne $PendingRead) {
+      try { if (-not $PendingRead.Wait($Milliseconds)) { return $false } } catch { }
+    }
+    if ($null -eq $OutputCopy) { $OutputCopy = $Process.StandardOutput.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if ($null -eq $ErrorCopy) { $ErrorCopy = $Process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if (-not $Process.WaitForExit($Milliseconds)) { return $false }
+    $copies = [System.Threading.Tasks.Task[]]@($OutputCopy, $ErrorCopy)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($copies, $Milliseconds)) { return $false }
+    foreach ($copy in $copies) { if ($copy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $false } }
+    return $true
+  } catch { return $false }
+}
+
 function Invoke-CrgStatusGit {
   param([string[]]$Arguments, [int]$Maximum = 65536, [string]$GitExe, [string]$IndexPath, [string]$HistoryControlPath,
     [AllowNull()][AllowEmptyCollection()][byte[]]$InputBytes)
@@ -139,17 +185,16 @@ function Invoke-CrgStatusGit {
   $process.StartInfo = $start
   $output = New-Object CrgBoundedCapture.SinkV1 ([long]$Maximum)
   $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
-  $started = $false
+  $started = $false; $confirmed = $false; $copy = $null; $errorCopy = $null; $failure = $null
   try {
     # Framework constructs an auto-flushing stdin writer before BaseStream is
     # available. Reuse bootstrap's no-preamble construction and restore rule.
-    $priorInputEncoding = $null
+    $priorInputEncoding = $null; $switchedInput = $false
     if ($null -ne $InputBytes -and $null -eq $start.PSObject.Properties['StandardInputEncoding']) {
-      $priorInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-      [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+      $priorInputEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding ([Text.UTF8Encoding]::new($false)); $switchedInput = $true
     } elseif ($null -ne $InputBytes) { $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false) }
     try { $started = $process.Start() }
-    finally { if ($null -ne $priorInputEncoding) { [Console]::InputEncoding = $priorInputEncoding } }
+    finally { if ($switchedInput) { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $priorInputEncoding } }
     if (-not $started) { throw 'status Git launch failed' }
     $copy = $process.StandardOutput.BaseStream.CopyToAsync($output)
     $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
@@ -166,29 +211,46 @@ function Invoke-CrgStatusGit {
       if ($errors.Exceeded) { throw 'status Git error output exceeds its bound' }
       throw 'status Git command timed out'
     }
+    # Bounded even after the root's exit: a worker that outlives the root can
+    # hold a pipe open, and the cleanup check then decides.
+    if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($copy, $errorCopy), 10000)) { throw 'status Git output did not reach end of file after the root exited' }
     $null = $copy.GetAwaiter().GetResult(); $null = $errorCopy.GetAwaiter().GetResult()
+    $confirmed = $true
     if ($process.ExitCode -ne 0) { throw "status Git failed ($($process.ExitCode)): $([Text.UTF8Encoding]::new($false).GetString($errors.ToArray()))" }
     if ($output.Exceeded) { throw 'status Git output exceeds the requested bound' }
     if ($errors.Exceeded) { throw 'status Git error output exceeds its bound' }
     return ,([byte[]]$output.ToArray())
-  } finally {
-    # The wait is bounded so a child that survives its stop cannot hang the
-    # status read. A child whose exit it cannot confirm is raised as uncertain
-    # (CrgUncertainGitChild, its process object undisposed). The marker
-    # protects only owners that receive this exception, directly or as an
-    # inner exception, and check for it: the retention custodies and
-    # Save-CrgUncertainCentralOperation (docs/paired-retention-v1.md). A
-    # caller that turns the failure into text drops it.
-    if ($started -and -not $process.HasExited) {
-      try { $process.Kill() } catch { }
-      if (-not $process.WaitForExit(2000)) {
-        $uncertain = [InvalidOperationException]::new('status Git cleanup could not confirm root exit')
-        $uncertain.Data['CrgUncertainGitChild'] = $process
-        throw $uncertain
-      }
+  } catch { $failure = $_.Exception; throw }
+  finally {
+    # The root has exited and both pipes reached end of file only where
+    # $confirmed is set. Otherwise Test-CrgGitChildQuiescent decides within its
+    # bound, and a child it cannot confirm is raised as uncertain
+    # (CrgUncertainGitChild, its process object undisposed), with the original
+    # failure inside. The marker protects only owners that receive this
+    # exception, directly or as an inner exception, and check for it: the
+    # retention custodies and Save-CrgUncertainCentralOperation
+    # (docs/paired-retention-v1.md). A caller that turns the failure into text
+    # drops it.
+    if ($started -and -not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $process -OutputCopy $copy -ErrorCopy $errorCopy)) {
+      $uncertain = New-Object InvalidOperationException -ArgumentList 'status Git cleanup could not confirm that the child exited and every holder of its output pipes closed them', $failure
+      $uncertain.Data['CrgUncertainGitChild'] = $process
+      throw $uncertain
     }
     $process.Dispose()
   }
+}
+
+# True when the failure, or an inner exception of it, carries one of the
+# markers Save-CrgUncertainCentralOperation retains an operation for: a cleanup
+# that sees one keeps what a possibly live child uses instead of releasing it.
+function Test-CrgContextUncertainFailure {
+  param([Exception]$Failure)
+  for ($cause = $Failure; $null -ne $cause; $cause = $cause.InnerException) {
+    foreach ($key in $cause.Data.Keys) {
+      if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgUncertainGitChild', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { return $true }
+    }
+  }
+  return $false
 }
 
 function Get-CrgStatusGitLine {
@@ -273,11 +335,28 @@ function Get-CrgCentralProjectStatus {
   return [pscustomobject]$result
 }
 
+# A failure raised for a Git child or native session whose exit was not
+# confirmed can come from status or admission, before any operation owner
+# calls RetainFailure, so it is called here. An installed launcher's bytes are
+# fixed at first installation and routine activation keeps them, so a
+# launcher that predates its own uncertain-failure guard keeps the runtime
+# leases only through this release-local call.
 function Invoke-CrgCentralOperation {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$TargetRepo,
     [Parameter(Mandatory = $true)][object]$Operation,
     [Parameter(Mandatory = $true)][object]$Context)
+  try { return Invoke-CrgCentralOperationRequest -TargetRepo $TargetRepo -Operation $Operation -Context $Context }
+  catch {
+    if ((Test-CrgContextUncertainFailure -Failure $_.Exception) -and -not $_.Exception.Data.Contains('CrgCentralRuntimeOwners') -and $Context.RetainFailure -is [scriptblock]) {
+      $_.Exception.Data['CrgCentralRuntimeOwners'] = & $Context.RetainFailure
+    }
+    throw
+  }
+}
+
+function Invoke-CrgCentralOperationRequest {
+  param([string]$TargetRepo, [object]$Operation, [object]$Context)
   if ($null -eq $Operation -or -not [System.Linq.Enumerable]::Contains([string[]]@('Open', 'Status', 'Stage', 'Commit', 'Resume', 'Attach', 'PushCheck'), [string]$Operation.Name, [System.StringComparer]::Ordinal)) { throw 'central operation is invalid' }
   if ($Operation.Name -ceq 'Status') { return Get-CrgCentralProjectStatus -TargetRepo $TargetRepo -Context $Context }
   if ($Operation.Name -ceq 'Resume' -and $null -eq $Context.PSObject.Properties['ResumeHandoffSha256']) {
@@ -555,8 +634,12 @@ function Read-CrgCentralBatchStreamFill {
   $remaining = $Deadline - [DateTime]::UtcNow
   if ($remaining.TotalMilliseconds -le 0) { throw 'batch object read timed out' }
   $wait = [int][Math]::Min(2147483647, [Math]::Max(1, [Math]::Ceiling($remaining.TotalMilliseconds)))
+  # A read the deadline abandons stays in Pending: the stream allows one read
+  # at a time, so cleanup waits for it before draining the rest.
   $task = $State.Stream.ReadAsync($State.Buffer, 0, $State.Buffer.Length)
+  $State.Pending = $task
   if (-not $task.Wait($wait)) { throw 'batch object read timed out' }
+  $State.Pending = $null
   $State.Offset = 0
   $State.Count = $task.GetAwaiter().GetResult()
 }
@@ -647,17 +730,18 @@ function Read-CrgCentralObjectBatch {
   Initialize-CrgBoundedSinkNative
   $process = New-Object Diagnostics.Process
   $process.StartInfo = $start; $started = $false
+  $confirmed = $false; $errorCopy = $null; $state = $null; $failure = $null
   $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   try {
-    $priorEncoding = $null
+    $priorEncoding = $null; $switchedInput = $false
     if ($null -eq $start.PSObject.Properties['StandardInputEncoding']) {
-      $priorEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+      $priorEncoding = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding ([Text.UTF8Encoding]::new($false)); $switchedInput = $true
     } else { $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false) }
     try { $started = $process.Start() }
-    finally { if ($null -ne $priorEncoding) { [Console]::InputEncoding = $priorEncoding } }
+    finally { if ($switchedInput) { $null = Set-CrgProcessConsoleEncoding -ConsoleInput -Encoding $priorEncoding } }
     if (-not $started) { throw 'batch object Git launch failed' }
     $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
-    $state = [pscustomobject]@{ Stream = $process.StandardOutput.BaseStream; Buffer = (New-Object byte[] 65536); Offset = 0; Count = 0 }
+    $state = [pscustomobject]@{ Stream = $process.StandardOutput.BaseStream; Buffer = (New-Object byte[] 65536); Offset = 0; Count = 0; Pending = $null }
     [long]$aggregate = 0
     $width = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
     foreach ($specification in $ordered) {
@@ -703,19 +787,22 @@ function Read-CrgCentralObjectBatch {
     $remaining = $deadline - [DateTime]::UtcNow
     $wait = [int][Math]::Min(2147483647, [Math]::Max(1, [Math]::Ceiling($remaining.TotalMilliseconds)))
     if (-not $process.WaitForExit($wait)) { throw 'batch object Git command timed out during exit' }
+    if (-not $errorCopy.Wait(10000)) { throw 'batch object Git error output did not reach end of file after the root exited' }
     $null = $errorCopy.GetAwaiter().GetResult()
+    # The final fill above returned end of file (Count 0), or it threw.
+    $confirmed = $true
     if ($process.ExitCode -ne 0) { throw "batch object Git failed ($($process.ExitCode)): $([Text.UTF8Encoding]::new($false).GetString($errors.ToArray()))" }
     if ($errors.Exceeded) { throw 'batch object Git error output exceeds its bound' }
     return ,$objects
-  } finally {
-    # As in Invoke-CrgStatusGit.
-    if ($started -and -not $process.HasExited) {
-      try { $process.Kill() } catch { }
-      if (-not $process.WaitForExit(2000)) {
-        $uncertain = [InvalidOperationException]::new('batch object Git cleanup could not confirm root exit')
-        $uncertain.Data['CrgUncertainGitChild'] = $process
-        throw $uncertain
-      }
+  } catch { $failure = $_.Exception; throw }
+  finally {
+    # As in Invoke-CrgStatusGit. A read the deadline abandoned is handed to
+    # the check, which stops the child before waiting for it.
+    $pendingRead = if ($null -ne $state) { $state.Pending } else { $null }
+    if ($started -and -not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $process -OutputCopy $null -ErrorCopy $errorCopy -PendingRead $pendingRead)) {
+      $uncertain = New-Object InvalidOperationException -ArgumentList 'batch object Git cleanup could not confirm that the child exited and every holder of its output pipes closed them', $failure
+      $uncertain.Data['CrgUncertainGitChild'] = $process
+      throw $uncertain
     }
     $process.Dispose()
   }
@@ -842,6 +929,7 @@ function Get-CrgCentralIndexTree {
   $closeCopy = @(Get-Command -Name Close-CrgPairedIndexCopy -Module paired-diff -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($newCopy.Count -ne 1 -or $closeCopy.Count -ne 1) { throw 'index capture requires the retained paired-diff copy owner' }
   $copy = & $newCopy[0] -Bytes $index.Bytes -TempParent $ProjectContext.Domains.private.GitDir
+  $keepCopy = $false
   try {
     # write-tree takes an unconditional index lock and may run post-index-change;
     # GIT_OPTIONAL_LOCKS does not prevent either (2026-09-06 review finding).
@@ -854,9 +942,17 @@ function Get-CrgCentralIndexTree {
     $copySharedText = [Text.UTF8Encoding]::new($false, $true).GetString($copySharedBytes).TrimEnd([char[]]@(13, 10)).Replace('/', '\')
     if (-not [string]::Equals($copySharedText, $sharedPath, [StringComparison]::Ordinal)) { throw 'copied index resolves a different split-index backing path' }
     $tree = Get-CrgStatusGitLine -Arguments ($copyArguments + @('write-tree')) -GitExe $ProjectContext.GitExe -IndexPath $copy.IndexPath
+  } catch {
+    # A Git child whose exit could not be confirmed can still hold the copied
+    # index, so the copy stays open on the failure (CrgCentralIndexCopy)
+    # instead of being removed under it.
+    if (Test-CrgContextUncertainFailure -Failure $_.Exception) { $keepCopy = $true; $_.Exception.Data['CrgCentralIndexCopy'] = $copy }
+    throw
   } finally {
-    $closed = & $closeCopy[0] -Copy $copy
-    if (-not $closed.Ok) { throw "index-copy cleanup is unconfirmed; preserved '$($closed.Root)': $($closed.Reason)" }
+    if (-not $keepCopy) {
+      $closed = & $closeCopy[0] -Copy $copy
+      if (-not $closed.Ok) { throw "index-copy cleanup is unconfirmed; preserved '$($closed.Root)': $($closed.Reason)" }
+    }
   }
   $treeBytes = Read-CrgCentralTreeBytes -ProjectContext $ProjectContext -Domain $Domain -TreeOid $tree
   $sha = [Security.Cryptography.SHA256]::Create()
@@ -891,6 +987,7 @@ function Read-CrgCentralCommitLogBytes {
   # absence probes race creation. Reuse byte-copy custody, never an index input.
   $control = & $newControl[0] -Bytes ([byte[]]@()) -TempParent $ProjectContext.Domains.private.GitDir
   $output = New-Object IO.MemoryStream
+  $keepControl = $false
   try {
     $ids = Invoke-CrgStatusGit -Arguments ($prefix + @('rev-list', ('--max-count=' + $bounds.DomainCommitCount), $parent, '--')) -Maximum 1024 -GitExe $ProjectContext.GitExe -HistoryControlPath $control.IndexPath
     $width = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
@@ -920,10 +1017,18 @@ function Read-CrgCentralCommitLogBytes {
       $output.WriteByte(10)
     }
     return ,$output.ToArray()
+  } catch {
+    # As for the index copy: an unconfirmed Git child can still read the
+    # graft/shallow control file, which stays open on the failure
+    # (CrgCentralHistoryControl).
+    if (Test-CrgContextUncertainFailure -Failure $_.Exception) { $keepControl = $true; $_.Exception.Data['CrgCentralHistoryControl'] = $control }
+    throw
   } finally {
     $output.Dispose()
-    $closed = & $closeControl[0] -Copy $control
-    if (-not $closed.Ok) { throw "history-control cleanup is unconfirmed; preserved '$($closed.Root)': $($closed.Reason)" }
+    if (-not $keepControl) {
+      $closed = & $closeControl[0] -Copy $control
+      if (-not $closed.Ok) { throw "history-control cleanup is unconfirmed; preserved '$($closed.Root)': $($closed.Reason)" }
+    }
   }
 }
 
