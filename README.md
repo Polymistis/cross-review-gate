@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.2** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.3** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -63,6 +63,15 @@ switch instead of reporting misdecoded commit subjects; names the author
 lint's console failures; makes every inline native-type compile stop on
 failure; and drops an uncalled bootstrap function. The bootstrap changed
 again; take its hash from the release record.
+Version 2.6.3 has bootstrap's blob reader enforce its byte bound while
+reading, confirm its Git child's exit after any failure, and return an
+empty blob as bytes, so an empty tracked `.gitattributes` is verified
+rather than refused; gives the central runtime's Git cleanup its bounded
+wait even when stopping the child fails; refuses an install whose
+custody-artifact exclude file cannot be located instead of continuing
+without its patterns; and has every copy of the console code-page helper
+refuse a loaded helper type that lacks a member it calls. The bootstrap
+changed again; take its hash from the release record.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running

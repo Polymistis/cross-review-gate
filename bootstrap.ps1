@@ -113,7 +113,8 @@ $ErrorActionPreference = 'Stop'
 # page (or when no console is attached), otherwise the encoding of the page.
 # Several scripts carry their own copy and one process can load more than one,
 # so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name.
+# a change to its members needs a new type name, and each copy refuses a
+# loaded type that lacks a member it calls.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
@@ -129,6 +130,7 @@ namespace CrgConsoleCodePage {
 '@
     if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
   }
+  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
   if ($ConsoleInput) {
     $cached = [Console]::InputEncoding
     $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
@@ -1438,14 +1440,33 @@ function Read-CrgGitBlobBytes {
     $gbErrTask = $gbProc.StandardError.ReadToEndAsync()
     $gbOut = New-Object System.IO.MemoryStream
     try {
-      $gbProc.StandardOutput.BaseStream.CopyTo($gbOut)
+      # The bound is enforced while reading, so an oversized blob is never
+      # buffered whole; the rest of its output is drained after the stop.
+      $gbBuffer = New-Object byte[] 8192
+      $gbExceeded = $false
+      while (($gbRead = $gbProc.StandardOutput.BaseStream.Read($gbBuffer, 0, $gbBuffer.Length)) -gt 0) {
+        if (-not $gbExceeded -and ($gbOut.Length + $gbRead) -gt $MaxLength) {
+          $gbExceeded = $true
+          try { $gbProc.Kill() } catch { }
+        }
+        if (-not $gbExceeded) { $gbOut.Write($gbBuffer, 0, $gbRead) }
+      }
       $gbProc.WaitForExit()
       $gbErr = $gbErrTask.GetAwaiter().GetResult()
+      if ($gbExceeded) { throw "blob '$Oid' exceeds the $MaxLength-byte transition bound" }
       if ($gbProc.ExitCode -ne 0) { throw "git cat-file failed for blob '$Oid' ($gbErr)" }
-      if ($gbOut.Length -gt $MaxLength) { throw "blob '$Oid' exceeds the $MaxLength-byte transition bound" }
-      return $gbOut.ToArray()
+      return ,([byte[]]$gbOut.ToArray())
     } finally { $gbOut.Dispose() }
-  } finally { $gbProc.Dispose() }
+  } finally {
+    # A failure above can leave the child running; its exit is confirmed
+    # before disposal, as in Invoke-CrgIsolatedGitProcess.
+    if (-not $gbProc.HasExited) {
+      try { $gbProc.Kill() } catch { }
+      try { $gbProc.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
+      $gbProc.WaitForExit()
+    }
+    $gbProc.Dispose()
+  }
 }
 
 function Convert-CrgWindowsProcessArgument {
@@ -9338,7 +9359,8 @@ if (-not $DispatcherOnly) {
       $crgExcludeMutated = $crgCustExcl
     }
   } else {
-    Write-Host "[bootstrap] WARNING: could not resolve info/exclude to exclude custody artifact names; after a refresh, stage exact files rather than adding directories recursively."
+    Write-Error "bootstrap.ps1: the custody-artifact exclude file could not be located (git rev-parse --git-path info/exclude exited $LASTEXITCODE or printed nothing); without its patterns recovery artifacts could enter a recursive staging. No gate file has been written; fix the cause and re-run."
+    exit 1
   }
 }
 

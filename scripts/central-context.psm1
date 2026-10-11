@@ -7,7 +7,8 @@
 # page (or when no console is attached), otherwise the encoding of the page.
 # Several scripts carry their own copy and one process can load more than one,
 # so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
-# a change to its members needs a new type name.
+# a change to its members needs a new type name, and each copy refuses a
+# loaded type that lacks a member it calls.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
@@ -23,6 +24,7 @@ namespace CrgConsoleCodePage {
 '@
     if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) { throw 'the console code-page reader could not be compiled' }
   }
+  if ($null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleCP') -or $null -eq [CrgConsoleCodePage.NativeV1].GetMethod('GetConsoleOutputCP')) { throw 'a loaded CrgConsoleCodePage.NativeV1 lacks a console code-page reader this copy calls; a changed copy needs a new type name' }
   if ($ConsoleInput) {
     $cached = [Console]::InputEncoding
     $codePage = [CrgConsoleCodePage.NativeV1]::GetConsoleCP()
@@ -90,7 +92,7 @@ function Invoke-CrgStatusGit {
       finally { $process.StandardInput.Close() }
     }
     if (-not $process.WaitForExit(10000)) {
-      $process.Kill()
+      try { $process.Kill() } catch { }
       if (-not $process.WaitForExit(2000)) { throw 'status Git timeout; root exit could not be confirmed' }
       throw 'status Git command timed out'
     }
@@ -99,9 +101,11 @@ function Invoke-CrgStatusGit {
     if ($output.Length -gt $Maximum) { throw 'status Git output exceeds the requested bound' }
     return ,([byte[]]$output.ToArray())
   } finally {
+    # A failed stop still gets the bounded wait, so an unconfirmed exit is
+    # always reported by name rather than by the stop's own exception.
     try {
       if ($started -and -not $process.HasExited) {
-        $process.Kill()
+        try { $process.Kill() } catch { }
         if (-not $process.WaitForExit(2000)) { throw 'status Git cleanup could not confirm root exit' }
       }
     } finally { $output.Dispose(); $process.Dispose() }
@@ -624,7 +628,7 @@ function Read-CrgCentralObjectBatch {
   } finally {
     try {
       if ($started -and -not $process.HasExited) {
-        $process.Kill()
+        try { $process.Kill() } catch { }
         if (-not $process.WaitForExit(2000)) { throw 'batch object Git cleanup could not confirm root exit' }
       }
     } finally { $process.Dispose() }
