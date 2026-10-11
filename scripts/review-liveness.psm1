@@ -48,7 +48,7 @@ function Get-AdversarialReviewHeartbeat {
   # name is VERSIONED: a loaded type can never be redefined in-process, so
   # an older definition must never shadow this method set.
   if (-not ('AdversarialReviewHeartbeatV6' -as [type])) {
-    Add-Type -TypeDefinition @'
+    Add-Type -ErrorAction Stop -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Globalization;

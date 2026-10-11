@@ -111,6 +111,9 @@ $ErrorActionPreference = 'Stop'
 # console does not update that cache, so the encoding to restore is taken from
 # the console's own code page: the cached object while it still names that
 # page (or when no console is attached), otherwise the encoding of the page.
+# Several scripts carry their own copy and one process can load more than one,
+# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
+# a change to its members needs a new type name.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
@@ -146,32 +149,33 @@ namespace CrgConsoleCodePage {
 # read only for their exit code or emptiness, or list paths that are only
 # compared with the gate's fixed ASCII paths, which a misdecoded non-ASCII
 # name cannot equal. The code page belongs to the console window bootstrap
-# shares with the invoking shell, and a caller's catch must not turn an
-# encoding failure into an ordinary probe failure, so a read, switch or
-# restore that fails ends the run (exit 1) with a message written through the
-# PowerShell host rather than the .NET console stream, which bypasses the
-# host. Tried and dropped (staged review, 2026-10-10): setting the code pages
-# for the whole run with a PowerShell.Exiting restore (it runs only when the
-# engine exits and loses its failures in the event job); wrapping the whole
-# script in a dot-sourced block whose finally restores (each top-level error
-# then printed the entire script as its position).
+# shares with the invoking shell. A read, switch or restore that fails is
+# raised like a Git launch failure: every caller that catches one turns it
+# into a refusal or an indeterminate result, never an absence, and the
+# install steps that moved a gate file aside put it back or name it before
+# aborting; an uncaught one ends the run. A failed restore, which leaves the
+# console changed, is also written through the host when it happens, since a
+# caller's catch can replace the raised message. Tried and dropped (staged review,
+# 2026-10-10): setting the code pages for the whole run with a
+# PowerShell.Exiting restore (it runs only when the engine exits and loses
+# its failures in the event job); wrapping the whole script in a dot-sourced
+# block whose finally restores (each top-level error then printed the entire
+# script as its position); ending the run here with exit 1, which skipped
+# the custody restoration of a gate file moved aside during install.
 function Invoke-CrgGitUtf8 {
   param([string[]]$GitArgs, [switch]$MergeError)
   try {
     $prior = Get-CrgConsoleRestoreEncoding
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
   }
-  catch {
-    $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not read the console output code page or switch it to UTF-8 to read Git's output ($($_.Exception.Message)). The run stops here.")
-    exit 1
-  }
+  catch { throw "the console output code page could not be read or switched to UTF-8 to read Git's output ($($_.Exception.Message))" }
   try {
     if ($MergeError) { & git @GitArgs 2>&1 } else { & git @GitArgs 2>$null }
   } finally {
     try { [Console]::OutputEncoding = $prior }
     catch {
-      $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not restore the console output code page after a Git call ($($_.Exception.Message)); run chcp to reset it. The run stops here.")
-      exit 1
+      $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not restore the console output code page after a Git call ($($_.Exception.Message)); run chcp to reset it.")
+      throw "the console output code page could not be restored after a Git call ($($_.Exception.Message)); run chcp to reset it"
     }
   }
 }
@@ -1587,17 +1591,39 @@ function Invoke-CrgIsolatedGitProcess {
     # StandardInputEncoding property. Process.StandardInput snapshots
     # Console.InputEncoding when its StreamWriter is created, so select a
     # no-preamble encoding only for that construction and restore it before
-    # any Git input is written.
+    # any Git input is written. A read, switch or restore that fails is
+    # raised, not ended here: the callers sit inside install, transition and
+    # recovery steps whose catches fail closed and first put back or name
+    # what they moved, which an exit would skip. A restore failure is written
+    # through the host when it happens, since a caller's catch can replace
+    # the raised message, and is raised only after the child's exit is
+    # confirmed: its input writer was built before the restore, so the child
+    # is unaffected. Tried and dropped (staged review, 2026-10-10): killing
+    # the child on a restore failure, which cannot confirm the exit when the
+    # kill fails; ending the run with exit 1 from this helper and from
+    # Invoke-CrgGitUtf8 (2.6.1), which left a gate file moved aside during
+    # install custody unrestored and unnamed.
     $ipPriorConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
     [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
   }
+  $ipProcess = $null
+  $ipRestoreFailure = $null
+  # Start sits inside the try whose finally confirms the exit, so no failure
+  # after a successful start can bypass the confirmation or drop a recorded
+  # restore failure.
   try {
-    $ipProcess = [System.Diagnostics.Process]::Start($ipPsi)
-    if ($null -ne $InputBytes) { $ipStandardInput = $ipProcess.StandardInput }
-  } finally {
-    if ($null -ne $ipPriorConsoleInputEncoding) { [Console]::InputEncoding = $ipPriorConsoleInputEncoding }
-  }
-  try {
+    try {
+      $ipProcess = [System.Diagnostics.Process]::Start($ipPsi)
+      if ($null -ne $InputBytes) { $ipStandardInput = $ipProcess.StandardInput }
+    } finally {
+      if ($null -ne $ipPriorConsoleInputEncoding) {
+        try { [Console]::InputEncoding = $ipPriorConsoleInputEncoding }
+        catch {
+          $ipRestoreFailure = $_.Exception.Message
+          $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not restore the console input code page around a Git start ($ipRestoreFailure); run chcp to reset it.")
+        }
+      }
+    }
     $ipErrTask = $ipProcess.StandardError.ReadToEndAsync()
     if ($null -ne $InputBytes) {
       try {
@@ -1622,8 +1648,25 @@ function Invoke-CrgIsolatedGitProcess {
       [byte[]]$ipOutputBytes = $ipOutput.ToArray()
     } finally { $ipOutput.Dispose() }
     $ipOutputText = [System.Text.UTF8Encoding]::new($false).GetString($ipOutputBytes)
-    return [pscustomobject]@{ Exit = $ipProcess.ExitCode; Bytes = $ipOutputBytes; OutputText = $ipOutputText; ErrorText = $ipError; Text = ($ipOutputText + $ipError) }
-  } finally { $ipProcess.Dispose() }
+    $ipResult = [pscustomobject]@{ Exit = $ipProcess.ExitCode; Bytes = $ipOutputBytes; OutputText = $ipOutputText; ErrorText = $ipError; Text = ($ipOutputText + $ipError) }
+  } finally {
+    # A failure above can leave the child running. Its exit is confirmed
+    # before disposal, as on the output-bound path: a stop that fails is
+    # outlasted by closing its input, draining its output to the end so it
+    # cannot block on a full pipe, and waiting for the exit, so a caller's
+    # scratch cleanup never runs under a live Git child.
+    if ($null -ne $ipProcess) {
+      if (-not $ipProcess.HasExited) {
+        try { $ipProcess.Kill() } catch { }
+        if ($null -ne $ipStandardInput) { try { $ipStandardInput.Close() } catch { } }
+        try { $ipProcess.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
+        $ipProcess.WaitForExit()
+      }
+      $ipProcess.Dispose()
+    }
+    if ($null -ne $ipRestoreFailure) { throw "the console input code page could not be restored around a Git start ($ipRestoreFailure); run chcp to reset it" }
+  }
+  return $ipResult
 }
 
 function Assert-CrgGitAttributeSourceCapability {
@@ -5842,51 +5885,6 @@ function Convert-CrgVersionBytes {
   if ($verText -cnotmatch ($script:CrgSemVerBody + "(\r\n|\n)?\z")) { return $null }
   return $verText.TrimEnd("`r", "`n")
 }
-# The package's own source commit, or 'unknown'. Probed ONLY when the package
-# root is itself the top of a git worktree.
-#
-# `git -C <dir> rev-parse HEAD` WALKS UPWARD. INSTALL.md directs consumers to
-# extract this package beneath the target repository, so an unqualified probe
-# from an extracted zip resolves the CONSUMER's HEAD and records it as this
-# package's provenance -- a wrong answer that looks exactly like a right one.
-# The toplevel comparison is what makes the probe answer about the package.
-#
-# The hex length is not pinned to 40: a repository using SHA-256 objects yields
-# 64, and rejecting that would silently downgrade a correct probe to 'unknown'.
-function Get-CrgPackageSourceCommit {
-  param([string]$Root)
-  try {
-    $srcTop = (Invoke-CrgGitUtf8 -GitArgs @('-C', $Root, 'rev-parse', '--show-toplevel'))
-    if ($LASTEXITCODE -ne 0) { return 'unknown' }
-  } catch { return 'unknown' }
-  $srcTopNorm = ''
-  try { $srcTopNorm = [System.IO.Path]::GetFullPath(("$srcTop".Trim() -replace '/', [System.IO.Path]::DirectorySeparatorChar)) } catch { return 'unknown' }
-  $srcRootNorm = ''
-  try { $srcRootNorm = [System.IO.Path]::GetFullPath($Root) } catch { return 'unknown' }
-  if (-not [string]::Equals($srcTopNorm.TrimEnd('\', '/'), $srcRootNorm.TrimEnd('\', '/'), [System.StringComparison]::OrdinalIgnoreCase)) { return 'unknown' }
-  try {
-    $srcHead = (& git -C $Root rev-parse HEAD 2>$null)
-    if ($LASTEXITCODE -ne 0) { return 'unknown' }
-  } catch { return 'unknown' }
-  $srcHeadTrim = "$srcHead".Trim()
-  if ($srcHeadTrim -cnotmatch '\A[0-9a-f]{40}\z' -and $srcHeadTrim -cnotmatch '\A[0-9a-f]{64}\z') { return 'unknown' }
-  # A DIRTY WORKTREE HAS NO COMMIT IDENTITY. HEAD names a revision; the bytes
-  # about to be installed are whatever is on disk. When those differ -- modified,
-  # staged, or untracked sources -- naming HEAD stamps every installed file and
-  # the install record with a revision that does NOT contain the deployed bytes,
-  # which is worse than saying nothing: a reader diffing against that commit
-  # would conclude the install was unmodified.
-  #
-  # `unknown` is the existing honest answer for "no commit identity available"
-  # and is already handled everywhere, so a dirty package reuses it rather than
-  # extending the record grammar with a shape older readers would reject.
-  try {
-    $srcDirty = (& git --no-optional-locks -C $Root status --porcelain --untracked-files=normal 2>$null)
-    if ($LASTEXITCODE -ne 0) { return 'unknown' }
-  } catch { return 'unknown' }
-  if (-not [string]::IsNullOrWhiteSpace(($srcDirty | Out-String))) { return 'unknown' }
-  return $srcHeadTrim
-}
 
 # Strict reader for a published install-version record. Returns a hashtable with
 # Version/SourceCommit/Installed, or $null when the record is absent or does not
@@ -9286,7 +9284,11 @@ if ([string]::Equals($crgRetiredPmHead.State, 'legacy', [System.StringComparison
 $crgExcludeMutated = $null
 if (-not $DispatcherOnly) {
   $crgCustExcl = $null
-  try { $crgCustExcl = ("$(Invoke-CrgGitUtf8 -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--git-path', 'info/exclude'))").Trim() } catch { $crgCustExcl = $null }
+  try { $crgCustExcl = ("$(Invoke-CrgGitUtf8 -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--git-path', 'info/exclude'))").Trim() }
+  catch {
+    Write-Error "bootstrap.ps1: the custody-artifact exclude file could not be located ($($_.Exception.Message)); without its patterns recovery artifacts could enter a recursive staging. No gate file has been written; fix the cause and re-run."
+    exit 1
+  }
   if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($crgCustExcl)) {
     if (-not [System.IO.Path]::IsPathRooted($crgCustExcl)) { $crgCustExcl = Join-Path $targetRepoAbs $crgCustExcl }
     $crgCustExclDir = Split-Path -Parent $crgCustExcl

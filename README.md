@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.1** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.2** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -50,6 +50,19 @@ housekeeping on a passing gate; and reads non-ASCII Git paths and reference
 names as Git reports them. Its PowerShell entry points put back the console
 code pages they change; the hook's promoter child leaves that to the commit
 wrapper. The bootstrap changed again; take its hash from the release record.
+Version 2.6.2 has the hook's promoter child put back the console code pages
+itself, so a commit through `run-gate.sh` or a plain `git commit` no longer
+leaves the console on UTF-8; has bootstrap raise a console code-page
+failure around a Git call to its caller, whose recovery puts back a gate
+file moved aside during install, instead of ending the run; has the
+isolated Git helpers of bootstrap and the project-values renderer confirm a
+Git child's exit after any failure before releasing it, and raise a failed
+console input code-page restore only after that exit; stops the worker
+audit on a failed UTF-8
+switch instead of reporting misdecoded commit subjects; names the author
+lint's console failures; makes every inline native-type compile stop on
+failure; and drops an uncalled bootstrap function. The bootstrap changed
+again; take its hash from the release record.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running

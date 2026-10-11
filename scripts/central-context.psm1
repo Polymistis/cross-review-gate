@@ -5,6 +5,9 @@
 # console does not update that cache, so the encoding to restore is taken from
 # the console's own code page: the cached object while it still names that
 # page (or when no console is attached), otherwise the encoding of the page.
+# Several scripts carry their own copy and one process can load more than one,
+# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
+# a change to its members needs a new type name.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {

@@ -21,6 +21,9 @@ $ErrorActionPreference = 'Stop'
 # console does not update that cache, so the encoding to restore is taken from
 # the console's own code page: the cached object while it still names that
 # page (or when no console is attached), otherwise the encoding of the page.
+# Several scripts carry their own copy and one process can load more than one,
+# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
+# a change to its members needs a new type name.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
@@ -1075,14 +1078,31 @@ function Invoke-CrgRendererGit {
   # map addition cannot restore replacement or repository-selection authority.
   Assert-CrgGitChildEnvironment -Environment $environment -AllowedInternalSelectors $allowedInternal.ToArray()
 
+  # A restore of the shared console's input code page that fails is written
+  # to stderr when it happens, since a caller's catch can replace the raised
+  # message, and raised only once the child's exit is confirmed: its input
+  # writer was built before the restore, and raising first would skip the
+  # confirmation below and let scratch cleanup run under a live child. Start
+  # sits inside the try whose finally confirms the exit, so no failure after
+  # a successful start can bypass it.
   $priorInputEncoding = $null
   if ($null -ne $InputBytes -and $null -eq $psi.PSObject.Properties['StandardInputEncoding']) {
     $priorInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
     [Console]::InputEncoding = $script:CrgUtf8NoBom
   } elseif ($null -ne $InputBytes) { $psi.StandardInputEncoding = $script:CrgUtf8NoBom }
-  try { $process = [System.Diagnostics.Process]::Start($psi) }
-  finally { if ($null -ne $priorInputEncoding) { [Console]::InputEncoding = $priorInputEncoding } }
+  $process = $null
+  $restoreFailure = $null
   try {
+    try { $process = [System.Diagnostics.Process]::Start($psi) }
+    finally {
+      if ($null -ne $priorInputEncoding) {
+        try { [Console]::InputEncoding = $priorInputEncoding }
+        catch {
+          $restoreFailure = $_.Exception.Message
+          [Console]::Error.WriteLine("render-project-values: could not restore the console input code page around a Git start ($restoreFailure); run chcp to reset it")
+        }
+      }
+    }
     $errorTask = $process.StandardError.ReadToEndAsync()
     if ($null -ne $InputBytes) {
       try { if ($InputBytes.Length -gt 0) { $process.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) } }
@@ -1104,8 +1124,25 @@ function Invoke-CrgRendererGit {
     } finally { $output.Dispose() }
     try { $outputText = $script:CrgUtf8Strict.GetString($outputBytes) }
     catch { $outputText = '' }
-    return [pscustomobject]@{ Exit = $process.ExitCode; Bytes = $outputBytes; OutputText = $outputText; ErrorText = $errorText }
-  } finally { $process.Dispose() }
+    $result = [pscustomobject]@{ Exit = $process.ExitCode; Bytes = $outputBytes; OutputText = $outputText; ErrorText = $errorText }
+  } finally {
+    # A failure above, including the output bound, can leave the child
+    # running. Its exit is confirmed before disposal: a stop that fails is
+    # outlasted by closing its input, draining its output to the end so it
+    # cannot block on a full pipe, and waiting for the exit, so the caller's
+    # scratch cleanup never runs under a live Git child.
+    if ($null -ne $process) {
+      if (-not $process.HasExited) {
+        try { $process.Kill() } catch { }
+        if ($null -ne $InputBytes) { try { $process.StandardInput.Close() } catch { } }
+        try { $process.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
+        $process.WaitForExit()
+      }
+      $process.Dispose()
+    }
+    if ($null -ne $restoreFailure) { throw "the console input code page could not be restored around a Git start ($restoreFailure); run chcp to reset it" }
+  }
+  return $result
 }
 
 function Get-CrgSingleGitLine {

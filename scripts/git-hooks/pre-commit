@@ -2832,8 +2832,13 @@ CRG_PASS_COVERAGE='covers this source diff only, not target execution or deploym
 # they mean what they meant to the wrappers that dot-sourced the same copy.
 # The child is a PowerShell entry point of its own, so it first sets UTF-8
 # native-output decoding: Windows PowerShell otherwise decodes Git's UTF-8
-# paths with the console code page, and a non-ASCII repository path would
-# bind the wrong logs folder.
+# paths with its cached [Console]::OutputEncoding, which a fresh process takes
+# from the console's code page, and a non-ASCII repository path would bind
+# the wrong logs folder. The code pages belong to the console the child
+# shares with whoever ran the commit (the commit wrapper, run-gate.sh or a
+# plain git commit), so the child saves them first and puts them back on
+# exit; being a fresh process, its first read of the cached encodings is
+# the console's current state.
 # Exit statuses: 10 appended, 0 nothing appended (each drop already warned),
 # 11 an append failed and may be partial, 12 the decoding could not be set or
 # the copy could not be read or loaded or has no promoter (a trusted copy
@@ -2877,7 +2882,7 @@ promote_followups() {
   export $CRG_PROMOTER_ENV_NAMES
   # The script text is fixed and single-quoted; every path reaches it through
   # the environment, never through the command line.
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$ErrorActionPreference = "Stop"; try { $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { exit 12 }; try { $b =[System.IO.File]::ReadAllBytes($env:CRG_FOLLOWUP_PROMOTER_COMMON); $h = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString("x2") }); if (-not [string]::Equals($h, $env:CRG_FOLLOWUP_PROMOTER_SHA256, [System.StringComparison]::Ordinal)) { exit 13 }; $text = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($b), [System.Text.Encoding]::Default, $true).ReadToEnd(); . ([scriptblock]::Create($text)) } catch { exit 12 }; if (-not (Get-Command -Name Invoke-FollowupPromotion -CommandType Function -ErrorAction SilentlyContinue)) { exit 12 }; exit ([int](Invoke-FollowupPromotion -PendingPaths @($env:CRG_FOLLOWUP_PENDING_1, $env:CRG_FOLLOWUP_PENDING_2, $env:CRG_FOLLOWUP_PENDING_3, $env:CRG_FOLLOWUP_PENDING_4) -LogTag "pre-commit"))'
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$ErrorActionPreference = "Stop"; $ci = $null; $co = $null; try { try { $ci = [Console]::InputEncoding; $co = [Console]::OutputEncoding; $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { exit 12 }; try { $b =[System.IO.File]::ReadAllBytes($env:CRG_FOLLOWUP_PROMOTER_COMMON); $h = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString("x2") }); if (-not [string]::Equals($h, $env:CRG_FOLLOWUP_PROMOTER_SHA256, [System.StringComparison]::Ordinal)) { exit 13 }; $text = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($b), [System.Text.Encoding]::Default, $true).ReadToEnd(); . ([scriptblock]::Create($text)) } catch { exit 12 }; if (-not (Get-Command -Name Invoke-FollowupPromotion -CommandType Function -ErrorAction SilentlyContinue)) { exit 12 }; exit ([int](Invoke-FollowupPromotion -PendingPaths @($env:CRG_FOLLOWUP_PENDING_1, $env:CRG_FOLLOWUP_PENDING_2, $env:CRG_FOLLOWUP_PENDING_3, $env:CRG_FOLLOWUP_PENDING_4) -LogTag "pre-commit")) } finally { if ($null -ne $ci) { try { [Console]::InputEncoding = $ci } catch { $Host.UI.WriteErrorLine("[pre-commit] WARN: the follow-up promoter could not put back the console input code page; run chcp to reset it") } }; if ($null -ne $co) { try { [Console]::OutputEncoding = $co } catch { $Host.UI.WriteErrorLine("[pre-commit] WARN: the follow-up promoter could not put back the console output code page; run chcp to reset it") } } }'
   _crg_pr_rc=$?
   # The canonical names are unset before enumeration, and the pre-launch clear
   # already removed every variant, so a failed enumeration here leaves nothing.

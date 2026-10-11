@@ -17,8 +17,9 @@
 # bypass-flag rejection, a `-CrgImplementer` value other than codex, an
 # ambient Git selector, a set core.hooksPath that would redirect the
 # pre-commit dispatcher, a missing/foreign/tampered default dispatcher, a
-# failure to prepare the controlled Git environment, or a console code page
-# that could not be read, switched to UTF-8 or put back for a Git path capture.
+# failure to prepare the controlled Git environment, console code pages that
+# could not be read at startup, or a console code page that could not be read,
+# switched to UTF-8 or put back for a Git path capture.
 #
 # Usage examples (from a Claude session; a Codex session uses
 # scripts/codex/commit.ps1 the same way):
@@ -1445,6 +1446,9 @@ if ($bypassResult.Bypass) {
 # console does not update that cache, so the encoding to restore is taken from
 # the console's own code page: the cached object while it still names that
 # page (or when no console is attached), otherwise the encoding of the page.
+# Several scripts carry their own copy and one process can load more than one,
+# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
+# a change to its members needs a new type name.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {

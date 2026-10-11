@@ -252,12 +252,13 @@ try {
   exit 3
 }
 
-# Force UTF-8 for native command pipes and stdin/stdout. Default
-# $OutputEncoding is ASCII on Windows PowerShell 5.1; `git show` /
-# `git diff` output captured via `&` is round-tripped through the
-# platform default codepage, mojibake-ing UTF-8 multi-byte glyphs
-# (em-dashes, smart quotes) before this script writes the trusted-
-# infra copies. Same defect class as the verdict + prompt reads in
+# Force UTF-8 for native command pipes and stdin/stdout. Windows
+# PowerShell 5.1 encodes text piped to native commands with
+# $OutputEncoding (ASCII by default) and decodes `git show` /
+# `git diff` output captured via `&` with the cached
+# [Console]::OutputEncoding (the console's code page), mojibake-ing
+# UTF-8 multi-byte glyphs (em-dashes, smart quotes) before this script
+# writes the trusted-infra copies. Same defect class as the verdict + prompt reads in
 # auto-review.ps1 (fixed in a prior round). Pin explicitly here too.
 # The console code pages belong to the console window this script shares with
 # the invoking shell, so the finally at the end of the script puts back the

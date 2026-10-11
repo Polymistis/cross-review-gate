@@ -141,7 +141,7 @@ function Get-CrgCentralStagedReviewInput {
 
 function Initialize-CrgPairedHostNative {
   if ('CrgPairedHost.ChildrenV1' -as [type]) { return }
-  Add-Type -TypeDefinition @'
+  Add-Type -ErrorAction Stop -TypeDefinition @'
 namespace CrgPairedHost {
   using System;
   using System.ComponentModel;

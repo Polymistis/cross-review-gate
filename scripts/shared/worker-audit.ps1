@@ -354,6 +354,9 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 # console does not update that cache, so the encoding to restore is taken from
 # the console's own code page: the cached object while it still names that
 # page (or when no console is attached), otherwise the encoding of the page.
+# Several scripts carry their own copy and one process can load more than one,
+# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
+# a change to its members needs a new type name.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
@@ -380,22 +383,27 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
-# Force UTF-8 for native `git` output captured via `&` (default $OutputEncoding is
-# ASCII on Windows PowerShell 5.1, which mojibakes multi-byte glyphs in commit
-# subjects). Same defect class fixed in auto-merge.ps1 / auto-review.ps1.
-# The console code pages belong to the console window this script shares with
-# the invoking shell, so the finally at the end of the script puts back the
-# values saved here.
+# Force UTF-8 for native `git` output captured via `&`: Windows PowerShell 5.1
+# decodes it with the cached [Console]::OutputEncoding, the console's code page
+# rather than UTF-8, which mojibakes multi-byte glyphs in commit subjects. Same
+# defect class fixed in auto-merge.ps1 / auto-review.ps1. A failed switch ends
+# the audit instead of reporting subjects decoded with the old page.
+# The console output code page belongs to the console window this script
+# shares with the invoking shell, so the finally at the end of the script puts
+# back the value saved here; the input code page is never changed.
 try {
-  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
   $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
 } catch {
-  Write-Host "[worker-audit] ERROR: [class:operational] the console code pages could not be read ($($_.Exception.Message))."
+  Write-Host "[worker-audit] ERROR: [class:operational] the console output code page could not be read ($($_.Exception.Message))."
   exit 1
 }
 try {
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) }
+catch {
+  Write-Host "[worker-audit] ERROR: [class:operational] the console output code page could not be switched to UTF-8 ($($_.Exception.Message))."
+  exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Multi-directory input has TWO representations, each unambiguous BY GRAMMAR and
@@ -4154,9 +4162,6 @@ Write-Host "[worker-audit]   commits=$($commits.Count)  AUTHORITATIVE: $($mergeR
 Write-Host "[worker-audit]   first-attempt-CLEAN (best-effort)=$firstAttemptCleanTight/$tightDenom tight OID-matched; repeat categories (best-effort, tight): $repeatNote$unreliableTag$incompleteTag"
 exit 0
 } finally {
-  try {
-    [Console]::InputEncoding = $crgSavedConsoleInputEncoding
-  } catch { Write-Warning "worker-audit.ps1: could not restore the console input code page ($($_.Exception.Message)); run chcp to reset it." }
   try {
     [Console]::OutputEncoding = $crgSavedConsoleOutputEncoding
   } catch { Write-Warning "worker-audit.ps1: could not restore the console output code page ($($_.Exception.Message)); run chcp to reset it." }

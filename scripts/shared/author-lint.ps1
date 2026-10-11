@@ -475,6 +475,9 @@ $script:Utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
 # console does not update that cache, so the encoding to restore is taken from
 # the console's own code page: the cached object while it still names that
 # page (or when no console is attached), otherwise the encoding of the page.
+# Several scripts carry their own copy and one process can load more than one,
+# so whichever copy compiles CrgConsoleCodePage.NativeV1 first serves them all:
+# a change to its members needs a new type name.
 function Get-CrgConsoleRestoreEncoding {
   param([switch]$ConsoleInput)
   if (-not ('CrgConsoleCodePage.NativeV1' -as [type])) {
@@ -502,15 +505,17 @@ namespace CrgConsoleCodePage {
 }
 
 # Pin UTF-8 for native command pipes BEFORE any git read. Windows PowerShell 5.1
-# defaults $OutputEncoding to ASCII, so `git ls-files` / `git show` / `git diff`
-# output is decoded lossily and UTF-8 Markdown can mojibake before scanning --
-# masking or inventing a finding. auto-review.ps1 / auto-merge.ps1 pin the same
-# trio so the documented UTF-8 read contract holds for the default staged scope.
-# Set BARE (no try/catch swallow) like those siblings: a host that cannot apply
-# the pin must FAIL LOUD via $ErrorActionPreference='Stop' -- swallowing the
-# failure and continuing would run the scan under a lossy decoder and risk a
-# FALSE-CLEAN lint, the one outcome this linter exists to prevent. (Codex BLOCKER
-#: swallowed encoding setup defeated the UTF-8 contract.)
+# decodes native output with the cached [Console]::OutputEncoding (the
+# console's code page, not UTF-8) and encodes text piped to native commands
+# with $OutputEncoding (ASCII by default), so `git ls-files` / `git show` /
+# `git diff` output is decoded lossily and UTF-8 Markdown can mojibake before
+# scanning -- masking or inventing a finding. auto-review.ps1 / auto-merge.ps1
+# pin the same trio so the documented UTF-8 read contract holds for the default
+# staged scope. Never swallow a failure here: continuing would run the scan
+# under a lossy decoder and risk a FALSE-CLEAN lint, the one outcome this
+# linter exists to prevent. (Codex BLOCKER: swallowed encoding setup defeated
+# the UTF-8 contract.) A failure is named and exits 1, the linter-crash status
+# the pre-commit pre-pass already reads as "the linter itself broke".
 # The console code pages belong to the console window this script shares with
 # the invoking shell, so a run that switches them saves them first and the
 # finally at the end of the script puts them back; captured-input runs leave
@@ -519,11 +524,16 @@ $crgSavedConsoleInputEncoding = $null
 $crgSavedConsoleOutputEncoding = $null
 try {
 if (-not $PSBoundParameters.ContainsKey('PairedInput') -and -not $PSBoundParameters.ContainsKey('FirstAttachmentInput')) {
-  $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
-  $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
-  $OutputEncoding = $script:Utf8NoBom
-  [Console]::InputEncoding = $script:Utf8NoBom
-  [Console]::OutputEncoding = $script:Utf8NoBom
+  try {
+    $crgSavedConsoleInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
+    $crgSavedConsoleOutputEncoding = Get-CrgConsoleRestoreEncoding
+    $OutputEncoding = $script:Utf8NoBom
+    [Console]::InputEncoding = $script:Utf8NoBom
+    [Console]::OutputEncoding = $script:Utf8NoBom
+  } catch {
+    Write-Host "[author-lint] ERROR: the console code pages could not be read or switched to UTF-8 ($($_.Exception.Message))."
+    exit 1
+  }
 }
 
 # Narrative docs this linter governs (full-content scan). Source files legitimately
