@@ -698,7 +698,11 @@ and deletes the aborted transaction state. Apply reports a nonzero
 `recovery-aborted` result and ends that invocation without starting a fresh
 transaction. A later Apply invocation performs ordinary new-transaction
 preflight from positive state absence. Rollback failure leaves `PREPARED` and
-every known recovery identity intact.
+every known recovery identity intact. A failure while a Git child of the run
+cannot be confirmed ended does not start rollback: `PREPARED`, every recovery
+identity and every transaction owner are kept until the process ends, the
+refusal names the original failure, and the next Apply recovers the record as
+after process termination.
 
 Process termination leaves the durable state record and recovery names. The
 next Apply acquires the install lock before opening the record. A valid

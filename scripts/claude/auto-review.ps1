@@ -668,7 +668,9 @@ function Get-ClaudeCodeReviewCapability {
     $proc = [System.Diagnostics.Process]::Start($psi)
     $stdoutTask = $proc.StandardOutput.BaseStream.CopyToAsync($stdoutSink)
     $stderrTask = $proc.StandardError.BaseStream.CopyToAsync($stderrSink)
-    $proc.WaitForExit()
+    if (-not $proc.WaitForExit(30000)) {
+      return [pscustomobject]@{ Ok = $false; ExePath = ''; Version = ''; Reason = 'claude --version did not exit within 30 seconds' }
+    }
     if (-not [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), 10000)) {
       return [pscustomobject]@{ Ok = $false; ExePath = ''; Version = ''; Reason = 'claude --version output did not end after the process exited' }
     }
@@ -689,7 +691,21 @@ function Get-ClaudeCodeReviewCapability {
   } catch {
     return [pscustomobject]@{ Ok = $false; ExePath = ''; Version = ''; Reason = 'claude executable/version capability probe failed' }
   } finally {
-    if ($proc) { $proc.Dispose() }
+    # A probe that has not exited (the bounded wait ran out, or a step threw)
+    # is stopped; one that outlives the stop stays referenced instead
+    # of being disposed while it may still run.
+    if ($proc) {
+      $exited = $false
+      try {
+        if (-not $proc.HasExited) { try { $proc.Kill() } catch { }; $null = $proc.WaitForExit(5000) }
+        $exited = $proc.HasExited
+      } catch { }
+      if ($exited) { $proc.Dispose() }
+      else {
+        if ($null -eq $script:CrgRetainedUncertainGitOwners) { $script:CrgRetainedUncertainGitOwners = New-Object 'System.Collections.Generic.List[object]' }
+        $script:CrgRetainedUncertainGitOwners.Add([pscustomobject]@{ Process = $proc; Reason = 'claude --version outlived its stop' })
+      }
+    }
   }
 }
 

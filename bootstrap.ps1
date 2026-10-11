@@ -219,6 +219,64 @@ namespace CrgBoundedCapture {
   }
 }
 
+# Whether a started Git child has exited and every holder of its output pipes
+# has closed them. The root's exit alone does not show that: Git for
+# Windows' launcher can be stopped while its worker, which inherits the pipes
+# and holds them until it exits, runs on. Stdout and stderr reach end of file
+# only once every holder of their write ends has closed them; a process that
+# holds neither pipe is outside what this shows. The stop is
+# attempted first, whatever follows: the root is killed and its input closed,
+# so a child waiting for more input can end. A stdout read the caller
+# abandoned (PendingRead) must settle before stdout is drained, since a
+# stream takes one read at a time; then a stream whose copy was never started
+# is drained, and the root's exit and both copies' completion at end of file
+# are awaited, each within the bound. A wait that runs out, a copy that ended
+# in a read error, or a probe that throws returns $false; the caller then
+# keeps what the child could be using and raises the failure as uncertain.
+# Every copy of this function must stay byte-identical.
+function Test-CrgGitChildQuiescent {
+  param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
+  try {
+    if (-not $Process.HasExited) { try { $Process.Kill() } catch { } }
+    if ($Process.StartInfo.RedirectStandardInput) { try { $Process.StandardInput.Close() } catch { } }
+    if ($null -ne $PendingRead) {
+      try { if (-not $PendingRead.Wait($Milliseconds)) { return $false } } catch { }
+    }
+    if ($null -eq $OutputCopy) { $OutputCopy = $Process.StandardOutput.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if ($null -eq $ErrorCopy) { $ErrorCopy = $Process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if (-not $Process.WaitForExit($Milliseconds)) { return $false }
+    $copies = [System.Threading.Tasks.Task[]]@($OutputCopy, $ErrorCopy)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($copies, $Milliseconds)) { return $false }
+    foreach ($copy in $copies) { if ($copy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $false } }
+    return $true
+  } catch { return $false }
+}
+
+# Once one Git child cannot be confirmed ended, which child used which owner
+# is not tracked, so for the rest of this process no owner of what Git
+# children read is released. Those owners (private scratch contexts, the
+# rooted namespace, and the repository, package and attribute-source holds)
+# are released only by Close-CrgPrivateAttributeContext, the self-install
+# handoff of the package attribute holds and the top-level cleanups (the
+# install's final cleanup and Invoke-CrgCentralRuntimeOperation's); while
+# this list exists, the handoff stops the install, the context close keeps
+# the context and refuses, and the cleanups keep the owners, here or in their
+# script variables, until exit. The uncertain process and failure are kept
+# here too.
+function Add-CrgUncertainGitOwner {
+  param([object]$Owner)
+  if ($null -eq $script:CrgUncertainGitOwners) { $script:CrgUncertainGitOwners = New-Object 'System.Collections.Generic.List[object]' }
+  $script:CrgUncertainGitOwners.Add($Owner)
+}
+
+# The first retained uncertain failure's original cause, for reports that
+# would otherwise not name it.
+function Get-CrgUncertainGitCause {
+  $ucFailure = @($script:CrgUncertainGitOwners | ForEach-Object { $_.Failure } | Where-Object { $null -ne $_ })[0]
+  if ($null -ne $ucFailure -and $null -ne $ucFailure.InnerException) { return $ucFailure.InnerException.Message }
+  return "$($ucFailure.Message)"
+}
+
 # Git prints paths and reference names in UTF-8, unquoted, so a capture whose
 # output is such an identifier (a path from rev-parse or core.hooksPath, a
 # reference from symbolic-ref) goes through this helper, which reads Git's
@@ -255,6 +313,7 @@ function Invoke-CrgGitUtf8 {
   Initialize-CrgBoundedSinkNative
   $guErrors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   $guProc = [System.Diagnostics.Process]::Start($guPsi)
+  $guErrCopy = $null; $guConfirmed = $false; $guFailure = $null
   try {
     $guErrCopy = $guProc.StandardError.BaseStream.CopyToAsync($guErrors)
     # These captures print one identifier, so output past the bound is
@@ -269,20 +328,30 @@ function Invoke-CrgGitUtf8 {
       }
       if (-not $guExceeded) { $guKept.Write($guBuffer, 0, $guRead) }
     }
-    $guProc.WaitForExit()
+    if (-not $guProc.WaitForExit(10000)) { throw "git $($GitArgs -join ' ') closed its output but did not exit within 10 seconds" }
+    if (-not $guErrCopy.Wait(10000)) { throw "git $($GitArgs -join ' ') stderr did not reach end of file after the root exited" }
     $null = $guErrCopy.GetAwaiter().GetResult()
+    $guConfirmed = $true
     if ($guExceeded) { throw "git $($GitArgs -join ' ') printed more than the 1048576-byte identifier-capture bound" }
     if ($guErrors.Exceeded) { throw "git $($GitArgs -join ' ') wrote more than the 65536-byte stderr capture bound (exit $($guProc.ExitCode))" }
     $guOut = [System.Text.UTF8Encoding]::new($false).GetString($guKept.ToArray())
     $guErr = [System.Text.UTF8Encoding]::new($false).GetString($guErrors.ToArray())
     $global:LASTEXITCODE = $guProc.ExitCode
-  } finally {
-    # A failure above can leave the child running; its exit is confirmed
-    # before disposal, as in Invoke-CrgIsolatedGitProcess.
-    if (-not $guProc.HasExited) {
-      try { $guProc.Kill() } catch { }
-      try { $guProc.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
-      $guProc.WaitForExit()
+  } catch { $guFailure = $_.Exception; throw }
+  finally {
+    # A failure above can leave the child, or the worker of a stopped Git for
+    # Windows launcher, running. A child Test-CrgGitChildQuiescent cannot
+    # confirm is kept by Add-CrgUncertainGitOwner, with the uncertain failure
+    # (original failure inside), before anything else can fail, and raised
+    # instead of being released while it may still run. Exception.Data takes
+    # only serializable values on Windows PowerShell 5.1, which a Process from
+    # Process.Start is not, so Data carries the CrgUncertainGitChild key with
+    # a marker value; readers test the key.
+    if (-not $guConfirmed -and -not (Test-CrgGitChildQuiescent -Process $guProc -OutputCopy $null -ErrorCopy $guErrCopy)) {
+      $guUncertain = New-Object InvalidOperationException -ArgumentList "Git capture cleanup could not confirm that the child exited and every holder of its output pipes closed them ($($guFailure.Message))", $guFailure
+      Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ Process = $guProc; Failure = $guUncertain })
+      $guUncertain.Data['CrgUncertainGitChild'] = $true
+      throw $guUncertain
     }
     $guProc.Dispose()
   }
@@ -1547,6 +1616,7 @@ function Read-CrgGitBlobBytes {
   Initialize-CrgBoundedSinkNative
   $gbErrors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   $gbProc = [System.Diagnostics.Process]::Start($gbPsi)
+  $gbErrCopy = $null; $gbConfirmed = $false; $gbFailure = $null
   try {
     $gbErrCopy = $gbProc.StandardError.BaseStream.CopyToAsync($gbErrors)
     $gbOut = New-Object System.IO.MemoryStream
@@ -1562,21 +1632,24 @@ function Read-CrgGitBlobBytes {
         }
         if (-not $gbExceeded) { $gbOut.Write($gbBuffer, 0, $gbRead) }
       }
-      $gbProc.WaitForExit()
+      if (-not $gbProc.WaitForExit(10000)) { throw "git cat-file for blob '$Oid' closed its output but did not exit within 10 seconds" }
+      if (-not $gbErrCopy.Wait(10000)) { throw "git cat-file for blob '$Oid' stderr did not reach end of file after the root exited" }
       $null = $gbErrCopy.GetAwaiter().GetResult()
+      $gbConfirmed = $true
       $gbErr = [System.Text.UTF8Encoding]::new($false).GetString($gbErrors.ToArray())
       if ($gbExceeded) { throw "blob '$Oid' exceeds the $MaxLength-byte transition bound" }
       if ($gbProc.ExitCode -ne 0) { throw "git cat-file failed for blob '$Oid' ($gbErr)" }
       if ($gbErrors.Exceeded) { throw "git cat-file for blob '$Oid' wrote more than the 65536-byte stderr capture bound" }
       return ,([byte[]]$gbOut.ToArray())
     } finally { $gbOut.Dispose() }
-  } finally {
-    # A failure above can leave the child running; its exit is confirmed
-    # before disposal, as in Invoke-CrgIsolatedGitProcess.
-    if (-not $gbProc.HasExited) {
-      try { $gbProc.Kill() } catch { }
-      try { $gbProc.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
-      $gbProc.WaitForExit()
+  } catch { $gbFailure = $_.Exception; throw }
+  finally {
+    # As in Invoke-CrgGitUtf8.
+    if (-not $gbConfirmed -and -not (Test-CrgGitChildQuiescent -Process $gbProc -OutputCopy $null -ErrorCopy $gbErrCopy)) {
+      $gbUncertain = New-Object InvalidOperationException -ArgumentList "blob reader cleanup could not confirm that the Git child for '$Oid' exited and every holder of its output pipes closed them ($($gbFailure.Message))", $gbFailure
+      Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ Process = $gbProc; Failure = $gbUncertain })
+      $gbUncertain.Data['CrgUncertainGitChild'] = $true
+      throw $gbUncertain
     }
     $gbProc.Dispose()
   }
@@ -1750,10 +1823,10 @@ function Invoke-CrgIsolatedGitProcess {
     $ipSwitchedConsoleInput = $true
   }
   $ipProcess = $null
+  $ipErrCopy = $null; $ipConfirmed = $false; $ipFailure = $null
   $ipRestoreFailure = $null
   # Start sits inside the try whose finally confirms the exit, so no failure
-  # after a successful start can bypass the confirmation or drop a recorded
-  # restore failure.
+  # after a successful start can bypass the confirmation.
   try {
     try {
       $ipProcess = [System.Diagnostics.Process]::Start($ipPsi)
@@ -1785,8 +1858,10 @@ function Invoke-CrgIsolatedGitProcess {
         }
         if (-not $ipOutputExceeded) { $ipOutput.Write($ipOutputBuffer, 0, $ipOutputRead) }
       }
-      $ipProcess.WaitForExit()
+      if (-not $ipProcess.WaitForExit(10000)) { throw 'isolated Git closed its output but did not exit within 10 seconds' }
+      if (-not $ipErrCopy.Wait(10000)) { throw 'isolated Git stderr did not reach end of file after the root exited' }
       $null = $ipErrCopy.GetAwaiter().GetResult()
+      $ipConfirmed = $true
       $ipError = [System.Text.UTF8Encoding]::new($false).GetString($ipErrors.ToArray())
       if ($ipOutputExceeded) { throw "isolated Git stdout exceeded the $MaxOutputBytes-byte bound" }
       if ($ipErrors.Exceeded) { throw "isolated Git stderr exceeded the 65536-byte capture bound (exit $($ipProcess.ExitCode))" }
@@ -1794,18 +1869,16 @@ function Invoke-CrgIsolatedGitProcess {
     } finally { $ipOutput.Dispose() }
     $ipOutputText = [System.Text.UTF8Encoding]::new($false).GetString($ipOutputBytes)
     $ipResult = [pscustomobject]@{ Exit = $ipProcess.ExitCode; Bytes = $ipOutputBytes; OutputText = $ipOutputText; ErrorText = $ipError; Text = ($ipOutputText + $ipError) }
-  } finally {
-    # A failure above can leave the child running. Its exit is confirmed
-    # before disposal, as on the output-bound path: a stop that fails is
-    # outlasted by closing its input, draining its output to the end so it
-    # cannot block on a full pipe, and waiting for the exit, so a caller's
-    # scratch cleanup never runs under a live Git child.
+  } catch { $ipFailure = $_.Exception; throw }
+  finally {
+    # As in Invoke-CrgGitUtf8. The uncertain failure is raised instead of a
+    # recorded restore failure, which was already written out.
     if ($null -ne $ipProcess) {
-      if (-not $ipProcess.HasExited) {
-        try { $ipProcess.Kill() } catch { }
-        if ($null -ne $ipStandardInput) { try { $ipStandardInput.Close() } catch { } }
-        try { $ipProcess.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
-        $ipProcess.WaitForExit()
+      if (-not $ipConfirmed -and -not (Test-CrgGitChildQuiescent -Process $ipProcess -OutputCopy $null -ErrorCopy $ipErrCopy)) {
+        $ipUncertain = New-Object InvalidOperationException -ArgumentList "isolated Git cleanup could not confirm that the child exited and every holder of its output pipes closed them ($($ipFailure.Message))", $ipFailure
+        Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ Process = $ipProcess; Failure = $ipUncertain })
+        $ipUncertain.Data['CrgUncertainGitChild'] = $true
+        throw $ipUncertain
       }
       $ipProcess.Dispose()
     }
@@ -2630,6 +2703,16 @@ function Get-CrgPrivateFilteredObjectIdOfBytes {
 function Close-CrgPrivateAttributeContext {
   param([object]$Context)
   if ($null -eq $Context) { return $true }
+  # The existing refusal ($false) is returned so each caller's restore and
+  # report path still runs; raising here instead escaped callers whose
+  # contract is to return $null (review, 2026-10-11), leaving a moved gate
+  # file in unreported custody. Callers' own messages do not name the
+  # unconfirmed child, so the warning reports the retained failure.
+  if ($null -ne $script:CrgUncertainGitOwners) {
+    Add-CrgUncertainGitOwner -Owner $Context
+    Write-Host "[bootstrap] WARNING: a Git child could not be confirmed ended ($(Get-CrgUncertainGitCause)); private attribute context '$($Context.ScratchRoot)' is kept until this process ends and its cleanup is refused."
+    return $false
+  }
   $pcCloseOk = $true
   # Git runs only while requested read-only roots are restrictive. Cleanup
   # begins by proving an identity-bound transition back to controlled mutation
@@ -8110,12 +8193,19 @@ function Invoke-CrgCentralRuntimeOperation {
     Write-Host "[bootstrap] central runtime $(if ($Operation -ceq 'ActivateRuntime') { 'activated' } else { 'published (not activated)' }): $($rtRelease.Manifest.Id), version $($rtRelease.Manifest.Version), source $($rtRelease.Manifest.Source)."
     Write-Host '[bootstrap] No consumer attachment or dispatcher changed.'
   } finally {
-    foreach ($rtHeldRelease in @($rtRelease, $rtImported)) {
-      if ($null -ne $rtHeldRelease) { foreach ($rtOwner in $rtHeldRelease.Owners) { if ($null -ne $rtOwner.Stream) { $rtOwner.Stream.Dispose() } } }
+    # As in the install's final cleanup: after an unconfirmed Git child
+    # nothing here is released, and these locals are kept in the list.
+    if ($null -ne $script:CrgUncertainGitOwners) {
+      Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ Releases = @($rtRelease, $rtImported); Owners = $rtOwners; Lock = $rtLock; Lease = $rtLease })
+      Write-Host "[bootstrap] WARNING: a Git child could not be confirmed ended ($(Get-CrgUncertainGitCause)); the runtime lock, release owners and rooted namespace stay held until this process ends."
+    } else {
+      foreach ($rtHeldRelease in @($rtRelease, $rtImported)) {
+        if ($null -ne $rtHeldRelease) { foreach ($rtOwner in $rtHeldRelease.Owners) { if ($null -ne $rtOwner.Stream) { $rtOwner.Stream.Dispose() } } }
+      }
+      foreach ($rtOwner in $rtOwners) { if ($null -ne $rtOwner.Stream) { $rtOwner.Stream.Dispose() } }
+      if ($null -ne $rtLock) { $rtLock.Dispose() }
+      if ($null -ne $rtLease) { Close-CrgRootedNamespace -Lease $rtLease }
     }
-    foreach ($rtOwner in $rtOwners) { if ($null -ne $rtOwner.Stream) { $rtOwner.Stream.Dispose() } }
-    if ($null -ne $rtLock) { $rtLock.Dispose() }
-    if ($null -ne $rtLease) { Close-CrgRootedNamespace -Lease $rtLease }
   }
 }
 
@@ -9379,7 +9469,12 @@ if (-not $DispatcherOnly) {
     # package attribute snapshot has completed both package and identity-equal
     # target proofs; release only these read owners so the target .gitattributes
     # transaction can acquire write custody and independently revalidate the
-    # same graph.
+    # same graph. After an unconfirmed Git child they stay held
+    # (Add-CrgUncertainGitOwner), so the install stops instead.
+    if ($null -ne $script:CrgUncertainGitOwners) {
+      Write-Error "bootstrap.ps1: a Git child could not be confirmed ended ($(Get-CrgUncertainGitCause)), so the package attribute holds stay held until this process ends and the install stops before the .gitattributes transaction."
+      exit 1
+    }
     foreach ($crgPackageAttributeOwner in $crgPackageAttributeOwners) {
       if ($null -ne $crgPackageAttributeOwner.Stream) {
         $crgPackageAttributeOwner.Stream.Dispose()
@@ -12864,43 +12959,51 @@ if ([string]::Equals($crgSuccessHead.State, 'error', [System.StringComparison]::
 $crgRetiredPmHead = $crgSuccessHead
 
 } finally {
-  if ($null -ne $crgManifestPublication) {
-    if ($null -ne $crgManifestPublication.PublishedOwner -and $null -ne $crgManifestPublication.PublishedOwner.Stream) { try { $crgManifestPublication.PublishedOwner.Stream.Dispose() } catch { } }
-    if ($null -ne $crgManifestPublication.PublishedOwner) { foreach ($crgPayloadOwner in @($crgManifestPublication.PublishedOwner.PayloadOwners)) { if ($null -ne $crgPayloadOwner.Fs) { try { $crgPayloadOwner.Fs.Dispose() } catch { }; $crgPayloadOwner.Fs = $null } } }
-    if ($null -ne $crgManifestPublication.PreviousOwner -and $null -ne $crgManifestPublication.PreviousOwner.Stream) { try { $crgManifestPublication.PreviousOwner.Stream.Dispose() } catch { } }
-  }
-  if ($null -ne $crgManifestOwner -and $null -ne $crgManifestOwner.Stream) { try { $crgManifestOwner.Stream.Dispose() } catch { } }
-  if ($null -ne $crgAuthMarkerOwner -and $null -ne $crgAuthMarkerOwner.Stream) { try { $crgAuthMarkerOwner.Stream.Dispose() } catch { } }
-  if ($null -ne $crgMarkerReservation) {
-    if ($null -ne $crgMarkerReservation.ReservationOwner -and $null -ne $crgMarkerReservation.ReservationOwner.Stream) { try { $crgMarkerReservation.ReservationOwner.Stream.Dispose() } catch { } }
-    if ($null -ne $crgMarkerReservation.PreviousOwner -and $null -ne $crgMarkerReservation.PreviousOwner.Stream) { try { $crgMarkerReservation.PreviousOwner.Stream.Dispose() } catch { } }
-  }
-  if ($null -ne $crgFailedMarkerReservation) {
-    if ($null -ne $crgFailedMarkerReservation.ReservationOwner -and $null -ne $crgFailedMarkerReservation.ReservationOwner.Stream) { try { $crgFailedMarkerReservation.ReservationOwner.Stream.Dispose() } catch { } }
-    if ($null -ne $crgFailedMarkerReservation.PreviousOwner -and $null -ne $crgFailedMarkerReservation.PreviousOwner.Stream) { try { $crgFailedMarkerReservation.PreviousOwner.Stream.Dispose() } catch { } }
-  }
-  if ($null -ne $crgUpVersionOwner -and $null -ne $crgUpVersionOwner.Stream) { try { $crgUpVersionOwner.Stream.Dispose() } catch { } }
-  foreach ($crgAttributeSourceHold in $crgAttributeSourceHolds) { if ($null -ne $crgAttributeSourceHold) { try { $crgAttributeSourceHold.Dispose() } catch { } } }
-  if ($null -ne $crgLegacyAttrHold) { try { $crgLegacyAttrHold.Dispose() } catch { } }
-  if ($null -ne $crgLegacyTransitionHold -and $null -ne $crgLegacyTransitionHold.Stream) { try { $crgLegacyTransitionHold.Stream.Dispose() } catch { } }
-  if ($null -ne $crgRoutingLease) { Close-CrgLegacyRoutingCustodyLease -Lease $crgRoutingLease }
-  foreach ($crgInstallBackupStream in $crgInstallBackupStreams) { if ($null -ne $crgInstallBackupStream) { try { $crgInstallBackupStream.Dispose() } catch { } } }
-  foreach ($crgInstallCustodyOwner in $crgInstallCustodyOwners) { if ($null -ne $crgInstallCustodyOwner -and $null -ne $crgInstallCustodyOwner.Stream) { try { $crgInstallCustodyOwner.Stream.Dispose() } catch { } } }
-  foreach ($crgInstalledPayloadOwner in $crgInstalledPayloadOwners) { if ($null -ne $crgInstalledPayloadOwner -and $null -ne $crgInstalledPayloadOwner.Fs) { try { $crgInstalledPayloadOwner.Fs.Dispose(); $crgInstalledPayloadOwner.Fs = $null } catch { } } }
-  if ($null -ne $crgValuesSourceOwner -and $null -ne $crgValuesSourceOwner.Stream) { try { $crgValuesSourceOwner.Stream.Dispose(); $crgValuesSourceOwner.Stream = $null } catch { } }
-  if ($null -ne $crgDispHold -and $null -ne $crgDispHold.Handle) { try { $crgDispHold.Handle.Dispose() } catch { } }
-  if ($null -ne $crgStageLock) { try { $crgStageLock.Dispose() } catch { } }
-  if ($null -ne $crgDispLock) { try { $crgDispLock.Dispose() } catch { } }
   if ($crgGitEnvironmentBound) {
     [Environment]::SetEnvironmentVariable('GIT_COMMON_DIR', $null, 'Process')
     [Environment]::SetEnvironmentVariable('GIT_WORK_TREE', $null, 'Process')
     [Environment]::SetEnvironmentVariable('GIT_DIR', $null, 'Process')
     $crgGitEnvironmentBound = $false
   }
-  foreach ($crgPackageSourceOwner in $crgPackageSourceOwners) { if ($null -ne $crgPackageSourceOwner -and $null -ne $crgPackageSourceOwner.Stream) { try { $crgPackageSourceOwner.Stream.Dispose(); $crgPackageSourceOwner.Stream = $null } catch { } } }
-  foreach ($crgPackageAttributeOwner in $crgPackageAttributeOwners) { if ($null -ne $crgPackageAttributeOwner -and $null -ne $crgPackageAttributeOwner.Stream) { try { $crgPackageAttributeOwner.Stream.Dispose(); $crgPackageAttributeOwner.Stream = $null } catch { } } }
-  foreach ($crgGitIndirectionHold in $crgGitIndirectionHolds) { if ($null -ne $crgGitIndirectionHold -and $null -ne $crgGitIndirectionHold.Stream) { try { $crgGitIndirectionHold.Stream.Dispose(); $crgGitIndirectionHold.Stream = $null } catch { } } }
-  if ($null -ne $crgNamespaceLease) { Close-CrgRootedNamespace -Lease $crgNamespaceLease; $crgNamespaceLease = $null }
+  # After a Git child that could not be confirmed ended, nothing here is
+  # released: the owners stay referenced by these script variables until the
+  # process exits. Which owners such a child could use is not classified.
+  if ($null -ne $script:CrgUncertainGitOwners) {
+    Write-Host "[bootstrap] WARNING: a Git child could not be confirmed ended ($(Get-CrgUncertainGitCause)); every install hold and lock stays held until this process ends."
+  }
+  if ($null -eq $script:CrgUncertainGitOwners) {
+    if ($null -ne $crgManifestPublication) {
+      if ($null -ne $crgManifestPublication.PublishedOwner -and $null -ne $crgManifestPublication.PublishedOwner.Stream) { try { $crgManifestPublication.PublishedOwner.Stream.Dispose() } catch { } }
+      if ($null -ne $crgManifestPublication.PublishedOwner) { foreach ($crgPayloadOwner in @($crgManifestPublication.PublishedOwner.PayloadOwners)) { if ($null -ne $crgPayloadOwner.Fs) { try { $crgPayloadOwner.Fs.Dispose() } catch { }; $crgPayloadOwner.Fs = $null } } }
+      if ($null -ne $crgManifestPublication.PreviousOwner -and $null -ne $crgManifestPublication.PreviousOwner.Stream) { try { $crgManifestPublication.PreviousOwner.Stream.Dispose() } catch { } }
+    }
+    if ($null -ne $crgManifestOwner -and $null -ne $crgManifestOwner.Stream) { try { $crgManifestOwner.Stream.Dispose() } catch { } }
+    if ($null -ne $crgAuthMarkerOwner -and $null -ne $crgAuthMarkerOwner.Stream) { try { $crgAuthMarkerOwner.Stream.Dispose() } catch { } }
+    if ($null -ne $crgMarkerReservation) {
+      if ($null -ne $crgMarkerReservation.ReservationOwner -and $null -ne $crgMarkerReservation.ReservationOwner.Stream) { try { $crgMarkerReservation.ReservationOwner.Stream.Dispose() } catch { } }
+      if ($null -ne $crgMarkerReservation.PreviousOwner -and $null -ne $crgMarkerReservation.PreviousOwner.Stream) { try { $crgMarkerReservation.PreviousOwner.Stream.Dispose() } catch { } }
+    }
+    if ($null -ne $crgFailedMarkerReservation) {
+      if ($null -ne $crgFailedMarkerReservation.ReservationOwner -and $null -ne $crgFailedMarkerReservation.ReservationOwner.Stream) { try { $crgFailedMarkerReservation.ReservationOwner.Stream.Dispose() } catch { } }
+      if ($null -ne $crgFailedMarkerReservation.PreviousOwner -and $null -ne $crgFailedMarkerReservation.PreviousOwner.Stream) { try { $crgFailedMarkerReservation.PreviousOwner.Stream.Dispose() } catch { } }
+    }
+    if ($null -ne $crgUpVersionOwner -and $null -ne $crgUpVersionOwner.Stream) { try { $crgUpVersionOwner.Stream.Dispose() } catch { } }
+    foreach ($crgAttributeSourceHold in $crgAttributeSourceHolds) { if ($null -ne $crgAttributeSourceHold) { try { $crgAttributeSourceHold.Dispose() } catch { } } }
+    if ($null -ne $crgLegacyAttrHold) { try { $crgLegacyAttrHold.Dispose() } catch { } }
+    if ($null -ne $crgLegacyTransitionHold -and $null -ne $crgLegacyTransitionHold.Stream) { try { $crgLegacyTransitionHold.Stream.Dispose() } catch { } }
+    if ($null -ne $crgRoutingLease) { Close-CrgLegacyRoutingCustodyLease -Lease $crgRoutingLease }
+    foreach ($crgInstallBackupStream in $crgInstallBackupStreams) { if ($null -ne $crgInstallBackupStream) { try { $crgInstallBackupStream.Dispose() } catch { } } }
+    foreach ($crgInstallCustodyOwner in $crgInstallCustodyOwners) { if ($null -ne $crgInstallCustodyOwner -and $null -ne $crgInstallCustodyOwner.Stream) { try { $crgInstallCustodyOwner.Stream.Dispose() } catch { } } }
+    foreach ($crgInstalledPayloadOwner in $crgInstalledPayloadOwners) { if ($null -ne $crgInstalledPayloadOwner -and $null -ne $crgInstalledPayloadOwner.Fs) { try { $crgInstalledPayloadOwner.Fs.Dispose(); $crgInstalledPayloadOwner.Fs = $null } catch { } } }
+    if ($null -ne $crgValuesSourceOwner -and $null -ne $crgValuesSourceOwner.Stream) { try { $crgValuesSourceOwner.Stream.Dispose(); $crgValuesSourceOwner.Stream = $null } catch { } }
+    if ($null -ne $crgDispHold -and $null -ne $crgDispHold.Handle) { try { $crgDispHold.Handle.Dispose() } catch { } }
+    if ($null -ne $crgStageLock) { try { $crgStageLock.Dispose() } catch { } }
+    if ($null -ne $crgDispLock) { try { $crgDispLock.Dispose() } catch { } }
+    foreach ($crgPackageSourceOwner in $crgPackageSourceOwners) { if ($null -ne $crgPackageSourceOwner -and $null -ne $crgPackageSourceOwner.Stream) { try { $crgPackageSourceOwner.Stream.Dispose(); $crgPackageSourceOwner.Stream = $null } catch { } } }
+    foreach ($crgPackageAttributeOwner in $crgPackageAttributeOwners) { if ($null -ne $crgPackageAttributeOwner -and $null -ne $crgPackageAttributeOwner.Stream) { try { $crgPackageAttributeOwner.Stream.Dispose(); $crgPackageAttributeOwner.Stream = $null } catch { } } }
+    foreach ($crgGitIndirectionHold in $crgGitIndirectionHolds) { if ($null -ne $crgGitIndirectionHold -and $null -ne $crgGitIndirectionHold.Stream) { try { $crgGitIndirectionHold.Stream.Dispose(); $crgGitIndirectionHold.Stream = $null } catch { } } }
+    if ($null -ne $crgNamespaceLease) { Close-CrgRootedNamespace -Lease $crgNamespaceLease; $crgNamespaceLease = $null }
+  }
 }
 
 if ($DispatcherOnly) {

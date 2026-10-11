@@ -19,7 +19,8 @@
 # pre-commit dispatcher, a missing/foreign/tampered default dispatcher, a
 # failure to prepare the controlled Git environment, console code pages that
 # could not be read at startup, or a Git path capture whose Git could not be
-# started or printed more than the capture bound.
+# started, printed more than the capture bound, did not exit or close stderr
+# within the bounded waits, or could not be confirmed ended.
 #
 # Usage examples (from a Claude session; a Codex session uses
 # scripts/codex/commit.ps1 the same way):
@@ -1561,6 +1562,39 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
+# Whether a started Git child has exited and every holder of its output pipes
+# has closed them. The root's exit alone does not show that: Git for
+# Windows' launcher can be stopped while its worker, which inherits the pipes
+# and holds them until it exits, runs on. Stdout and stderr reach end of file
+# only once every holder of their write ends has closed them; a process that
+# holds neither pipe is outside what this shows. The stop is
+# attempted first, whatever follows: the root is killed and its input closed,
+# so a child waiting for more input can end. A stdout read the caller
+# abandoned (PendingRead) must settle before stdout is drained, since a
+# stream takes one read at a time; then a stream whose copy was never started
+# is drained, and the root's exit and both copies' completion at end of file
+# are awaited, each within the bound. A wait that runs out, a copy that ended
+# in a read error, or a probe that throws returns $false; the caller then
+# keeps what the child could be using and raises the failure as uncertain.
+# Every copy of this function must stay byte-identical.
+function Test-CrgGitChildQuiescent {
+  param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
+  try {
+    if (-not $Process.HasExited) { try { $Process.Kill() } catch { } }
+    if ($Process.StartInfo.RedirectStandardInput) { try { $Process.StandardInput.Close() } catch { } }
+    if ($null -ne $PendingRead) {
+      try { if (-not $PendingRead.Wait($Milliseconds)) { return $false } } catch { }
+    }
+    if ($null -eq $OutputCopy) { $OutputCopy = $Process.StandardOutput.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if ($null -eq $ErrorCopy) { $ErrorCopy = $Process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if (-not $Process.WaitForExit($Milliseconds)) { return $false }
+    $copies = [System.Threading.Tasks.Task[]]@($OutputCopy, $ErrorCopy)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($copies, $Milliseconds)) { return $false }
+    foreach ($copy in $copies) { if ($copy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $false } }
+    return $true
+  } catch { return $false }
+}
+
 # Git reports paths in UTF-8, and the attestation below must read the path Git
 # uses, so a path-bearing capture reads Git's stdout as bytes and decodes them
 # as UTF-8 itself; stderr is discarded, as `2>$null` discards it under this
@@ -1590,6 +1624,7 @@ function Invoke-CrgCommitGitUtf8 {
   $startInfo.RedirectStandardError = $true
   $startInfo.CreateNoWindow = $true
   $process = [System.Diagnostics.Process]::Start($startInfo)
+  $errorDrain = $null; $confirmed = $false; $failure = $null
   try {
     $errorDrain = $process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null)
     # These captures print one path or value, so output past the bound is
@@ -1604,18 +1639,30 @@ function Invoke-CrgCommitGitUtf8 {
       }
       if (-not $exceeded) { $kept.Write($buffer, 0, $count) }
     }
-    $process.WaitForExit()
+    if (-not $process.WaitForExit(10000)) { throw "git $($GitArgs -join ' ') closed its output but did not exit within 10 seconds" }
+    if (-not $errorDrain.Wait(10000)) { throw "git $($GitArgs -join ' ') stderr did not reach end of file after the root exited" }
     $null = $errorDrain.GetAwaiter().GetResult()
+    $confirmed = $true
     if ($exceeded) { throw "git $($GitArgs -join ' ') printed more than the 1048576-byte path-capture bound" }
     $output = [System.Text.UTF8Encoding]::new($false).GetString($kept.ToArray())
     $global:LASTEXITCODE = $process.ExitCode
-  } finally {
-    # A failure above can leave the child running; its exit is confirmed
-    # before disposal.
-    if (-not $process.HasExited) {
-      try { $process.Kill() } catch { }
-      try { $process.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
-      $process.WaitForExit()
+  } catch { $failure = $_.Exception; throw }
+  finally {
+    # A failure above can leave the child, or the worker of a stopped Git for
+    # Windows launcher, running. A child Test-CrgGitChildQuiescent cannot
+    # confirm is kept in $script:CrgUncertainGitOwner, with the uncertain
+    # failure (original failure inside), for the rest of this commit-wrapper
+    # process, and raised instead of being released while it may still run.
+    # This process holds nothing else such a capture could be using; the
+    # dispatcher attestation hold is taken only after the captures. Data
+    # carries only the CrgUncertainGitChild marker: Exception.Data takes only
+    # serializable values on Windows PowerShell 5.1, which a Process from
+    # Process.Start is not.
+    if (-not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $process -OutputCopy $null -ErrorCopy $errorDrain)) {
+      $uncertain = New-Object InvalidOperationException -ArgumentList "Git capture cleanup could not confirm that the child exited and every holder of its output pipes closed them ($($failure.Message))", $failure
+      $script:CrgUncertainGitOwner = [pscustomobject]@{ Process = $process; Failure = $uncertain }
+      $uncertain.Data['CrgUncertainGitChild'] = $true
+      throw $uncertain
     }
     $process.Dispose()
   }

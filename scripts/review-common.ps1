@@ -3122,8 +3122,21 @@ function Enter-CrgHeldDirectory {
   } catch { return @{ State = 'error'; Reason = $_.Exception.Message } }
 }
 
+# A Git child that could not be confirmed ended may still be using these
+# folders, so once one is retained in $script:CrgRetainedUncertainGitOwners
+# the holds are kept with it until the process ends. A kept hold can stop a
+# temporary review folder from being removed, which the review's own cleanup
+# does not report, so the first one is reported here.
 function Exit-CrgHeldDirectories {
   param([System.Collections.Generic.List[object]]$Held)
+  if ($null -ne $script:CrgRetainedUncertainGitOwners) {
+    $script:CrgRetainedUncertainGitOwners.Add($Held)
+    if (-not $script:CrgRetainedHoldsReported) {
+      $script:CrgRetainedHoldsReported = $true
+      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'a Git child could not be confirmed ended, so folder holds are kept until this process ends and a temporary review folder may be left behind for manual removal'
+    }
+    return
+  }
   for ($i = $Held.Count - 1; $i -ge 0; $i--) { $Held[$i].Handle.Dispose() }
   $Held.Clear()
 }
@@ -4744,7 +4757,10 @@ function Add-ReviewTasks {
     $guard = Enter-ReviewTasksIndexGuard -Root $root -GitDir $gitDir -Held $held
     if (-not $guard.Ok) { Write-ReviewFeedbackStatus -LogTag $LogTag -Warn -Text "$($guard.Reason), so review tasks were not added; the findings stay in the findings file"; return }
     try { Update-ReviewTasksFile -Path $path -RecoveryPath $recovery -Root $root -GitDir $gitDir -Held $held -Findings $Findings -Record $Record -LogTag $LogTag }
-    finally { if ($null -ne $guard.Handle) { $guard.Handle.Dispose() } }
+    finally {
+      if ($null -ne $script:CrgRetainedUncertainGitOwners) { $script:CrgRetainedUncertainGitOwners.Add($guard) }
+      elseif ($null -ne $guard.Handle) { $guard.Handle.Dispose() }
+    }
   } finally { Exit-CrgHeldDirectories -Held $held }
 }
 
@@ -7279,8 +7295,12 @@ function Get-CrgGitSelectorEnvironmentKeys {
 # process holding their write ends (Git for Windows' launcher and its worker
 # alike) has exited or closed them; the root's exit is then awaited. A read
 # that fails part-way gives no such confirmation: the read ends are closed so
-# Git's next write fails, and a root still running 10 seconds later is named
-# in the returned reason. Stopping on overflow was
+# Git's next write fails. Either way a root still running after the bounded
+# wait is named in the returned reason and its process object is kept in
+# $script:CrgRetainedUncertainGitOwners instead of being disposed, since
+# disposal would drop the only owner of a process that may still run; from
+# then on Exit-CrgHeldDirectories and the TASKS.md index guard keep the
+# callers' holds in that list too. Stopping on overflow was
 # tried and dropped (review, 2026-10-08): killing the root left the worker
 # running, and a tree kill plus deadline still could not confirm every
 # descendant had ended. Callers pass commands whose output their inputs
@@ -7312,6 +7332,7 @@ function Read-CrgGitBytes {
   $r = @{ Ok = $false; Bytes = $null; Overflow = $false; Started = $false; ExitCode = $null; Reason = '' }
   $proc = $null
   $drained = $false
+  $exited = $false
   try {
     $argLine = Convert-ToProcArgString -ArgList $GitArgs
     if ($argLine.Length -gt (Get-CrgCommandLineBudget)) { $r.Reason = 'the git command line is longer than Windows accepts'; return $r }
@@ -7354,7 +7375,8 @@ function Read-CrgGitBytes {
       }
     }
     $drained = $true
-    $proc.WaitForExit()
+    if (-not $proc.WaitForExit(10000)) { $r.Reason = 'git closed its output but was still running 10 seconds later'; return $r }
+    $exited = $true
     $r.ExitCode = $proc.ExitCode
     if ($r.Overflow) { $r.Reason = "git output passed $MaxBytes bytes"; return $r }
     if ($proc.ExitCode -ne 0) {
@@ -7373,17 +7395,19 @@ function Read-CrgGitBytes {
     else { $r.Reason = "git output could not be read: $exTrim" }
   } finally {
     if ($null -ne $proc) {
-      # Only a failed read reaches here with Git still running. Closing the
-      # read ends makes Git's next write fail, which ends it; a Git that
-      # still has not exited is reported, never assumed gone.
+      # Closing the read ends of a failed read makes Git's next write fail,
+      # which ends it. A wait that throws counts as not exited.
       if (-not $drained) {
         try { $proc.StandardOutput.Dispose() } catch { }
         try { $proc.StandardError.Dispose() } catch { }
-        try {
-          if (-not $proc.WaitForExit(10000)) { $r.Reason = "$($r.Reason) (git was still running 10 seconds after its output was closed)" }
-        } catch { }
+        try { $exited = $proc.WaitForExit(10000) } catch { }
+        if (-not $exited) { $r.Reason = "$($r.Reason) (git was still running 10 seconds after its output was closed)" }
       }
-      $proc.Dispose()
+      if ($exited) { $proc.Dispose() }
+      else {
+        if ($null -eq $script:CrgRetainedUncertainGitOwners) { $script:CrgRetainedUncertainGitOwners = New-Object 'System.Collections.Generic.List[object]' }
+        $script:CrgRetainedUncertainGitOwners.Add([pscustomobject]@{ Process = $proc; Reason = $r.Reason })
+      }
     }
   }
   return $r
@@ -8424,7 +8448,7 @@ function Close-CrgAttributeNeutralContext {
 # are awaited, each within the bound. A wait that runs out, a copy that ended
 # in a read error, or a probe that throws returns $false; the caller then
 # keeps what the child could be using and raises the failure as uncertain.
-# Several scripts carry an identical copy.
+# Every copy of this function must stay byte-identical.
 function Test-CrgGitChildQuiescent {
   param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
   try {

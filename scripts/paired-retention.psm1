@@ -189,7 +189,7 @@ function Get-CrgRetentionGitArguments {
 # are awaited, each within the bound. A wait that runs out, a copy that ended
 # in a read error, or a probe that throws returns $false; the caller then
 # keeps what the child could be using and raises the failure as uncertain.
-# Several scripts carry an identical copy.
+# Every copy of this function must stay byte-identical.
 function Test-CrgGitChildQuiescent {
   param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
   try {

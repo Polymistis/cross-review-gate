@@ -993,6 +993,7 @@ function Enter-CrgRendererDirectoryPins {
 function Close-CrgRendererDirectoryPins {
   param([AllowNull()][object]$Pins)
   if ($null -eq $Pins -or $null -eq $Pins.Owned) { return }
+  if ($null -ne $script:CrgUncertainGitOwners) { Add-CrgUncertainGitOwner -Owner $Pins; return }
   for ($i = $Pins.Owned.Count - 1; $i -ge 0; $i--) { try { $Pins.Owned[$i].Dispose() } catch { } }
 }
 
@@ -1111,6 +1112,51 @@ function Assert-CrgGitChildEnvironment {
   Set-CrgChildNoReplaceSingleton -Environment $Environment
 }
 
+# Whether a started Git child has exited and every holder of its output pipes
+# has closed them. The root's exit alone does not show that: Git for
+# Windows' launcher can be stopped while its worker, which inherits the pipes
+# and holds them until it exits, runs on. Stdout and stderr reach end of file
+# only once every holder of their write ends has closed them; a process that
+# holds neither pipe is outside what this shows. The stop is
+# attempted first, whatever follows: the root is killed and its input closed,
+# so a child waiting for more input can end. A stdout read the caller
+# abandoned (PendingRead) must settle before stdout is drained, since a
+# stream takes one read at a time; then a stream whose copy was never started
+# is drained, and the root's exit and both copies' completion at end of file
+# are awaited, each within the bound. A wait that runs out, a copy that ended
+# in a read error, or a probe that throws returns $false; the caller then
+# keeps what the child could be using and raises the failure as uncertain.
+# Every copy of this function must stay byte-identical.
+function Test-CrgGitChildQuiescent {
+  param([System.Diagnostics.Process]$Process, [object]$OutputCopy, [object]$ErrorCopy, [object]$PendingRead, [int]$Milliseconds = 2000)
+  try {
+    if (-not $Process.HasExited) { try { $Process.Kill() } catch { } }
+    if ($Process.StartInfo.RedirectStandardInput) { try { $Process.StandardInput.Close() } catch { } }
+    if ($null -ne $PendingRead) {
+      try { if (-not $PendingRead.Wait($Milliseconds)) { return $false } } catch { }
+    }
+    if ($null -eq $OutputCopy) { $OutputCopy = $Process.StandardOutput.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if ($null -eq $ErrorCopy) { $ErrorCopy = $Process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null) }
+    if (-not $Process.WaitForExit($Milliseconds)) { return $false }
+    $copies = [System.Threading.Tasks.Task[]]@($OutputCopy, $ErrorCopy)
+    if (-not [System.Threading.Tasks.Task]::WaitAll($copies, $Milliseconds)) { return $false }
+    foreach ($copy in $copies) { if ($copy.Status -ne [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $false } }
+    return $true
+  } catch { return $false }
+}
+
+# Once one Git child cannot be confirmed ended, nothing it could be using may
+# be released for the rest of this run, and which child used which owner is
+# not tracked. The uncertain process and failure, the attribute-state scratch
+# custody, the directory pins and Invoke-CrgRendererMain's holds are
+# therefore kept here, strongly referenced until exit, instead of being
+# removed or released.
+function Add-CrgUncertainGitOwner {
+  param([object]$Owner)
+  if ($null -eq $script:CrgUncertainGitOwners) { $script:CrgUncertainGitOwners = New-Object 'System.Collections.Generic.List[object]' }
+  $script:CrgUncertainGitOwners.Add($Owner)
+}
+
 function Invoke-CrgRendererGit {
   param(
     [Parameter(Mandatory = $true)][string[]]$Arguments,
@@ -1173,6 +1219,7 @@ function Invoke-CrgRendererGit {
     $switchedInput = $true
   } elseif ($null -ne $InputBytes) { $psi.StandardInputEncoding = $script:CrgUtf8NoBom }
   $process = $null
+  $errorCopy = $null; $confirmed = $false; $failure = $null
   $restoreFailure = $null
   try {
     try { $process = [System.Diagnostics.Process]::Start($psi) }
@@ -1199,8 +1246,10 @@ function Invoke-CrgRendererGit {
         if ($output.Length + $count -gt $MaximumOutputBytes) { try { $process.Kill() } catch { }; throw 'Git output exceeded the bounded capture size' }
         $output.Write($buffer, 0, $count)
       }
-      $process.WaitForExit()
+      if (-not $process.WaitForExit(10000)) { throw 'Git closed its output but did not exit within 10 seconds' }
+      if (-not $errorCopy.Wait(10000)) { throw 'Git stderr did not reach end of file after the root exited' }
       $null = $errorCopy.GetAwaiter().GetResult()
+      $confirmed = $true
       if ($errors.Exceeded) { throw 'Git stderr exceeded the bounded capture size' }
       $errorText = $script:CrgUtf8NoBom.GetString($errors.ToArray())
       [byte[]]$outputBytes = $output.ToArray()
@@ -1208,18 +1257,22 @@ function Invoke-CrgRendererGit {
     try { $outputText = $script:CrgUtf8Strict.GetString($outputBytes) }
     catch { $outputText = '' }
     $result = [pscustomobject]@{ Exit = $process.ExitCode; Bytes = $outputBytes; OutputText = $outputText; ErrorText = $errorText }
-  } finally {
-    # A failure above, including the output bound, can leave the child
-    # running. Its exit is confirmed before disposal: a stop that fails is
-    # outlasted by closing its input, draining its output to the end so it
-    # cannot block on a full pipe, and waiting for the exit, so the caller's
-    # scratch cleanup never runs under a live Git child.
+  } catch { $failure = $_.Exception; throw }
+  finally {
+    # A failure above, including the output bound, can leave the child, or
+    # the worker of a stopped Git for Windows launcher, running. A child
+    # Test-CrgGitChildQuiescent cannot confirm is kept by
+    # Add-CrgUncertainGitOwner, with the uncertain failure, before anything
+    # else can fail, then raised; Data carries only the CrgUncertainGitChild
+    # marker, as in bootstrap's Invoke-CrgGitUtf8. The run ends at that
+    # failure. The uncertain failure is raised instead of a recorded restore
+    # failure, which was already written out.
     if ($null -ne $process) {
-      if (-not $process.HasExited) {
-        try { $process.Kill() } catch { }
-        if ($null -ne $InputBytes) { try { $process.StandardInput.Close() } catch { } }
-        try { $process.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
-        $process.WaitForExit()
+      if (-not $confirmed -and -not (Test-CrgGitChildQuiescent -Process $process -OutputCopy $null -ErrorCopy $errorCopy)) {
+        $uncertain = New-Object InvalidOperationException -ArgumentList "Git cleanup could not confirm that the child exited and every holder of its output pipes closed them ($($failure.Message))", $failure
+        Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ Process = $process; Failure = $uncertain })
+        $uncertain.Data['CrgUncertainGitChild'] = $true
+        throw $uncertain
       }
       $process.Dispose()
     }
@@ -1439,6 +1492,15 @@ function Remove-CrgAttributeStateScratch {
   $expectedScratch = Join-Path $Custody.TempRoot "crg-render-attribute-state-$($Custody.Token)"
   if (-not [string]::Equals((Get-CrgCanonicalFsPath -Path $Custody.Scratch), (Get-CrgCanonicalFsPath -Path $expectedScratch), [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "attribute-state scratch escaped the retained temporary parent: '$($Custody.Scratch)'"
+  }
+  # Callers run this from catch and finally blocks, where a raise replaces
+  # the failure in flight, so the raise carries the retained uncertain
+  # failure as its cause and names the original failure.
+  if ($null -ne $script:CrgUncertainGitOwners) {
+    Add-CrgUncertainGitOwner -Owner $Custody
+    $failure = @($script:CrgUncertainGitOwners | ForEach-Object { $_.Failure } | Where-Object { $null -ne $_ })[0]
+    $cause = if ($null -ne $failure -and $null -ne $failure.InnerException) { $failure.InnerException.Message } else { "$($failure.Message)" }
+    throw (New-Object InvalidOperationException -ArgumentList "a Git child could not be confirmed ended ($cause); attribute-state scratch '$($Custody.Scratch)' is kept until this process ends", $failure)
   }
   $assertDirectoryOwner = {
     param([object]$Handle, [string]$Path, [object]$Expected, [string]$Label)
@@ -2550,6 +2612,12 @@ function Invoke-CrgTrackedRendererPublication {
   } catch {
     $failure = $_.Exception.Message
     if ($statePublished -and -not $dispositionStarted) {
+      # Rollback moves outputs and releases transaction owners while a Git
+      # child could still be using them, so after an unconfirmed child it is
+      # left to the next Apply, which recovers PREPARED as after termination.
+      if ($null -ne $script:CrgUncertainGitOwners) {
+        throw "$failure; rollback is deferred and PREPARED evidence for transaction $transactionId is preserved until this process ends; rerun standalone Apply to recover it"
+      }
       foreach ($copy in $copies) { if ($null -ne $copy.Handle) { try { $copy.Handle.Dispose() } catch { }; $copy.Handle = $null } }
       foreach ($stage in $stages) { if ($null -ne $stage.Handle) { try { $stage.Handle.Dispose() } catch { }; $stage.Handle = $null } }
       foreach ($destination in $DestinationHolds) { if ($null -ne $destination.Handle) { try { $destination.Handle.Dispose() } catch { }; $destination.Handle = $null } }
@@ -2564,12 +2632,16 @@ function Invoke-CrgTrackedRendererPublication {
     }
     throw
   } finally {
-    if (-not $success) {
-      if ($null -ne $stateStageHandle) { try { $stateStageHandle.Dispose() } catch { } }
-      if ($null -ne $state -and $null -ne $state.Handle) { try { $state.Handle.Dispose() } catch { } }
+    if ($null -ne $script:CrgUncertainGitOwners) {
+      Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ StateStage = $stateStageHandle; State = $state; Copies = $copies; Stages = $stages })
+    } else {
+      if (-not $success) {
+        if ($null -ne $stateStageHandle) { try { $stateStageHandle.Dispose() } catch { } }
+        if ($null -ne $state -and $null -ne $state.Handle) { try { $state.Handle.Dispose() } catch { } }
+      }
+      foreach ($copy in $copies) { if ($null -ne $copy.Handle) { try { $copy.Handle.Dispose() } catch { } } }
+      foreach ($stage in $stages) { if ($null -ne $stage.Handle) { try { $stage.Handle.Dispose() } catch { } } }
     }
-    foreach ($copy in $copies) { if ($null -ne $copy.Handle) { try { $copy.Handle.Dispose() } catch { } } }
-    foreach ($stage in $stages) { if ($null -ne $stage.Handle) { try { $stage.Handle.Dispose() } catch { } } }
   }
 }
 
@@ -2672,10 +2744,16 @@ function Invoke-CrgRendererMain {
     Write-Host "render-project-values: published transaction $($publication.TransactionId) for '$($repo.Root)'"
     return 0
   } finally {
-    if ($null -ne $sourceHold -and $null -ne $sourceHold.Handle) { try { $sourceHold.Handle.Dispose() } catch { } }
-    foreach ($destination in $destinationHolds) { if ($null -ne $destination.Handle) { try { $destination.Handle.Dispose() } catch { } } }
-    if ($null -ne $lockHandle) { try { $lockHandle.Dispose() } catch { } }
-    Close-CrgRendererDirectoryPins -Pins $pins
+    # After an unconfirmed Git child nothing here is released; which of these
+    # owners such a child could use is not classified.
+    if ($null -ne $script:CrgUncertainGitOwners) {
+      Add-CrgUncertainGitOwner -Owner ([pscustomobject]@{ SourceHold = $sourceHold; DestinationHolds = $destinationHolds; Lock = $lockHandle; Pins = $pins })
+    } else {
+      if ($null -ne $sourceHold -and $null -ne $sourceHold.Handle) { try { $sourceHold.Handle.Dispose() } catch { } }
+      foreach ($destination in $destinationHolds) { if ($null -ne $destination.Handle) { try { $destination.Handle.Dispose() } catch { } } }
+      if ($null -ne $lockHandle) { try { $lockHandle.Dispose() } catch { } }
+      Close-CrgRendererDirectoryPins -Pins $pins
+    }
   }
 }
 

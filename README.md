@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.5** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.6** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -102,6 +102,19 @@ project-mode declaration, the reviewed tree listing, the attribute-neutral
 runner's errors, auto-merge's identity runner and the claude version probe)
 and the waits for the attribute-neutral and identity runners to exit.
 The bootstrap changed again; take its hash from the release record.
+Version 2.6.6 extends that confirmation to bootstrap's identifier capture,
+blob reader and isolated helper, the renderer's Git helper and the commit
+wrapper's path capture. A failed Git child that cannot be confirmed ended is
+raised as uncertain instead of being released; from then on the process
+keeps, until it ends, the private attribute contexts, the renderer's
+scratch and pins, and everything the bootstrap and renderer top-level
+cleanups would otherwise release, and a refused cleanup reports the
+original failure. `Read-CrgGitBytes` and the claude version probe bound
+their waits for the process to exit and keep, rather than dispose, a
+process still running after them, together with the checkout folder holds
+and TASKS.md index guard released after it; `Read-CrgGitBytes` still
+decides a failed read from the root's exit alone. The bootstrap changed
+again; take its hash from the release record.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running
