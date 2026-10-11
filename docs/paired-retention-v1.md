@@ -106,8 +106,19 @@ gain authority through retention.
 Complete descendant exit is required; timeout/uncertain cleanup preserves
 operation state without claiming completion.
 An unconfirmed Stop/Close carries CrgPairedProcessSession and the fixed uncertain
-reference in exception state. The writer adds CrgPairRetentionNamespacePins and
-CrgPairRetentionProjectContext to that exception and does not dispose those pins.
+reference in exception state. A Git child of the retention helper
+(`Invoke-CrgRetentionGit`) or of the central object batch or status reader
+whose exit the bounded wait after its stop cannot confirm carries
+CrgUncertainGitChild, its undisposed process object. For either marker, every
+retention custody open at the time (the context opener's verification, the
+reader and the writer) adds its pins to CrgPairRetentionNamespacePins, with
+CrgPairRetentionProjectContext, on that exception and does not dispose them.
+The marker travels on the exception or an inner exception of it. The paired
+diff capture (`Get-CrgPairedGitDiffEvidence`) reports failure as a result
+that carries the exception as `Failure`; retention's first-attachment
+recapture, paired and first-attachment preparation and first-attachment lint
+attribution each rethrow it as the inner exception of their own failure. A
+component that turns a failure into text drops the marker.
 The operation caller must retain that exception and the underlying runtime leases
 until explicit cleanup establishes quiescence; dropping the exception is not
 cleanup. Confirmed quiescent failures release pins and remain ordinary failures.

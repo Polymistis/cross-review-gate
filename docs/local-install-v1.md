@@ -263,7 +263,15 @@ digest. `scripts/run-gate.sh` and both commit wrappers require the ordinary
 default dispatcher, the generic gate-untracking marker, and that adjacent
 bootstrap-written digest attestation to match before `git commit`; missing,
 foreign, disarmed, or tampered dispatcher state refuses. These checks are
-detective install-integrity guards; the dispatcher's own chain remains the
+install-integrity guards. The commit wrappers read the dispatcher through
+a handle that shares reads only and keep it open until `git commit`
+returns, so the hashed file cannot be written, renamed or deleted between
+the check and Git's run of the hook path. Only the file itself is held, not
+the folders above it, so a folder link retargeted above the hook is outside
+what the hold covers, as is a `core.hooksPath`, gitfile or `commondir`
+change after the checks, since Git resolves the hook again inside
+`git commit`; `run-gate.sh` cannot hold the file from sh, so
+its check is detective. The dispatcher's own chain remains the
 enforcement boundary after Git opens it. `-DispatcherOnly` therefore
 touches no manifest (its restore scenario has no safe basis to derive
 one); a local-shape install always begins with a full bootstrap run,

@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.3** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.4** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -72,6 +72,22 @@ custody-artifact exclude file cannot be located instead of continuing
 without its patterns; and has every copy of the console code-page helper
 refuse a loaded helper type that lacks a member it calls. The bootstrap
 changed again; take its hash from the release record.
+Version 2.6.4 has bootstrap's and the commit wrapper's path and reference
+captures read Git output as bytes and decode it as UTF-8 instead of
+switching the shared console's output code page for each call, so a run
+killed during one of them no longer leaves that code page changed (Git
+input setup and the review wrappers still switch console encodings and put
+them back in a `finally`); holds the default pre-commit dispatcher open with
+shared reads from its hash check until `git commit` returns; bounds the
+captures of bootstrap's Git output helpers (the path and reference capture,
+the blob readers and the isolated Git process, whose every caller now has a
+stdout limit), the commit wrapper and the central status, object batch,
+retention and renderer Git helpers, refusing one that
+overflowed, and keeps the namespace pins of retention and the related
+owners when a Git child's exit cannot be confirmed; and runs the follow-up
+promoter in a hidden console of its own, showing its output as Unicode on a
+console without changing the committer's code pages. The bootstrap changed
+again; take its hash from the release record.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running

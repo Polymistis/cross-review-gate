@@ -110,7 +110,12 @@ function Get-CrgCentralStagedReviewInput {
     $diff = & $commands['Get-CrgPairedGitDiffEvidence'] -ProjectContext $ProjectContext -Domain $domain -ParentTree $ProjectContext.Domains[$domain].ParentTree -CandidateTree $indexes[$domain].TreeOid -TempParent $TempParent
     if ($diff.Ok -isnot [bool] -or -not $diff.Ok -or -not [StringComparer]::Ordinal.Equals($diff.Domain, $domain) -or
         -not [StringComparer]::Ordinal.Equals($diff.ParentTree, $ProjectContext.Domains[$domain].ParentTree) -or
-        -not [StringComparer]::Ordinal.Equals($diff.CandidateTree, $indexes[$domain].TreeOid)) { throw "paired $domain diff capture failed: $($diff.Reason)" }
+        -not [StringComparer]::Ordinal.Equals($diff.CandidateTree, $indexes[$domain].TreeOid)) {
+      # The capture's own failure stays the inner exception, so an unconfirmed
+      # Git child it reports keeps its marker (docs/paired-retention-v1.md).
+      $inner = if ($diff.Failure -is [Exception]) { $diff.Failure } else { $null }
+      throw [InvalidOperationException]::new("paired $domain diff capture failed: $($diff.Reason)", $inner)
+    }
     foreach ($item in @(@{ Suffix = '.patch'; Field = 'PatchBytes' }, @{ Suffix = '.stat'; Field = 'StatBytes' }, @{ Suffix = '.name-status'; Field = 'NameStatusBytes' })) {
       if ($diff[$item.Field] -isnot [byte[]]) { throw 'paired diff did not supply a raw byte buffer' }
       $evidence.Add($domain + $item.Suffix, $diff[$item.Field])

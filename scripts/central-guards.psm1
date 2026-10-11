@@ -667,7 +667,7 @@ function Invoke-CrgCentralPushCheck {
   } catch {
     $failure = $_.Exception
     while ($null -ne $failure) {
-      if ($failure.Data.Contains('CrgPairedProcessSession')) { $uncertain = $true; break }
+      if ($failure.Data.Contains('CrgPairedProcessSession') -or $failure.Data.Contains('CrgUncertainGitChild')) { $uncertain = $true; break }
       $failure = $failure.InnerException
     }
     if ($uncertain) { $_.Exception.Data['CrgCentralGuardCustody'] = $guard; $_.Exception.Data['CrgCentralHistoryPins'] = $historyPins }

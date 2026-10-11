@@ -245,7 +245,7 @@ function Invoke-CrgPairedStage {
     $failure = $_.Exception
     while ($null -ne $failure) {
       if ($failure.Data.Contains('CrgPairedProcessSession') -or $failure.Data.Contains('CrgPairedGitOperationState') -or
-          $failure.Data.Contains('CrgCentralGuardCustody')) { $preserveCustody = $true; break }
+          $failure.Data.Contains('CrgCentralGuardCustody') -or $failure.Data.Contains('CrgUncertainGitChild')) { $preserveCustody = $true; break }
       $failure = $failure.InnerException
     }
     if ($preserveCustody) {

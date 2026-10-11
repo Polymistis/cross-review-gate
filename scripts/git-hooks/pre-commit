@@ -2830,19 +2830,39 @@ CRG_PASS_COVERAGE='covers this source diff only, not target execution or deploym
 # the path then would have run. The bytes are decoded as Windows PowerShell
 # decodes a script file (its byte-order mark, else the ANSI code page), so
 # they mean what they meant to the wrappers that dot-sourced the same copy.
-# The child is a PowerShell entry point of its own, so it first sets UTF-8
-# native-output decoding: Windows PowerShell otherwise decodes Git's UTF-8
-# paths with its cached [Console]::OutputEncoding, which a fresh process takes
-# from the console's code page, and a non-ASCII repository path would bind
-# the wrong logs folder. The code pages belong to the console the child
-# shares with whoever ran the commit (the commit wrapper, run-gate.sh or a
-# plain git commit), so the child saves them first and puts them back on
-# exit; being a fresh process, its first read of the cached encodings is
-# the console's current state.
+# The promoter sets UTF-8 native-output decoding first: Windows PowerShell
+# otherwise decodes Git's UTF-8 paths with its cached
+# [Console]::OutputEncoding, which a fresh process takes from the console's
+# code page, and a non-ASCII repository path would bind the wrong logs
+# folder. Setting that encoding also sets the code page of the console the
+# process runs in, so the launched PowerShell only starts the promoter in a
+# child with a hidden console of its own and relays its output.
+# CreateNoWindow starts a console program with CREATE_NO_WINDOW, under which
+# Windows gives it a new console without a window rather than none; the
+# no-console flag is DETACHED_PROCESS, which is not used. The console of
+# whoever ran the commit (the commit wrapper, run-gate.sh or a plain git
+# commit) is never changed, even when either process is killed. The child
+# writes UTF-8. A redirected stream gets those bytes unchanged; a console
+# would read them in its own code page, so console output is decoded as
+# UTF-8 and written through the PowerShell host, which writes Unicode to the
+# console (stdout as it arrives, stderr by line). Both pipes are read on
+# this thread, since the host cannot be called from a copy task. A relay
+# that fails stops the child, whose exit is then reported as unknown. The
+# child's own console means a Ctrl+C in the committer's console does not
+# reach it, and a launcher killed partway leaves it to finish or fail its
+# append alone, with no status reported; its writes stay under the follow-up
+# index lock, which a later promoter retries and then warns and drops its
+# records on (Enter-FollowupIndexLock). The promoter text reaches the child
+# through -Command with its double quotes escaped; it holds no backslash, which that
+# escaping does not cover, and the launch refuses one. Tried and dropped
+# (2026-10-10): switching the shared console's code pages in this process
+# and putting them back in a finally, which a killed process never reaches;
+# passing the text with -EncodedCommand, which makes the child write its
+# host and progress records to the redirected stderr as CLIXML.
 # Exit statuses: 10 appended, 0 nothing appended (each drop already warned),
-# 11 an append failed and may be partial, 12 the decoding could not be set or
-# the copy could not be read or loaded or has no promoter (a trusted copy
-# older than this hook), 13 the
+# 11 an append failed and may be partial, 12 the promoter could not be
+# started or could not set the decoding, or the copy could not be read or
+# loaded or has no promoter (a trusted copy older than this hook), 13 the
 # copy no longer matches the pinned bytes. Any other status (PowerShell did
 # not start, or stopped partway) leaves the index state unknown, so it is
 # reported as a possibly partial append.
@@ -2882,7 +2902,7 @@ promote_followups() {
   export $CRG_PROMOTER_ENV_NAMES
   # The script text is fixed and single-quoted; every path reaches it through
   # the environment, never through the command line.
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$ErrorActionPreference = "Stop"; $ci = $null; $co = $null; try { try { $ci = [Console]::InputEncoding; $co = [Console]::OutputEncoding; $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { exit 12 }; try { $b =[System.IO.File]::ReadAllBytes($env:CRG_FOLLOWUP_PROMOTER_COMMON); $h = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString("x2") }); if (-not [string]::Equals($h, $env:CRG_FOLLOWUP_PROMOTER_SHA256, [System.StringComparison]::Ordinal)) { exit 13 }; $text = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($b), [System.Text.Encoding]::Default, $true).ReadToEnd(); . ([scriptblock]::Create($text)) } catch { exit 12 }; if (-not (Get-Command -Name Invoke-FollowupPromotion -CommandType Function -ErrorAction SilentlyContinue)) { exit 12 }; exit ([int](Invoke-FollowupPromotion -PendingPaths @($env:CRG_FOLLOWUP_PENDING_1, $env:CRG_FOLLOWUP_PENDING_2, $env:CRG_FOLLOWUP_PENDING_3, $env:CRG_FOLLOWUP_PENDING_4) -LogTag "pre-commit")) } finally { if ($null -ne $ci) { try { [Console]::InputEncoding = $ci } catch { $Host.UI.WriteErrorLine("[pre-commit] WARN: the follow-up promoter could not put back the console input code page; run chcp to reset it") } }; if ($null -ne $co) { try { [Console]::OutputEncoding = $co } catch { $Host.UI.WriteErrorLine("[pre-commit] WARN: the follow-up promoter could not put back the console output code page; run chcp to reset it") } } }'
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$ErrorActionPreference = "Stop"; $promoter = { $ErrorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; try { $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { exit 12 }; try { $b =[System.IO.File]::ReadAllBytes($env:CRG_FOLLOWUP_PROMOTER_COMMON); $h = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString("x2") }); if (-not [string]::Equals($h, $env:CRG_FOLLOWUP_PROMOTER_SHA256, [System.StringComparison]::Ordinal)) { exit 13 }; $text = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($b), [System.Text.Encoding]::Default, $true).ReadToEnd(); . ([scriptblock]::Create($text)) } catch { exit 12 }; if (-not (Get-Command -Name Invoke-FollowupPromotion -CommandType Function -ErrorAction SilentlyContinue)) { exit 12 }; exit ([int](Invoke-FollowupPromotion -PendingPaths @($env:CRG_FOLLOWUP_PENDING_1, $env:CRG_FOLLOWUP_PENDING_2, $env:CRG_FOLLOWUP_PENDING_3, $env:CRG_FOLLOWUP_PENDING_4) -LogTag "pre-commit")) }; try { $text = $promoter.ToString(); if ($text.Contains([string][char]92)) { exit 12 }; $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = Join-Path $PSHOME "powershell.exe"; $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command " + [char]34 + $text.Replace([string][char]34, [string][char]92 + [char]34) + [char]34; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $p = [System.Diagnostics.Process]::Start($psi) } catch { exit 12 }; try { $p.StandardInput.Close(); $u = [System.Text.UTF8Encoding]::new($false); $relays = New-Object System.Collections.ArrayList; foreach ($r in @(@{ S = $p.StandardOutput.BaseStream; E = $false; R = [Console]::IsOutputRedirected }, @{ S = $p.StandardError.BaseStream; E = $true; R = [Console]::IsErrorRedirected })) { $r.B = New-Object byte[] 8192; $r.D = $u.GetDecoder(); $r.L = New-Object System.Text.StringBuilder; if ($r.R) { if ($r.E) { $r.O = [Console]::OpenStandardError() } else { $r.O = [Console]::OpenStandardOutput() } }; $r.T = $r.S.ReadAsync($r.B, 0, 8192); $null = $relays.Add($r) }; while ($relays.Count -gt 0) { $i = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($relays | ForEach-Object { $_.T })); $r = $relays[$i]; $n = $r.T.Result; $end = $n -le 0; if ($end) { $n = 0 }; if ($r.R) { if ($n -gt 0) { $r.O.Write($r.B, 0, $n); $r.O.Flush() } } else { $c = New-Object char[] ($u.GetMaxCharCount($n) + 2); $t = [string]::new($c, 0, $r.D.GetChars($r.B, 0, $n, $c, 0, $end)); if (-not $r.E) { if ($t.Length -gt 0) { $Host.UI.Write($t) } } else { $null = $r.L.Append($t); $parts = $r.L.ToString().Split([char]10); for ($q = 0; $q -lt $parts.Length - 1; $q++) { $Host.UI.WriteErrorLine($parts[$q].TrimEnd([char]13)) }; $null = $r.L.Clear().Append($parts[$parts.Length - 1]); if (($end -and $r.L.Length -gt 0) -or $r.L.Length -gt 8192) { $Host.UI.WriteErrorLine($r.L.ToString()); $null = $r.L.Clear() } } }; if ($end) { $relays.RemoveAt($i) } else { $r.T = $r.S.ReadAsync($r.B, 0, 8192) } } } catch { try { $p.Kill() } catch { }; $p.WaitForExit(); exit 1 }; $p.WaitForExit(); exit $p.ExitCode'
   _crg_pr_rc=$?
   # The canonical names are unset before enumeration, and the pre-launch clear
   # already removed every variant, so a failed enumeration here leaves nothing.
@@ -2891,11 +2911,11 @@ promote_followups() {
     0) ;;
     10) PROMO_PUBLISHED=1 ;;
     11) PROMO_APPEND_UNCERTAIN=1 ;;
-    12) echo "[pre-commit] WARN: the follow-up promoter could not set UTF-8 decoding, or the trusted review-common.ps1 could not be read or loaded or has no follow-up promoter (it is older than this hook) - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
+    12) echo "[pre-commit] WARN: the follow-up promoter could not be started or could not set UTF-8 decoding, or the trusted review-common.ps1 could not be read or loaded or has no follow-up promoter (it is older than this hook) - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
     13) echo "[pre-commit] WARN: the trusted review-common.ps1 copy no longer matches the bytes captured for the review, so it was not executed - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
     *)
       PROMO_APPEND_UNCERTAIN=1
-      echo "[pre-commit] WARN: the follow-up promoter exited $_crg_pr_rc, so whether it appended to the follow-up index is unknown. The rows do not prove that a commit landed. Inspect the index tail against the capture-doctrine frame and repair any incomplete transaction before later promotion; the findings remain in the verdict artifacts and the gate continues to its terminal identity check." >&2
+      echo "[pre-commit] WARN: the follow-up promoter exited $_crg_pr_rc, so whether it appended to the follow-up index is unknown. The rows do not prove that a commit landed. Inspect the index tail against the capture-doctrine frame and repair any incomplete transaction before later promotion. A promoter stopped while appending can leave the review-followups.md.lock folder beside the index, which blocks later appends until it is removed by hand once no writer is alive; the findings remain in the verdict artifacts and the gate continues to its terminal identity check." >&2
       ;;
   esac
   return 0

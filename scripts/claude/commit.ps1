@@ -18,8 +18,8 @@
 # ambient Git selector, a set core.hooksPath that would redirect the
 # pre-commit dispatcher, a missing/foreign/tampered default dispatcher, a
 # failure to prepare the controlled Git environment, console code pages that
-# could not be read at startup, or a console code page that could not be read,
-# switched to UTF-8 or put back for a Git path capture.
+# could not be read at startup, or a Git path capture whose Git could not be
+# started or printed more than the capture bound.
 #
 # Usage examples (from a Claude session; a Codex session uses
 # scripts/codex/commit.ps1 the same way):
@@ -1285,27 +1285,107 @@ function Invoke-CrgDedicatedCommitProcess {
   $ExitCode.Value = [int]$proxyExitCode
 }
 
+# Opens a file by its own name, not following a link at that name, for reading
+# while sharing reads only: while the handle is open no other handle can
+# write, rename or delete the file, and Windows refuses to rename a folder
+# above it. Backup semantics let a folder at the name open too, so the caller
+# can classify it from its attributes rather than from an access error.
+function Initialize-CrgCommitHookHoldNative {
+  if ('CrgCommitHookHold.NativeV1' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+namespace CrgCommitHookHold {
+  using System;
+  using System.ComponentModel;
+  using System.Runtime.InteropServices;
+  using Microsoft.Win32.SafeHandles;
+
+  public static class NativeV1 {
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation {
+      public uint FileAttributes;
+      public uint CreationTimeLow, CreationTimeHigh, LastAccessTimeLow, LastAccessTimeHigh, LastWriteTimeLow, LastWriteTimeHigh;
+      public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation information);
+
+    public static SafeFileHandle OpenReadHold(string path, out int error) {
+      SafeFileHandle handle = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+      error = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+      return handle;
+    }
+
+    public static uint GetAttributes(SafeFileHandle file) {
+      ByHandleFileInformation information;
+      if (!GetFileInformationByHandle(file, out information)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+      return information.FileAttributes;
+    }
+  }
+}
+'@ -Language CSharp -ErrorAction Stop
+  if (-not ('CrgCommitHookHold.NativeV1' -as [type])) {
+    throw [System.PlatformNotSupportedException]::new('native dispatcher hold support is unavailable')
+  }
+}
+
 # Verify the default dispatcher from one byte snapshot plus bootstrap's adjacent
 # digest record. `core.hooksPath` is proved unset before the caller invokes this
 # helper, so `git rev-parse --git-path hooks/pre-commit` names the hook the
 # upcoming commit will execute. The record grammar is producer-owned and exact:
 # two LF-terminated ASCII lines, a fixed v1 header and one lowercase SHA-256.
-# This is a detective install-integrity check, matching run-gate.sh; the hook's
-# own dispatcher chain remains the enforcement boundary after Git opens it.
+# The bytes are read through a held handle (Initialize-CrgCommitHookHoldNative)
+# that a verified result returns as Hold; the caller keeps it open through
+# `git commit`. The hold shares only reads, so while it is open the hashed
+# file cannot be rewritten, renamed, replaced or deleted; Git and the hook's
+# shell open it for reading, which the hold allows. Only the last path
+# component is opened without following a reparse point and held: the
+# folders above it are not, so a folder link retargeted above the hook could
+# still point the path at another file, and the hold does not cover that
+# case. Git also resolves which hook to run again inside `git commit`, so a
+# core.hooksPath, gitfile or commondir change made after the checks above
+# sends it elsewhere; the hold covers neither. run-gate.sh's
+# check of the same record cannot hold the file from sh and stays detective
+# there; the hook's own dispatcher chain remains the enforcement boundary.
 function Get-CrgDefaultHookAttestation {
   param([AllowNull()][string]$HookPath)
   if ([string]::IsNullOrWhiteSpace($HookPath)) {
     return @{ Ok = $false; State = 'indeterminate'; Reason = 'the default pre-commit hook path is empty or indeterminate' }
   }
+  $hookHold = $null
   try {
-    if (-not (Test-Path -LiteralPath $HookPath -PathType Leaf)) {
-      return @{ Ok = $false; State = 'missing-hook'; Reason = "no pre-commit dispatcher exists at the default hooks path '$HookPath'" }
+    Initialize-CrgCommitHookHoldNative
+    $openError = 0
+    $hookHandle = [CrgCommitHookHold.NativeV1]::OpenReadHold($HookPath, [ref]$openError)
+    if ($hookHandle.IsInvalid) {
+      $hookHandle.Dispose()
+      if ($openError -eq 2 -or $openError -eq 3) {
+        return @{ Ok = $false; State = 'missing-hook'; Reason = "no pre-commit dispatcher exists at the default hooks path '$HookPath'" }
+      }
+      return @{ Ok = $false; State = 'indeterminate'; Reason = "the pre-commit dispatcher at '$HookPath' could not be opened and held for reading (Win32 error $openError)" }
     }
-    $hookItem = Get-Item -LiteralPath $HookPath -Force -ErrorAction Stop
-    if (($hookItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-      return @{ Ok = $false; State = 'foreign-hook'; Reason = "the pre-commit dispatcher at '$HookPath' is a reparse point rather than an ordinary file" }
-    }
-    $hookBytes = [System.IO.File]::ReadAllBytes($HookPath)
+    try {
+      $hookAttributes = [CrgCommitHookHold.NativeV1]::GetAttributes($hookHandle)
+      if (($hookAttributes -band 0x400) -ne 0) {
+        return @{ Ok = $false; State = 'foreign-hook'; Reason = "the pre-commit dispatcher at '$HookPath' is a reparse point rather than an ordinary file" }
+      }
+      if (($hookAttributes -band 0x10) -ne 0) {
+        return @{ Ok = $false; State = 'missing-hook'; Reason = "the default hooks path '$HookPath' is a folder, not a pre-commit dispatcher" }
+      }
+      $hookHold = New-Object System.IO.FileStream($hookHandle, [System.IO.FileAccess]::Read)
+    } finally { if ($null -eq $hookHold) { $hookHandle.Dispose() } }
+    $hookBuffer = New-Object System.IO.MemoryStream
+    try { $hookHold.CopyTo($hookBuffer); $hookBytes = $hookBuffer.ToArray() } finally { $hookBuffer.Dispose() }
     if ($hookBytes.Length -lt 2 -or $hookBytes[0] -ne 0x23 -or $hookBytes[1] -ne 0x21) {
       return @{ Ok = $false; State = 'foreign-hook'; Reason = "the pre-commit dispatcher at '$HookPath' does not begin with a shebang (disarmed or foreign bytes)" }
     }
@@ -1352,9 +1432,13 @@ function Get-CrgDefaultHookAttestation {
     if (-not [string]::Equals($actualDigest, $expectedDigest, [System.StringComparison]::Ordinal)) {
       return @{ Ok = $false; State = 'digest-mismatch'; Reason = "the pre-commit dispatcher at '$HookPath' does not hash to the bootstrap-recorded digest in '$digestPath'" }
     }
-    return @{ Ok = $true; State = 'verified'; Reason = '' }
+    $verified = @{ Ok = $true; State = 'verified'; Reason = ''; Hold = $hookHold }
+    $hookHold = $null
+    return $verified
   } catch {
     return @{ Ok = $false; State = 'indeterminate'; Reason = "default dispatcher attestation could not be verified: $($_.Exception.Message)" }
+  } finally {
+    if ($null -ne $hookHold) { $hookHold.Dispose() }
   }
 }
 
@@ -1477,28 +1561,66 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
-# Git reports paths in UTF-8, and Windows PowerShell decodes native output with
-# its cached [Console]::OutputEncoding; setting that encoding also sets the
-# output code page of the console window this worker shares with the invoking
-# shell. A path-bearing capture therefore sets it to UTF-8 for its one call and
-# puts back the page the console had; a read or switch that fails stops the commit, since the
-# attestation below must read the path Git uses. Setting the code pages for the whole worker and only
-# warning when that failed was tried and dropped (staged review, 2026-10-10):
-# a half-applied change left the path decoded with the old code page, where a
-# non-ASCII path can name another directory whose dispatcher would be
+# Git reports paths in UTF-8, and the attestation below must read the path Git
+# uses, so a path-bearing capture reads Git's stdout as bytes and decodes them
+# as UTF-8 itself; stderr is discarded, as `2>$null` discards it under this
+# worker's Continue preference. The rows are split as PowerShell splits
+# native output, and the exit code lands in $LASTEXITCODE. Git runs from
+# PowerShell's current location (the .NET process directory does not follow
+# Set-Location), resolved like `& git`, never from a git.exe in that folder.
+# Tried and dropped (staged review, 2026-10-10): decoding through
+# PowerShell's native-output reader after setting [Console]::OutputEncoding to
+# UTF-8 for the call, which also sets the output code page of the console
+# window this worker shares with the invoking shell, so a worker killed
+# between the switch and its restore left that console on UTF-8; setting the
+# code pages for the whole worker and only warning when that failed, where a
+# half-applied change left the path decoded with the old code page and a
+# non-ASCII path could name another directory whose dispatcher would be
 # attested instead of the one Git runs.
 function Invoke-CrgCommitGitUtf8 {
   param([string[]]$GitArgs)
+  $location = (Get-Location).ProviderPath
+  if ([string]::IsNullOrWhiteSpace($location)) { throw 'the current PowerShell location has no filesystem path to run Git from' }
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $startInfo.Arguments = ConvertTo-CrgCommitProcessArgumentLine -ArgList $GitArgs
+  $startInfo.WorkingDirectory = $location
+  $startInfo.UseShellExecute = $false
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $startInfo.CreateNoWindow = $true
+  $process = [System.Diagnostics.Process]::Start($startInfo)
   try {
-    $prior = Get-CrgConsoleRestoreEncoding
-    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $errorDrain = $process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null)
+    # These captures print one path or value, so output past the bound is
+    # refused; reading stops keeping bytes there and the child is stopped.
+    $buffer = New-Object byte[] 8192
+    $kept = New-Object System.IO.MemoryStream
+    $exceeded = $false
+    while (($count = $process.StandardOutput.BaseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+      if (-not $exceeded -and ($kept.Length + $count) -gt 1048576) {
+        $exceeded = $true
+        try { $process.Kill() } catch { }
+      }
+      if (-not $exceeded) { $kept.Write($buffer, 0, $count) }
+    }
+    $process.WaitForExit()
+    $null = $errorDrain.GetAwaiter().GetResult()
+    if ($exceeded) { throw "git $($GitArgs -join ' ') printed more than the 1048576-byte path-capture bound" }
+    $output = [System.Text.UTF8Encoding]::new($false).GetString($kept.ToArray())
+    $global:LASTEXITCODE = $process.ExitCode
+  } finally {
+    # A failure above can leave the child running; its exit is confirmed
+    # before disposal.
+    if (-not $process.HasExited) {
+      try { $process.Kill() } catch { }
+      try { $process.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
+      $process.WaitForExit()
+    }
+    $process.Dispose()
   }
-  catch { throw "could not read the console output code page or switch it to UTF-8 to read Git's path output ($($_.Exception.Message))" }
-  try { & git @GitArgs 2>$null }
-  finally {
-    try { [Console]::OutputEncoding = $prior }
-    catch { throw "could not restore the console output code page after a Git path capture ($($_.Exception.Message)); run chcp to reset it" }
-  }
+  $reader = New-Object System.IO.StringReader($output)
+  while ($null -ne ($line = $reader.ReadLine())) { $line }
 }
 
 # A child the hook launches can leave the shared console's code pages changed,
@@ -1639,8 +1761,10 @@ try {
     Write-Error "$($script:CrgCommitLabel): ABORT -- default dispatcher attestation is $($defaultHookAttestation.State): $($defaultHookAttestation.Reason); refusing to commit un-gated. Investigate a digest mismatch first per docs/audit-protocol.md; repair the installation afterward with bootstrap.ps1 -DispatcherOnly."
     exit 1
   }
-  & git commit @args
-  $gitExit = $LASTEXITCODE
+  try {
+    & git commit @args
+    $gitExit = $LASTEXITCODE
+  } finally { $defaultHookAttestation.Hold.Dispose() }
 } catch {
   Write-Error "$($script:CrgCommitLabel): ABORT -- failed to prepare the controlled Git environment, the Unix-tool PATH or UTF-8 reading of Git's path output for the pre-commit dispatcher ($($_.Exception.Message))."
   $gitExit = 1

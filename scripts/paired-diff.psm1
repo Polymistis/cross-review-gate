@@ -70,7 +70,9 @@ function Get-CrgPairedGitDiffEvidence {
       Reason = ''
     }
   } catch {
-    $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = "$($state.Phase) failed: $($_.Exception.Message)" }
+    # Failure keeps the exception, whose Data can mark an unconfirmed Git child
+    # that a caller holding namespace pins must see (docs/paired-retention-v1.md).
+    $result = @{ Ok = $false; Patch = ''; Stat = ''; NameStatus = ''; Reason = "$($state.Phase) failed: $($_.Exception.Message)"; Failure = $_.Exception }
   } finally {
     $cleanup = Close-CrgAttributeNeutralContext -Custody $custody
     if (-not $cleanup.Ok) {

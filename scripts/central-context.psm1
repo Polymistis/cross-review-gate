@@ -36,6 +36,70 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
+# A write-only stream that keeps the first bytes up to its limit and discards
+# the rest, so a Git child copying into it never blocks on a full pipe and
+# never makes the capture buffer more than the limit. Exceeded means bytes
+# were discarded: Invoke-CrgStatusGit stops a running child on it, and once
+# the copy has finished every reader refuses an exceeded capture whatever the
+# exit code, since a short or empty capture alone never shows that nothing was
+# discarded. Several scripts carry their own copy under the same name and one
+# process can load more than one, so whichever compiles first serves them all:
+# a change to its members needs a new type name, and each copy refuses a
+# loaded type that lacks a member it calls.
+function Initialize-CrgBoundedSinkNative {
+  if (-not ('CrgBoundedCapture.SinkV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgBoundedCapture {
+  using System;
+  using System.IO;
+
+  public sealed class SinkV1 : Stream {
+    private readonly MemoryStream kept = new MemoryStream();
+    private readonly long limit;
+    private bool exceeded;
+
+    public SinkV1(long limit) {
+      if (limit < 0) { throw new ArgumentOutOfRangeException("limit"); }
+      this.limit = limit;
+    }
+
+    public bool Exceeded { get { lock (kept) { return exceeded; } } }
+
+    public byte[] ToArray() { lock (kept) { return kept.ToArray(); } }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+      lock (kept) {
+        if (exceeded) { return; }
+        long room = limit - kept.Length;
+        if (count > room) {
+          kept.Write(buffer, offset, (int)room);
+          exceeded = true;
+          return;
+        }
+        kept.Write(buffer, offset, count);
+      }
+    }
+
+    public override bool CanRead { get { return false; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return true; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
+  }
+}
+'@
+    if (-not ('CrgBoundedCapture.SinkV1' -as [type])) { throw 'the bounded capture stream could not be compiled' }
+  }
+  $sinkType = [CrgBoundedCapture.SinkV1]
+  if ($null -eq $sinkType.GetConstructor([type[]]@([long])) -or $null -eq $sinkType.GetProperty('Exceeded') -or $null -eq $sinkType.GetMethod('ToArray')) {
+    throw 'a loaded CrgBoundedCapture.SinkV1 lacks a member this copy calls; a changed copy needs a new type name'
+  }
+}
+
 function Invoke-CrgStatusGit {
   param([string[]]$Arguments, [int]$Maximum = 65536, [string]$GitExe, [string]$IndexPath, [string]$HistoryControlPath,
     [AllowNull()][AllowEmptyCollection()][byte[]]$InputBytes)
@@ -70,9 +134,11 @@ function Invoke-CrgStatusGit {
     $start.EnvironmentVariables['GIT_GRAFT_FILE'] = $HistoryControlPath
     $start.EnvironmentVariables['GIT_SHALLOW_FILE'] = $HistoryControlPath
   }
+  Initialize-CrgBoundedSinkNative
   $process = New-Object Diagnostics.Process
   $process.StartInfo = $start
-  $output = New-Object IO.MemoryStream
+  $output = New-Object CrgBoundedCapture.SinkV1 ([long]$Maximum)
+  $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   $started = $false
   try {
     # Framework constructs an auto-flushing stdin writer before BaseStream is
@@ -86,29 +152,42 @@ function Invoke-CrgStatusGit {
     finally { if ($null -ne $priorInputEncoding) { [Console]::InputEncoding = $priorInputEncoding } }
     if (-not $started) { throw 'status Git launch failed' }
     $copy = $process.StandardOutput.BaseStream.CopyToAsync($output)
-    $errorRead = $process.StandardError.ReadToEndAsync()
+    $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
     if ($null -ne $InputBytes) {
       try { $process.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) }
       finally { $process.StandardInput.Close() }
     }
-    if (-not $process.WaitForExit(10000)) {
-      try { $process.Kill() } catch { }
-      if (-not $process.WaitForExit(2000)) { throw 'status Git timeout; root exit could not be confirmed' }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not $process.WaitForExit(50)) {
+      if ($output.Exceeded -or $errors.Exceeded -or [DateTime]::UtcNow -ge $deadline) { break }
+    }
+    if (-not $process.HasExited) {
+      if ($output.Exceeded) { throw 'status Git output exceeds the requested bound' }
+      if ($errors.Exceeded) { throw 'status Git error output exceeds its bound' }
       throw 'status Git command timed out'
     }
-    $null = $copy.GetAwaiter().GetResult(); $errorText = $errorRead.GetAwaiter().GetResult()
-    if ($process.ExitCode -ne 0) { throw "status Git failed ($($process.ExitCode)): $errorText" }
-    if ($output.Length -gt $Maximum) { throw 'status Git output exceeds the requested bound' }
+    $null = $copy.GetAwaiter().GetResult(); $null = $errorCopy.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) { throw "status Git failed ($($process.ExitCode)): $([Text.UTF8Encoding]::new($false).GetString($errors.ToArray()))" }
+    if ($output.Exceeded) { throw 'status Git output exceeds the requested bound' }
+    if ($errors.Exceeded) { throw 'status Git error output exceeds its bound' }
     return ,([byte[]]$output.ToArray())
   } finally {
-    # A failed stop still gets the bounded wait, so an unconfirmed exit is
-    # always reported by name rather than by the stop's own exception.
-    try {
-      if ($started -and -not $process.HasExited) {
-        try { $process.Kill() } catch { }
-        if (-not $process.WaitForExit(2000)) { throw 'status Git cleanup could not confirm root exit' }
+    # The wait is bounded so a child that survives its stop cannot hang the
+    # status read. A child whose exit it cannot confirm is raised as uncertain
+    # (CrgUncertainGitChild, its process object undisposed). The marker
+    # protects only owners that receive this exception, directly or as an
+    # inner exception, and check for it: the retention custodies and
+    # Save-CrgUncertainCentralOperation (docs/paired-retention-v1.md). A
+    # caller that turns the failure into text drops it.
+    if ($started -and -not $process.HasExited) {
+      try { $process.Kill() } catch { }
+      if (-not $process.WaitForExit(2000)) {
+        $uncertain = [InvalidOperationException]::new('status Git cleanup could not confirm root exit')
+        $uncertain.Data['CrgUncertainGitChild'] = $process
+        throw $uncertain
       }
-    } finally { $output.Dispose(); $process.Dispose() }
+    }
+    $process.Dispose()
   }
 }
 
@@ -565,8 +644,10 @@ function Read-CrgCentralObjectBatch {
   foreach ($entry in @{ GIT_NO_REPLACE_OBJECTS = '1'; GIT_NO_LAZY_FETCH = '1'; GIT_CONFIG_NOSYSTEM = '1'; GIT_CONFIG_SYSTEM = 'NUL'; GIT_CONFIG_GLOBAL = 'NUL'; GIT_OPTIONAL_LOCKS = '0' }.GetEnumerator()) {
     $start.EnvironmentVariables[$entry.Key] = $entry.Value
   }
+  Initialize-CrgBoundedSinkNative
   $process = New-Object Diagnostics.Process
-  $process.StartInfo = $start; $started = $false; $errorRead = $null
+  $process.StartInfo = $start; $started = $false
+  $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   try {
     $priorEncoding = $null
     if ($null -eq $start.PSObject.Properties['StandardInputEncoding']) {
@@ -575,7 +656,7 @@ function Read-CrgCentralObjectBatch {
     try { $started = $process.Start() }
     finally { if ($null -ne $priorEncoding) { [Console]::InputEncoding = $priorEncoding } }
     if (-not $started) { throw 'batch object Git launch failed' }
-    $errorRead = $process.StandardError.ReadToEndAsync()
+    $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
     $state = [pscustomobject]@{ Stream = $process.StandardOutput.BaseStream; Buffer = (New-Object byte[] 65536); Offset = 0; Count = 0 }
     [long]$aggregate = 0
     $width = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
@@ -622,16 +703,21 @@ function Read-CrgCentralObjectBatch {
     $remaining = $deadline - [DateTime]::UtcNow
     $wait = [int][Math]::Min(2147483647, [Math]::Max(1, [Math]::Ceiling($remaining.TotalMilliseconds)))
     if (-not $process.WaitForExit($wait)) { throw 'batch object Git command timed out during exit' }
-    $errorText = $errorRead.GetAwaiter().GetResult()
-    if ($process.ExitCode -ne 0) { throw "batch object Git failed ($($process.ExitCode)): $errorText" }
+    $null = $errorCopy.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) { throw "batch object Git failed ($($process.ExitCode)): $([Text.UTF8Encoding]::new($false).GetString($errors.ToArray()))" }
+    if ($errors.Exceeded) { throw 'batch object Git error output exceeds its bound' }
     return ,$objects
   } finally {
-    try {
-      if ($started -and -not $process.HasExited) {
-        try { $process.Kill() } catch { }
-        if (-not $process.WaitForExit(2000)) { throw 'batch object Git cleanup could not confirm root exit' }
+    # As in Invoke-CrgStatusGit.
+    if ($started -and -not $process.HasExited) {
+      try { $process.Kill() } catch { }
+      if (-not $process.WaitForExit(2000)) {
+        $uncertain = [InvalidOperationException]::new('batch object Git cleanup could not confirm root exit')
+        $uncertain.Data['CrgUncertainGitChild'] = $process
+        throw $uncertain
       }
-    } finally { $process.Dispose() }
+    }
+    $process.Dispose()
   }
 }
 

@@ -26,7 +26,7 @@ function Save-CrgUncertainCentralOperation {
   $cause = $Failure; $uncertain = $false
   while ($null -ne $cause) {
     foreach ($key in $cause.Data.Keys) {
-      if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $uncertain = $true }
+      if ([System.Linq.Enumerable]::Contains([string[]]@('CrgPairedProcessSession', 'CrgPairRetentionUncertainReference', 'CrgUncertainGitChild', 'CrgPairedStageReadOwner', 'CrgCentralHistoryPins'), [string]$key, [System.StringComparer]::Ordinal)) { $uncertain = $true }
     }
     $cause = $cause.InnerException
   }
@@ -104,7 +104,10 @@ function Invoke-CrgCentralAuthorLint {
     if ($diff.Ok -isnot [bool] -or -not $diff.Ok -or -not [string]::Equals($diff.Domain, 'private', [System.StringComparison]::Ordinal) -or
         -not [string]::Equals($diff.ParentTree, $parentTree, [System.StringComparison]::Ordinal) -or
         -not [string]::Equals($diff.CandidateTree, $candidateTree, [System.StringComparison]::Ordinal) -or
-        $diff.PatchBytes -isnot [byte[]] -or $diff.NameStatusBytes -isnot [byte[]]) { throw "first-attachment private lint attribution failed: $($diff.Reason)" }
+        $diff.PatchBytes -isnot [byte[]] -or $diff.NameStatusBytes -isnot [byte[]]) {
+      $inner = if ($diff.Failure -is [Exception]) { $diff.Failure } else { $null }
+      throw [InvalidOperationException]::new("first-attachment private lint attribution failed: $($diff.Reason)", $inner)
+    }
     $inputData['PrivateAttribution'] = @{
       Domain = 'private'; Parent = $originalPrivateParent; ParentTree = $parentTree; CandidateTree = $candidateTree
       PatchBytes = $diff.PatchBytes; NameStatusBytes = $diff.NameStatusBytes

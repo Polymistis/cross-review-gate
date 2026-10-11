@@ -52,6 +52,70 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
+# A write-only stream that keeps the first bytes up to its limit and discards
+# the rest, so a Git child copying its stderr into it never blocks on a full
+# pipe and never makes the capture buffer more than the limit. Exceeded means
+# bytes were discarded: once the copy has finished, every caller refuses an
+# exceeded capture whatever the exit code, since a short or empty capture
+# alone never shows that nothing was discarded. Several scripts carry their
+# own copy under the same name and one process can load more than one, so
+# whichever compiles first serves them all: a change to its members needs a
+# new type name, and each copy refuses a loaded type that lacks a member it
+# calls.
+function Initialize-CrgBoundedSinkNative {
+  if (-not ('CrgBoundedCapture.SinkV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgBoundedCapture {
+  using System;
+  using System.IO;
+
+  public sealed class SinkV1 : Stream {
+    private readonly MemoryStream kept = new MemoryStream();
+    private readonly long limit;
+    private bool exceeded;
+
+    public SinkV1(long limit) {
+      if (limit < 0) { throw new ArgumentOutOfRangeException("limit"); }
+      this.limit = limit;
+    }
+
+    public bool Exceeded { get { lock (kept) { return exceeded; } } }
+
+    public byte[] ToArray() { lock (kept) { return kept.ToArray(); } }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+      lock (kept) {
+        if (exceeded) { return; }
+        long room = limit - kept.Length;
+        if (count > room) {
+          kept.Write(buffer, offset, (int)room);
+          exceeded = true;
+          return;
+        }
+        kept.Write(buffer, offset, count);
+      }
+    }
+
+    public override bool CanRead { get { return false; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return true; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
+  }
+}
+'@
+    if (-not ('CrgBoundedCapture.SinkV1' -as [type])) { throw 'the bounded capture stream could not be compiled' }
+  }
+  $sinkType = [CrgBoundedCapture.SinkV1]
+  if ($null -eq $sinkType.GetConstructor([type[]]@([long])) -or $null -eq $sinkType.GetProperty('Exceeded') -or $null -eq $sinkType.GetMethod('ToArray')) {
+    throw 'a loaded CrgBoundedCapture.SinkV1 lacks a member this copy calls; a changed copy needs a new type name'
+  }
+}
+
 # Native process-environment enumeration is required because managed maps can
 # collapse case-distinct Windows names before a prohibited Git selector is seen.
 function Initialize-CrgRendererEnvironmentNative {
@@ -1087,6 +1151,8 @@ function Invoke-CrgRendererGit {
   # confirmation below and let scratch cleanup run under a live child. Start
   # sits inside the try whose finally confirms the exit, so no failure after
   # a successful start can bypass it.
+  Initialize-CrgBoundedSinkNative
+  $errors = New-Object CrgBoundedCapture.SinkV1 ([long]1048576)
   $priorInputEncoding = $null
   if ($null -ne $InputBytes -and $null -eq $psi.PSObject.Properties['StandardInputEncoding']) {
     $priorInputEncoding = Get-CrgConsoleRestoreEncoding -ConsoleInput
@@ -1105,7 +1171,7 @@ function Invoke-CrgRendererGit {
         }
       }
     }
-    $errorTask = $process.StandardError.ReadToEndAsync()
+    $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
     if ($null -ne $InputBytes) {
       try { if ($InputBytes.Length -gt 0) { $process.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) } }
       finally { $process.StandardInput.Close() }
@@ -1120,8 +1186,9 @@ function Invoke-CrgRendererGit {
         $output.Write($buffer, 0, $count)
       }
       $process.WaitForExit()
-      $errorText = $errorTask.GetAwaiter().GetResult()
-      if ($errorText.Length -gt 1048576) { throw 'Git stderr exceeded the bounded capture size' }
+      $null = $errorCopy.GetAwaiter().GetResult()
+      if ($errors.Exceeded) { throw 'Git stderr exceeded the bounded capture size' }
+      $errorText = $script:CrgUtf8NoBom.GetString($errors.ToArray())
       [byte[]]$outputBytes = $output.ToArray()
     } finally { $output.Dispose() }
     try { $outputText = $script:CrgUtf8Strict.GetString($outputBytes) }

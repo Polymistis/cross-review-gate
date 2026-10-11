@@ -36,6 +36,70 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
+# A write-only stream that keeps the first bytes up to its limit and discards
+# the rest, so a Git child copying into it never blocks on a full pipe and
+# never makes the capture buffer more than the limit. Exceeded means bytes
+# were discarded: the reader stops a running child on it, and once the copy
+# has finished refuses an exceeded capture whatever the exit code, since a
+# short or empty capture alone never shows that nothing was discarded.
+# Several scripts carry their own copy under the same name and one
+# process can load more than one, so whichever compiles first serves them all:
+# a change to its members needs a new type name, and each copy refuses a
+# loaded type that lacks a member it calls.
+function Initialize-CrgBoundedSinkNative {
+  if (-not ('CrgBoundedCapture.SinkV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgBoundedCapture {
+  using System;
+  using System.IO;
+
+  public sealed class SinkV1 : Stream {
+    private readonly MemoryStream kept = new MemoryStream();
+    private readonly long limit;
+    private bool exceeded;
+
+    public SinkV1(long limit) {
+      if (limit < 0) { throw new ArgumentOutOfRangeException("limit"); }
+      this.limit = limit;
+    }
+
+    public bool Exceeded { get { lock (kept) { return exceeded; } } }
+
+    public byte[] ToArray() { lock (kept) { return kept.ToArray(); } }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+      lock (kept) {
+        if (exceeded) { return; }
+        long room = limit - kept.Length;
+        if (count > room) {
+          kept.Write(buffer, offset, (int)room);
+          exceeded = true;
+          return;
+        }
+        kept.Write(buffer, offset, count);
+      }
+    }
+
+    public override bool CanRead { get { return false; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return true; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
+  }
+}
+'@
+    if (-not ('CrgBoundedCapture.SinkV1' -as [type])) { throw 'the bounded capture stream could not be compiled' }
+  }
+  $sinkType = [CrgBoundedCapture.SinkV1]
+  if ($null -eq $sinkType.GetConstructor([type[]]@([long])) -or $null -eq $sinkType.GetProperty('Exceeded') -or $null -eq $sinkType.GetMethod('ToArray')) {
+    throw 'a loaded CrgBoundedCapture.SinkV1 lacks a member this copy calls; a changed copy needs a new type name'
+  }
+}
+
 function Get-CrgRetentionCommand {
   param([string]$Module, [string]$Name)
   $commands = @(Get-Command -Name $Name -Module $Module -CommandType Function -ListImported -ErrorAction SilentlyContinue)
@@ -119,8 +183,11 @@ function Invoke-CrgRetentionGit {
   foreach ($entry in @{ GIT_NO_REPLACE_OBJECTS = '1'; GIT_NO_LAZY_FETCH = '1'; GIT_CONFIG_NOSYSTEM = '1'; GIT_CONFIG_SYSTEM = 'NUL'; GIT_CONFIG_GLOBAL = 'NUL'; GIT_OPTIONAL_LOCKS = '0' }.GetEnumerator()) {
     $start.EnvironmentVariables[$entry.Key] = $entry.Value
   }
+  Initialize-CrgBoundedSinkNative
   $process = New-Object Diagnostics.Process
-  $process.StartInfo = $start; $output = New-Object IO.MemoryStream; $started = $false
+  $process.StartInfo = $start; $started = $false
+  $output = New-Object CrgBoundedCapture.SinkV1 ([long]$Maximum)
+  $errors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   try {
     # Match the existing capture transport's PS5 no-preamble binary stdin rule.
     $priorEncoding = $null
@@ -130,25 +197,39 @@ function Invoke-CrgRetentionGit {
     try { $started = $process.Start() } finally { if ($null -ne $priorEncoding) { [Console]::InputEncoding = $priorEncoding } }
     if (-not $started) { throw 'retention Git launch failed' }
     $copy = $process.StandardOutput.BaseStream.CopyToAsync($output)
-    $errors = $process.StandardError.ReadToEndAsync()
+    $errorCopy = $process.StandardError.BaseStream.CopyToAsync($errors)
     if ($null -ne $InputBytes) {
       try { $process.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) }
       finally { $process.StandardInput.Close() }
     }
-    if (-not $process.WaitForExit(10000)) { throw 'retention Git command timed out' }
-    $null = $copy.GetAwaiter().GetResult(); $errorText = $errors.GetAwaiter().GetResult()
-    if ($process.ExitCode -notin $AllowedExitCodes) { throw "retention Git failed ($($process.ExitCode)): $errorText" }
-    if ($output.Length -gt $Maximum) { throw 'retention Git output exceeds its bound' }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not $process.WaitForExit(50)) {
+      if ($output.Exceeded -or $errors.Exceeded -or [DateTime]::UtcNow -ge $deadline) { break }
+    }
+    if (-not $process.HasExited) {
+      if ($output.Exceeded) { throw 'retention Git output exceeds its bound' }
+      if ($errors.Exceeded) { throw 'retention Git error output exceeds its bound' }
+      throw 'retention Git command timed out'
+    }
+    $null = $copy.GetAwaiter().GetResult(); $null = $errorCopy.GetAwaiter().GetResult()
+    if ($process.ExitCode -notin $AllowedExitCodes) { throw "retention Git failed ($($process.ExitCode)): $([Text.UTF8Encoding]::new($false).GetString($errors.ToArray()))" }
+    if ($output.Exceeded) { throw 'retention Git output exceeds its bound' }
+    if ($errors.Exceeded) { throw 'retention Git error output exceeds its bound' }
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Bytes = [byte[]]$output.ToArray() }
   } finally {
-    # A failed stop still gets the bounded wait, so an unconfirmed exit is
-    # always reported by name rather than by the stop's own exception.
-    try {
-      if ($started -and -not $process.HasExited) {
-        try { $process.Kill() } catch { }
-        if (-not $process.WaitForExit(2000)) { throw 'retention Git root exit is unconfirmed; preserve prepared objects' }
+    # The wait is bounded so a child that survives its stop cannot hang
+    # retention. A child whose exit it cannot confirm can still be using the
+    # pinned namespace, so it is raised as uncertain with its process object
+    # undisposed (Save-CrgRetentionUncertainPins).
+    if ($started -and -not $process.HasExited) {
+      try { $process.Kill() } catch { }
+      if (-not $process.WaitForExit(2000)) {
+        $uncertain = [InvalidOperationException]::new('retention Git root exit is unconfirmed; preserve prepared objects')
+        $uncertain.Data['CrgUncertainGitChild'] = $process
+        throw $uncertain
       }
-    } finally { $output.Dispose(); $process.Dispose() }
+    }
+    $process.Dispose()
   }
 }
 
@@ -158,6 +239,25 @@ function Get-CrgRetentionGitLine {
   $text = [Text.UTF8Encoding]::new($false, $true).GetString($result.Bytes)
   if ($text -cnotmatch '\A[^\r\n]+\r?\n?\z') { throw 'retention Git did not return one complete line' }
   return $text.TrimEnd([char[]]@(13, 10))
+}
+
+# Release no namespace pin while a child that can still use the namespace is
+# alive (docs/paired-retention-v1.md). A failure carrying an uncertain
+# reference or an unconfirmed Git child exit takes the pins and the project
+# context instead of their disposal, and the operation caller retains it.
+# Nested custody (the writer's own reread) adds to the pins already carried.
+# Returns whether the pins were handed over; the caller disposes them if not.
+function Save-CrgRetentionUncertainPins {
+  param([Exception]$Failure, [object]$Pins, [object]$ProjectContext)
+  $marked = $Failure
+  while ($null -ne $marked -and -not $marked.Data.Contains('CrgPairRetentionUncertainReference') -and -not $marked.Data.Contains('CrgUncertainGitChild')) { $marked = $marked.InnerException }
+  if ($null -eq $marked) { return $false }
+  $carried = New-Object 'System.Collections.Generic.List[object]'
+  if ($null -ne $marked.Data['CrgPairRetentionNamespacePins']) { foreach ($pin in $marked.Data['CrgPairRetentionNamespacePins']) { $carried.Add($pin) } }
+  foreach ($pin in $Pins) { $carried.Add($pin) }
+  $marked.Data['CrgPairRetentionNamespacePins'] = $carried
+  $marked.Data['CrgPairRetentionProjectContext'] = $ProjectContext
+  return $true
 }
 
 function Open-CrgRetentionContext {
@@ -204,7 +304,10 @@ function Open-CrgRetentionContext {
       }
     }
     return ,$pins
-  } catch { foreach ($pin in $pins) { $pin.Handle.Dispose() }; throw }
+  } catch {
+    if (-not (Save-CrgRetentionUncertainPins -Failure $_.Exception -Pins $pins -ProjectContext $ProjectContext)) { foreach ($pin in $pins) { $pin.Handle.Dispose() } }
+    throw
+  }
 }
 
 function Read-CrgRetentionObjects {
@@ -561,7 +664,13 @@ function Get-CrgRetentionPayload {
     foreach ($domain in @('public', 'private')) {
       $baseline = if ($domain -ceq 'private') { $emptyTree } else { $results.public.Parent.TreeOid }
       $diff = & $readDiff -ProjectContext $ProjectContext -Domain $domain -ParentTree $baseline -CandidateTree $results[$domain].Result.TreeOid -TempParent $ProjectContext.Domains.private.GitDir
-      if ($null -eq $diff -or -not $diff.Ok) { throw "initial retained diff recapture failed: $($diff.Reason)" }
+      if ($null -eq $diff -or -not $diff.Ok) {
+        # The recapture's own failure stays the inner exception, so an
+        # unconfirmed Git child it reports still reaches
+        # Save-CrgRetentionUncertainPins.
+        $inner = if ($null -ne $diff -and $diff.Failure -is [Exception]) { $diff.Failure } else { $null }
+        throw [InvalidOperationException]::new("initial retained diff recapture failed: $($diff.Reason)", $inner)
+      }
       foreach ($binding in @(@('PatchBytes', '.patch'), @('StatBytes', '.stat'), @('NameStatusBytes', '.name-status'))) {
         if ($diff.($binding[0]) -isnot [byte[]] -or
             (Get-CrgRetentionDigest -Bytes $diff.($binding[0])) -cne (Get-CrgRetentionDigest -Bytes $Buffers[$domain + $binding[1]])) { throw 'initial retained evidence differs from the exact raw baseline-to-candidate diff' }
@@ -632,6 +741,7 @@ function Read-CrgRetentionCore {
     [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin,
     [byte[]]$AttachmentBytes)
   $custody = Open-CrgRetentionContext -ProjectContext $ProjectContext -Origin $Origin
+  $preserveCustody = $false
   try {
     $record = Read-CrgRetentionRecord -ProjectContext $ProjectContext -ReceiptSha256 $ReceiptSha256 -ExpectedOrigin $Origin
     $files = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
@@ -664,7 +774,12 @@ function Read-CrgRetentionCore {
       PrivateRef = $record.Ref; PrivateCommitOid = $record.CommitOid; PrivateTreeOid = $record.TreeOid; PublicRef = $publicRef
       Files = $files; Metadata = $payload.Metadata; ContextBlobBuffers = $payload.ContextBlobBuffers
       ValidationState = $validation; ReadyForPublication = $false }
-  } finally { foreach ($pin in $custody) { $pin.Handle.Dispose() } }
+  } catch {
+    $preserveCustody = Save-CrgRetentionUncertainPins -Failure $_.Exception -Pins $custody -ProjectContext $ProjectContext
+    throw
+  } finally {
+    if (-not $preserveCustody) { foreach ($pin in $custody) { $pin.Handle.Dispose() } }
+  }
   return $result
 }
 
@@ -734,16 +849,7 @@ function Write-CrgRetentionCore {
     if ($null -eq $existingPublic) { New-CrgRetentionRef -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain public -Ref $publicRef -Oid $receipt.Fields['public-result'] }
     $result = Read-CrgRetentionCore -ProjectContext $ProjectContext -ReceiptSha256 $receipt.ReceiptSha256 -Origin $Origin -AttachmentBytes $AttachmentBytes
   } catch {
-    $failure = $_.Exception
-    while ($null -ne $failure -and -not $failure.Data.Contains('CrgPairRetentionUncertainReference')) { $failure = $failure.InnerException }
-    if ($null -ne $failure) {
-      # Match the existing session contract: release no namespace owner while
-      # an admitted child can still use that namespace. The operation caller
-      # must retain the exception and runtime context for explicit cleanup.
-      $preserveCustody = $true
-      $failure.Data['CrgPairRetentionNamespacePins'] = $custody
-      $failure.Data['CrgPairRetentionProjectContext'] = $ProjectContext
-    }
+    $preserveCustody = Save-CrgRetentionUncertainPins -Failure $_.Exception -Pins $custody -ProjectContext $ProjectContext
     throw
   } finally {
     if (-not $preserveCustody) { foreach ($pin in $custody) { $pin.Handle.Dispose() } }

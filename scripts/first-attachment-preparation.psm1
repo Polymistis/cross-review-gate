@@ -118,7 +118,10 @@ function Get-CrgCentralFirstAttachmentReviewInput {
     $diff = & $commands['Get-CrgPairedGitDiffEvidence'] -ProjectContext $ProjectContext -Domain $domain -ParentTree $baseline -CandidateTree $indexes[$domain].TreeOid -TempParent $TempParent
     if ($diff.Ok -isnot [bool] -or -not $diff.Ok -or -not [string]::Equals($diff.Domain, $domain, [StringComparison]::Ordinal) -or
         -not [string]::Equals($diff.ParentTree, $baseline, [StringComparison]::Ordinal) -or
-        -not [string]::Equals($diff.CandidateTree, $indexes[$domain].TreeOid, [StringComparison]::Ordinal)) { throw "first-attachment $domain diff capture failed: $($diff.Reason)" }
+        -not [string]::Equals($diff.CandidateTree, $indexes[$domain].TreeOid, [StringComparison]::Ordinal)) {
+      $inner = if ($diff.Failure -is [Exception]) { $diff.Failure } else { $null }
+      throw [InvalidOperationException]::new("first-attachment $domain diff capture failed: $($diff.Reason)", $inner)
+    }
     foreach ($item in @(@{ Suffix = '.patch'; Field = 'PatchBytes' }, @{ Suffix = '.stat'; Field = 'StatBytes' }, @{ Suffix = '.name-status'; Field = 'NameStatusBytes' })) {
       if ($diff[$item.Field] -isnot [byte[]]) { throw 'first-attachment diff did not supply a raw byte buffer' }
       $evidence.Add($domain + $item.Suffix, $diff[$item.Field])

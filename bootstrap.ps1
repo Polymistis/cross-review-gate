@@ -142,44 +142,140 @@ namespace CrgConsoleCodePage {
   return [System.Text.Encoding]::GetEncoding([int]$codePage)
 }
 
-# Git prints paths and reference names in UTF-8, unquoted, and Windows
-# PowerShell decodes native output with its cached [Console]::OutputEncoding,
-# so a capture whose output is such an identifier (a path from rev-parse or
-# core.hooksPath, a reference from symbolic-ref) goes through this helper,
-# which sets that encoding, and with it the console's output code page, to
-# UTF-8 for the one call and then puts back the page the console had. Other captures print hashes or ASCII keywords, are
-# read only for their exit code or emptiness, or list paths that are only
-# compared with the gate's fixed ASCII paths, which a misdecoded non-ASCII
-# name cannot equal. The code page belongs to the console window bootstrap
-# shares with the invoking shell. A read, switch or restore that fails is
-# raised like a Git launch failure: every caller that catches one turns it
-# into a refusal or an indeterminate result, never an absence, and the
-# install steps that moved a gate file aside put it back or name it before
-# aborting; an uncaught one ends the run. A failed restore, which leaves the
-# console changed, is also written through the host when it happens, since a
-# caller's catch can replace the raised message. Tried and dropped (staged review,
-# 2026-10-10): setting the code pages for the whole run with a
-# PowerShell.Exiting restore (it runs only when the engine exits and loses
-# its failures in the event job); wrapping the whole script in a dot-sourced
-# block whose finally restores (each top-level error then printed the entire
-# script as its position); ending the run here with exit 1, which skipped
-# the custody restoration of a gate file moved aside during install.
-function Invoke-CrgGitUtf8 {
-  param([string[]]$GitArgs, [switch]$MergeError)
-  try {
-    $prior = Get-CrgConsoleRestoreEncoding
-    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-  }
-  catch { throw "the console output code page could not be read or switched to UTF-8 to read Git's output ($($_.Exception.Message))" }
-  try {
-    if ($MergeError) { & git @GitArgs 2>&1 } else { & git @GitArgs 2>$null }
-  } finally {
-    try { [Console]::OutputEncoding = $prior }
-    catch {
-      $Host.UI.WriteErrorLine("bootstrap.ps1: ERROR: could not restore the console output code page after a Git call ($($_.Exception.Message)); run chcp to reset it.")
-      throw "the console output code page could not be restored after a Git call ($($_.Exception.Message)); run chcp to reset it"
+# A write-only stream that keeps the first bytes up to its limit and discards
+# the rest, so a Git child copying its stderr into it never blocks on a full
+# pipe and never makes the capture buffer more than the limit. Exceeded means
+# bytes were discarded: once the copy has finished, every caller refuses an
+# exceeded capture whatever the exit code, since a short or empty capture
+# alone never shows that nothing was discarded. Several scripts carry their
+# own copy under the same name and one process can load more than one, so
+# whichever compiles first serves them all: a change to its members needs a
+# new type name, and each copy refuses a loaded type that lacks a member it
+# calls.
+function Initialize-CrgBoundedSinkNative {
+  if (-not ('CrgBoundedCapture.SinkV1' -as [type])) {
+    Add-Type -ErrorAction Stop -TypeDefinition @'
+namespace CrgBoundedCapture {
+  using System;
+  using System.IO;
+
+  public sealed class SinkV1 : Stream {
+    private readonly MemoryStream kept = new MemoryStream();
+    private readonly long limit;
+    private bool exceeded;
+
+    public SinkV1(long limit) {
+      if (limit < 0) { throw new ArgumentOutOfRangeException("limit"); }
+      this.limit = limit;
     }
+
+    public bool Exceeded { get { lock (kept) { return exceeded; } } }
+
+    public byte[] ToArray() { lock (kept) { return kept.ToArray(); } }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+      lock (kept) {
+        if (exceeded) { return; }
+        long room = limit - kept.Length;
+        if (count > room) {
+          kept.Write(buffer, offset, (int)room);
+          exceeded = true;
+          return;
+        }
+        kept.Write(buffer, offset, count);
+      }
+    }
+
+    public override bool CanRead { get { return false; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return true; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+    public override void SetLength(long value) { throw new NotSupportedException(); }
   }
+}
+'@
+    if (-not ('CrgBoundedCapture.SinkV1' -as [type])) { throw 'the bounded capture stream could not be compiled' }
+  }
+  $sinkType = [CrgBoundedCapture.SinkV1]
+  if ($null -eq $sinkType.GetConstructor([type[]]@([long])) -or $null -eq $sinkType.GetProperty('Exceeded') -or $null -eq $sinkType.GetMethod('ToArray')) {
+    throw 'a loaded CrgBoundedCapture.SinkV1 lacks a member this copy calls; a changed copy needs a new type name'
+  }
+}
+
+# Git prints paths and reference names in UTF-8, unquoted, so a capture whose
+# output is such an identifier (a path from rev-parse or core.hooksPath, a
+# reference from symbolic-ref) goes through this helper, which reads Git's
+# stdout as bytes and decodes them as UTF-8 itself. Other captures print
+# hashes or ASCII keywords, are read only for their exit code or emptiness,
+# or list paths that are only compared with the gate's fixed ASCII paths,
+# which a misdecoded non-ASCII name cannot equal. The rows are split as
+# PowerShell splits native output, and the exit code lands in $LASTEXITCODE.
+# Any stderr output is raised, as Windows PowerShell raises native stderr
+# under this script's Stop preference; every caller that catches it turns it
+# into a refusal or an indeterminate result, never an absence. Git runs from
+# PowerShell's current location, resolved like `& git`, never from a git.exe
+# in that folder. Tried and dropped (staged review, 2026-10-10): decoding
+# through PowerShell's native-output reader after setting
+# [Console]::OutputEncoding to UTF-8 for the call, which also sets the output
+# code page of the console window bootstrap shares with the invoking shell,
+# so a run killed between the switch and its restore left that console on
+# UTF-8; setting the code pages for the whole run with a PowerShell.Exiting
+# restore (it runs only when the engine exits and loses its failures in the
+# event job); ending the run here with exit 1, which skipped the custody
+# restoration of a gate file moved aside during install.
+function Invoke-CrgGitUtf8 {
+  param([string[]]$GitArgs)
+  $guLocation = (Get-Location).ProviderPath
+  if ([string]::IsNullOrWhiteSpace($guLocation)) { throw 'the current PowerShell location has no filesystem path to run Git from' }
+  $guPsi = New-Object System.Diagnostics.ProcessStartInfo
+  $guPsi.FileName = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $guPsi.Arguments = ((@($GitArgs) | ForEach-Object { Convert-CrgWindowsProcessArgument -Argument $_ }) -join ' ')
+  $guPsi.WorkingDirectory = $guLocation
+  $guPsi.UseShellExecute = $false
+  $guPsi.RedirectStandardOutput = $true
+  $guPsi.RedirectStandardError = $true
+  $guPsi.CreateNoWindow = $true
+  Initialize-CrgBoundedSinkNative
+  $guErrors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
+  $guProc = [System.Diagnostics.Process]::Start($guPsi)
+  try {
+    $guErrCopy = $guProc.StandardError.BaseStream.CopyToAsync($guErrors)
+    # These captures print one identifier, so output past the bound is
+    # refused; reading stops keeping bytes there and the child is stopped.
+    $guBuffer = New-Object byte[] 8192
+    $guKept = New-Object System.IO.MemoryStream
+    $guExceeded = $false
+    while (($guRead = $guProc.StandardOutput.BaseStream.Read($guBuffer, 0, $guBuffer.Length)) -gt 0) {
+      if (-not $guExceeded -and ($guKept.Length + $guRead) -gt 1048576) {
+        $guExceeded = $true
+        try { $guProc.Kill() } catch { }
+      }
+      if (-not $guExceeded) { $guKept.Write($guBuffer, 0, $guRead) }
+    }
+    $guProc.WaitForExit()
+    $null = $guErrCopy.GetAwaiter().GetResult()
+    if ($guExceeded) { throw "git $($GitArgs -join ' ') printed more than the 1048576-byte identifier-capture bound" }
+    if ($guErrors.Exceeded) { throw "git $($GitArgs -join ' ') wrote more than the 65536-byte stderr capture bound (exit $($guProc.ExitCode))" }
+    $guOut = [System.Text.UTF8Encoding]::new($false).GetString($guKept.ToArray())
+    $guErr = [System.Text.UTF8Encoding]::new($false).GetString($guErrors.ToArray())
+    $global:LASTEXITCODE = $guProc.ExitCode
+  } finally {
+    # A failure above can leave the child running; its exit is confirmed
+    # before disposal, as in Invoke-CrgIsolatedGitProcess.
+    if (-not $guProc.HasExited) {
+      try { $guProc.Kill() } catch { }
+      try { $guProc.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null) } catch { }
+      $guProc.WaitForExit()
+    }
+    $guProc.Dispose()
+  }
+  if ($guErr.Length -gt 0) { throw "git $($GitArgs -join ' ') wrote to stderr (exit $($global:LASTEXITCODE)): $($guErr.Trim())" }
+  $guReader = New-Object System.IO.StringReader($guOut)
+  while ($null -ne ($guLine = $guReader.ReadLine())) { $guLine }
 }
 
 # Live process state must come from the native Windows block. Managed
@@ -663,10 +759,10 @@ function Get-CrgSha256Hex {
 }
 function Get-CrgGitCommonDir {
   param([string]$RepoRoot)
-  # try/catch so the $null contract holds under a caller's EAP=Stop:
-  # the captured git stderr line would otherwise become a terminating
-  # error instead of the $null the callers diagnose.
-  try { $raw = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('-C', $RepoRoot, 'rev-parse', '--git-common-dir')) } catch { return $null }
+  # try/catch so the $null contract holds: Invoke-CrgGitUtf8 raises on any
+  # Git stderr, a failed launch or an exceeded capture bound, which would
+  # otherwise end the caller instead of reaching the $null it diagnoses.
+  try { $raw = (Invoke-CrgGitUtf8 -GitArgs @('-C', $RepoRoot, 'rev-parse', '--git-common-dir')) } catch { return $null }
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$raw")) { return $null }
   $p = "$raw".Trim()
   if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $RepoRoot $p }
@@ -679,7 +775,7 @@ function Get-CrgGitCommonDir {
 # worktree's baseline.
 function Get-CrgGitDir {
   param([string]$RepoRoot)
-  try { $raw = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('-C', $RepoRoot, 'rev-parse', '--absolute-git-dir')) } catch { return $null }
+  try { $raw = (Invoke-CrgGitUtf8 -GitArgs @('-C', $RepoRoot, 'rev-parse', '--absolute-git-dir')) } catch { return $null }
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$raw")) { return $null }
   return "$raw".Trim()
 }
@@ -1435,9 +1531,11 @@ function Read-CrgGitBlobBytes {
   $gbPsi.RedirectStandardError = $true
   $gbPsi.CreateNoWindow = $true
   $gbPsi.Arguments = ((@('-C', $RepoRoot, 'cat-file', 'blob', $Oid) | ForEach-Object { Convert-CrgWindowsProcessArgument -Argument $_ }) -join ' ')
+  Initialize-CrgBoundedSinkNative
+  $gbErrors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   $gbProc = [System.Diagnostics.Process]::Start($gbPsi)
   try {
-    $gbErrTask = $gbProc.StandardError.ReadToEndAsync()
+    $gbErrCopy = $gbProc.StandardError.BaseStream.CopyToAsync($gbErrors)
     $gbOut = New-Object System.IO.MemoryStream
     try {
       # The bound is enforced while reading, so an oversized blob is never
@@ -1452,9 +1550,11 @@ function Read-CrgGitBlobBytes {
         if (-not $gbExceeded) { $gbOut.Write($gbBuffer, 0, $gbRead) }
       }
       $gbProc.WaitForExit()
-      $gbErr = $gbErrTask.GetAwaiter().GetResult()
+      $null = $gbErrCopy.GetAwaiter().GetResult()
+      $gbErr = [System.Text.UTF8Encoding]::new($false).GetString($gbErrors.ToArray())
       if ($gbExceeded) { throw "blob '$Oid' exceeds the $MaxLength-byte transition bound" }
       if ($gbProc.ExitCode -ne 0) { throw "git cat-file failed for blob '$Oid' ($gbErr)" }
+      if ($gbErrors.Exceeded) { throw "git cat-file for blob '$Oid' wrote more than the 65536-byte stderr capture bound" }
       return ,([byte[]]$gbOut.ToArray())
     } finally { $gbOut.Dispose() }
   } finally {
@@ -1566,7 +1666,10 @@ function Invoke-CrgIsolatedGitProcess {
     [switch]$UseAmbientConfig,
     [switch]$UseAmbientAttributes,
     [hashtable]$ExtraEnvironment,
-    [ValidateRange(0, 16777216)][int64]$MaxOutputBytes = 0
+    # Every stdout capture is bounded. The default admits a filtered gate-file
+    # checkout or an attribute listing over the gate's paths; a caller that
+    # expects less passes a tighter bound.
+    [ValidateRange(1, 16777216)][int64]$MaxOutputBytes = 16777216
   )
   $ipGit = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
   $ipPsi = New-Object System.Diagnostics.ProcessStartInfo
@@ -1603,6 +1706,8 @@ function Invoke-CrgIsolatedGitProcess {
   }
   Set-CrgNoReplaceObjectsChildEnvironmentSingleton -Environment $ipEnvironment
   $ipPsi.Arguments = (($GitArgs | ForEach-Object { Convert-CrgWindowsProcessArgument -Argument $_ }) -join ' ')
+  Initialize-CrgBoundedSinkNative
+  $ipErrors = New-Object CrgBoundedCapture.SinkV1 ([long]65536)
   $ipPriorConsoleInputEncoding = $null
   $ipStandardInput = $null
   if ($null -ne $InputBytes -and $null -ne $ipPsi.PSObject.Properties['StandardInputEncoding']) {
@@ -1645,7 +1750,7 @@ function Invoke-CrgIsolatedGitProcess {
         }
       }
     }
-    $ipErrTask = $ipProcess.StandardError.ReadToEndAsync()
+    $ipErrCopy = $ipProcess.StandardError.BaseStream.CopyToAsync($ipErrors)
     if ($null -ne $InputBytes) {
       try {
         if ($InputBytes.Length -gt 0) { $ipStandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length) }
@@ -1656,16 +1761,18 @@ function Invoke-CrgIsolatedGitProcess {
       $ipOutputBuffer = New-Object byte[] 8192
       $ipOutputExceeded = $false
       while (($ipOutputRead = $ipProcess.StandardOutput.BaseStream.Read($ipOutputBuffer, 0, $ipOutputBuffer.Length)) -gt 0) {
-        if ($MaxOutputBytes -gt 0 -and ($ipOutput.Length + $ipOutputRead) -gt $MaxOutputBytes) {
+        if (($ipOutput.Length + $ipOutputRead) -gt $MaxOutputBytes) {
           $ipOutputExceeded = $true
           try { $ipProcess.Kill() } catch { }
           continue
         }
         if (-not $ipOutputExceeded) { $ipOutput.Write($ipOutputBuffer, 0, $ipOutputRead) }
       }
-      $ipError = $ipErrTask.Result
       $ipProcess.WaitForExit()
+      $null = $ipErrCopy.GetAwaiter().GetResult()
+      $ipError = [System.Text.UTF8Encoding]::new($false).GetString($ipErrors.ToArray())
       if ($ipOutputExceeded) { throw "isolated Git stdout exceeded the $MaxOutputBytes-byte bound" }
+      if ($ipErrors.Exceeded) { throw "isolated Git stderr exceeded the 65536-byte capture bound (exit $($ipProcess.ExitCode))" }
       [byte[]]$ipOutputBytes = $ipOutput.ToArray()
     } finally { $ipOutput.Dispose() }
     $ipOutputText = [System.Text.UTF8Encoding]::new($false).GetString($ipOutputBytes)
@@ -1709,10 +1816,10 @@ function Invoke-CrgIsolatedPackageGit {
 }
 
 function Invoke-CrgCapturedPackageGit {
-  param([object]$Candidate, [string[]]$GitArgs, [byte[]]$InputBytes, [switch]$UseAmbientConfig)
+  param([object]$Candidate, [string[]]$GitArgs, [byte[]]$InputBytes, [switch]$UseAmbientConfig, [int64]$MaxOutputBytes = 16777216)
   if ($null -eq $Candidate -or [string]::IsNullOrWhiteSpace("$($Candidate.GitDir)") -or [string]::IsNullOrWhiteSpace("$($Candidate.Root)")) { throw 'captured package Git invocation received no retained namespace' }
   $pkArgs = @('--no-optional-locks', "--git-dir=$($Candidate.GitDir)", "--work-tree=$($Candidate.Root)") + @($GitArgs)
-  return Invoke-CrgIsolatedGitProcess -IsoRoot $Candidate.Root -WorkDir $Candidate.Root -GitArgs $pkArgs -InputBytes $InputBytes -UseAmbientConfig:$UseAmbientConfig -ExtraEnvironment @{ GIT_COMMON_DIR = "$($Candidate.CommonDir)" }
+  return Invoke-CrgIsolatedGitProcess -IsoRoot $Candidate.Root -WorkDir $Candidate.Root -GitArgs $pkArgs -InputBytes $InputBytes -UseAmbientConfig:$UseAmbientConfig -ExtraEnvironment @{ GIT_COMMON_DIR = "$($Candidate.CommonDir)" } -MaxOutputBytes $MaxOutputBytes
 }
 
 function Test-CrgPathWithin {
@@ -1840,7 +1947,9 @@ function Get-CrgIsolatedPackageConversionSettings {
 function Read-CrgIsolatedPackageBlobBytes {
   param([object]$Candidate, [string]$Oid, [int]$MaxLength)
   if ($Oid -cnotmatch "\A[0-9a-f]{$($Candidate.ObjectIdLength)}\z") { throw 'package blob reader received a malformed object ID' }
-  $ibResult = Invoke-CrgCapturedPackageGit -Candidate $Candidate -GitArgs @('cat-file', 'blob', $Oid)
+  # One byte past the proof bound is enough to refuse, so the read stops there;
+  # at the helper's own maximum the helper's refusal stands in for that byte.
+  $ibResult = Invoke-CrgCapturedPackageGit -Candidate $Candidate -GitArgs @('cat-file', 'blob', $Oid) -MaxOutputBytes ([Math]::Min([Math]::Max([int64]$MaxLength, 0) + 1, 16777216))
   if ($ibResult.Exit -ne 0) { throw "package git cat-file failed for '$Oid': $($ibResult.Text.Trim())" }
   if ($ibResult.Bytes.Length -gt $MaxLength) { throw "package blob '$Oid' exceeds the $MaxLength-byte proof bound" }
   if ((Get-CrgGitObjectIdOfBytes -Type blob -Bytes $ibResult.Bytes -ObjectIdLength $Candidate.ObjectIdLength) -cne $Oid) { throw "package blob '$Oid' failed independent object-ID verification" }
@@ -8053,7 +8162,7 @@ if ($LASTEXITCODE -ne 0 -or -not [string]::Equals("$gitCheck".Trim(), 'true', [S
 # install followed by every-commit failure is the worst outcome;
 # normalize so the file copies land in the same tree the dispatcher
 # will look in.
-$gitTopLevel = Invoke-CrgGitUtf8 -MergeError -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--show-toplevel')
+$gitTopLevel = Invoke-CrgGitUtf8 -GitArgs @('-C', $targetRepoAbs, 'rev-parse', '--show-toplevel')
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($gitTopLevel)) {
   Write-Error "bootstrap.ps1: 'git rev-parse --show-toplevel' failed inside '$targetRepoAbs'."
   exit 1
@@ -10666,7 +10775,7 @@ Write-Host ""
 # transition publication; every exit below reaches the shared finally.
 Push-Location -LiteralPath $targetRepoAbs
 try {
-  $existingHooksPath = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('config', '--get', 'core.hooksPath'))
+  $existingHooksPath = (Invoke-CrgGitUtf8 -GitArgs @('config', '--get', 'core.hooksPath'))
   $hooksPathExit = $LASTEXITCODE
   # Revalidate at the mutation boundary. A configured hooks path is never
   # rewritten by bootstrap: Git's config writer cannot participate in the
@@ -10681,7 +10790,7 @@ try {
   # Resolve the actual hooks dir: `git rev-parse --git-path hooks/pre-commit`
   # handles regular repos, worktrees (where .git is a file, not a dir),
   # and submodules uniformly.
-  $hooksPathRel = (Invoke-CrgGitUtf8 -MergeError -GitArgs @('rev-parse', '--git-path', 'hooks/pre-commit'))
+  $hooksPathRel = (Invoke-CrgGitUtf8 -GitArgs @('rev-parse', '--git-path', 'hooks/pre-commit'))
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($hooksPathRel)) {
     Write-Error "bootstrap.ps1: 'git rev-parse --git-path hooks/pre-commit' failed."
     exit 1
