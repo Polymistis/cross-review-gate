@@ -45,11 +45,11 @@ function New-CrgCentralInstructionDiscoveryBytes {
     ('Runtime launcher: ' + (Join-Path $RuntimeStore 'launcher.ps1')),
     'Project configuration: .crg-project/project.conf', ('Private plan: ' + $PlanPath), ('Private history: ' + $HistoryPath),
     '', 'Use the central launcher for Open, Stage, Commit and Resume with the explicit',
-    'TargetRepo. Commit also requires MessageFile and AuthoringAgent. This workflow',
-    'supersedes legacy per-project gate commands. Public software and local private',
-    'governance receive mandatory combined review; native commits do not substitute.',
-    'Project mode describes review treatment, not permission to work. Provider',
-    'exhaustion fallback stays automatic within the gate; no session skip flag exists.',
+    'TargetRepo. Commit also requires MessageFile and AuthoringAgent. Public software',
+    'and local private governance receive mandatory combined review; native commits',
+    'do not substitute. Project mode describes review treatment, not permission to',
+    'work. Provider exhaustion fallback stays automatic within the gate; no session',
+    'skip flag exists.',
     '<!-- crg-central-discovery v1 END -->')
   return ,([Text.UTF8Encoding]::new($false, $true).GetBytes(($lines -join "`n") + "`n"))
 }

@@ -315,7 +315,11 @@ Existing differing launcher bytes are refused by `-InstallRuntimeLauncher`.
 Routine compatible upgrades only publish/import and activate; do not reinstall
 the stable launcher from every release. Retain the launcher-origin releases and all
 releases required by interrupted operations. Lock contention is not permission
-to delete a lock file, change hook routing or bypass review.
+to delete a lock file, change hook routing or bypass review. A release whose
+canonical discovery section differs from the active one also needs, in every
+attached project, a reviewed Commit that rewrites the section in both root
+instruction files; until then that project's Open and Commit refuse
+([central instructions](central-instructions-v1.md)).
 
 For an existing ABI 1 store only, import the approved ABI 2 release, let current
 invocations finish, then run the explicit migration before activation:
@@ -358,9 +362,32 @@ Finish unrelated staged software work before Attach. Inventory and preserve
 existing public/private history, indexes, working edits and hooks. New private
 history defaults to the actual public common directory's `crg-governance.git`.
 An existing private database requires explicit adoption, never a reset or silent
-replacement. Legacy TRACKED payload retirement requires its reviewed provenance
-migration; old LOCAL files and recovery evidence are preserved. Do not delete
-legacy hooks, set `core.hooksPath`, or manually manufacture `crg-*` records.
+replacement. Do not set `core.hooksPath` or manually manufacture `crg-*` records.
+
+The central launcher supersedes the legacy per-project gate. Its leftovers keep
+directing sessions to retired commands beside the discovery section, so every
+attached project retires all of them. Nothing is retired before Attach
+completes, and ignored project data that is not gate payload stays. Linked
+worktrees share one common directory, so retirement follows ownership:
+
+- Tracked legacy gate files (the current and historical per-project installer
+  inventories beside `Get-CrgCurrentFileList` in `bootstrap.ps1`), the
+  `.gitattributes` rules that exist only for them, and the legacy gate sections
+  of the root instruction files leave through an ordinary reviewed Commit;
+  Attach migrates only private-owned paths and refuses staged changes to public
+  software paths.
+- A worktree's own leftovers go to recoverable deletion (the Recycle Bin on
+  Windows) once that worktree is attached: its untracked legacy gate files,
+  bootstrap custody copies (`*.crg-refresh-*`, `*.crg-old-*` and the other
+  custody suffixes) and the install records in its Git directory
+  (`crg-install-manifest`, `crg-install-version`, `crg-local-install`,
+  `crg-install-lock`).
+- Shared common-directory state goes to recoverable deletion only after every
+  worktree of the repository has retired its legacy gate files and no legacy
+  operation is pending: `crg-backups/`, `crg-dispatcher-lock`, older install or
+  receipt folders, the legacy gate rules in `info/exclude`, and the
+  `.crg-prior-*` hook copies Attach set aside. The central hooks and their
+  `.crg-sha256` attestations stay.
 
 Before Attach, prepare these ordinary project files with an editor or the normal
 agent editing workflow. Existing project content must be preserved and reviewed:
@@ -417,11 +444,11 @@ Private plan: PLAN.md
 Private history: History.md
 
 Use the central launcher for Open, Stage, Commit and Resume with the explicit
-TargetRepo. Commit also requires MessageFile and AuthoringAgent. This workflow
-supersedes legacy per-project gate commands. Public software and local private
-governance receive mandatory combined review; native commits do not substitute.
-Project mode describes review treatment, not permission to work. Provider
-exhaustion fallback stays automatic within the gate; no session skip flag exists.
+TargetRepo. Commit also requires MessageFile and AuthoringAgent. Public software
+and local private governance receive mandatory combined review; native commits
+do not substitute. Project mode describes review treatment, not permission to
+work. Provider exhaustion fallback stays automatic within the gate; no session
+skip flag exists.
 <!-- crg-central-discovery v1 END -->
 ```
 

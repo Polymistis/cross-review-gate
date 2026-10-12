@@ -15,7 +15,7 @@ returns a canonical LF section bounded by
 plan/history paths. Normal consumers select `PLAN.md` and `History.md`; custom
 paths are explicit document pointers, not roles inferred from description prose.
 The section names the central Open/Stage/Commit/Resume workflow and automatic
-provider fallback, superseding legacy per-project command instructions.
+provider fallback.
 
 Consumer preparation places this same section in both root instruction files
 before review. The generator does not edit files. `Assert-CrgCentralInstructionDiscovery
@@ -36,7 +36,11 @@ to match staged instructions during this precheck.
 
 Opening a project never
 injects a missing section or upgrades instruction prose merely because a new
-central runtime was activated.
+central runtime was activated. A release that changes the canonical section
+bytes therefore leaves every attached project's approved section stale: after
+activation, that project's Open and Commit refuse until a reviewed Commit
+carries the new section in both root files. Only the candidate is checked on
+Commit, so that rewrite is admitted without accepting the old bytes.
 
 ## Initial materialization
 
@@ -87,7 +91,8 @@ completed-pair admission. For each file:
 | Working bytes exactly equal the recorded old approved baseline | Publish current approved bytes; advance that file's baseline after exact readback. |
 | Any other working bytes | Preserve edits and the preceding baseline; report `working-edits-preserved`. |
 
-No existing file needs rewriting during a compatible central runtime upgrade.
+No existing file needs rewriting during a central runtime upgrade that keeps
+the canonical discovery section bytes.
 The result is a per-file array containing `Path`, `State` and `Changed`.
 
 ## Write custody and interrupted operations

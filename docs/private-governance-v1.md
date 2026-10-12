@@ -593,7 +593,9 @@ Existing AR4-style private databases are adoptable without rewriting history or
 copying runtime customization automatically. Mapping, root instruction discovery,
 private classification and the first combined review precede dispatcher activation.
 Existing TRACKED runtime removal is a reviewed migration; LOCAL ignored data and
-recovery evidence are preserved. No application cleanup or live migration is
+recovery evidence are preserved until attachment completes; legacy gate
+leftovers are then retired on the per-worktree and shared schedule in
+`central-deployment-v1.md`. No application cleanup or live migration is
 authorized by this draft. Portable transfer carries private history and paired
 receipts separately from software; remote selection and credentials remain explicit.
 

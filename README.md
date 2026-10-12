@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.6** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.7** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -115,6 +115,12 @@ process still running after them, together with the checkout folder holds
 and TASKS.md index guard released after it; `Read-CrgGitBytes` still
 decides a failed read from the root's exit alone. The bootstrap changed
 again; take its hash from the release record.
+Version 2.6.7 shortens the central discovery section in each attached
+project's `AGENTS.md` and `CLAUDE.md`. That section must match the active
+launcher's exactly, so after activation every attached project needs one
+reviewed Commit that rewrites it in both files; until then the project's Open
+and Commit refuse, and a rewritten project refuses the same way under 2.6.6.
+The bootstrap did not change.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running
