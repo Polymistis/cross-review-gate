@@ -496,10 +496,13 @@ function Read-CrgCentralHistoricalPair {
     $record = Read-CrgRetentionRecord -ProjectContext $Project -ReceiptSha256 $Digest -ExpectedOrigin $Origin
     Assert-CrgRetentionAttachment -ProjectContext $Project -Fields $record.Receipt.Fields -Origin $record.Origin
     $fields = $record.Receipt.Fields
-    $expected = @{ 'project-id' = $Project.Status.ProjectId; 'public-worktree' = $Project.Root
+    $expected = @{ 'project-id' = $Project.Status.ProjectId
       'public-git-dir' = $Project.Domains.public.GitDir; 'public-common-dir' = $Project.Domains.public.CommonDir
       'private-git-dir' = $Project.Domains.private.GitDir; 'public-ref' = $Project.Domains.public.Ref; 'private-ref' = $Project.Domains.private.Ref }
-    foreach ($name in $expected.Keys) { if (-not [string]::Equals($fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "historical pair association differs at '$name'" } }
+    # Folder binding, which keeps receipts from before a linked-worktree move
+    # valid: see Open-CrgPairedProjectOperation.
+    if (-not [string]::Equals($Project.FolderBinding, 'git-back-link', [StringComparison]::Ordinal)) { $expected['public-worktree'] = $Project.Root }
+    foreach ($name in $expected.Keys) { if (-not [string]::Equals($fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "historical pair association differs at '$name' (recorded '$($fields[$name])', current '$($expected[$name])')" } }
     $results = @{}
     foreach ($domain in @('public', 'private')) { $results[$domain] = Read-CrgRetentionDomainResult -ProjectContext $Project -Domain $domain -Fields $fields -Origin $record.Origin }
     if (-not [string]::Equals((Get-CrgRetentionRef -ProjectContext $Project -Domain public -Ref ('refs/crg-results/' + $fields['public-result'])), $fields['public-result'], [StringComparison]::Ordinal)) { throw 'historical public result lacks exact retained completion evidence' }

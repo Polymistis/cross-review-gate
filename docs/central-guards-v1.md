@@ -158,8 +158,11 @@ new objects but retain the project/guard admission checks.
 The custodied current completed-pair pointer anchors the private retention chain.
 Each link validates receipt syntax/digest, private retention ancestry/message,
 exact evidence inventory and buffer/artifact digests, result commit parents,
-trees and agreed message, project association, public result retention, and
-predecessor linkage. Historical preparation is validated by recorded byte identity;
+trees and agreed message, project association (excluding the recorded worktree
+folder for a linked worktree bound through Git's back-link, so links from before
+a move stay valid), public result
+retention, and predecessor linkage. Historical preparation is validated by
+recorded byte identity;
 older runtimes are not executed and historical PASS never authorizes a new commit.
 
 Actual private parent/result configuration blobs supply the stable schema's

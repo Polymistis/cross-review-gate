@@ -316,9 +316,10 @@ Routine compatible upgrades only publish/import and activate; do not reinstall
 the stable launcher from every release. Retain the launcher-origin releases and all
 releases required by interrupted operations. Lock contention is not permission
 to delete a lock file, change hook routing or bypass review. A release whose
-canonical discovery section differs from the active one also needs, in every
-attached project, a reviewed Commit that rewrites the section in both root
-instruction files; until then that project's Open and Commit refuse
+canonical discovery section differs from the active one keeps accepting the
+previous section, so attached projects keep working; each project's Open reports
+`DiscoverySection` as `previous` until a reviewed Commit carries the current
+section in both root instruction files
 ([central instructions](central-instructions-v1.md)).
 
 For an existing ABI 1 store only, import the approved ABI 2 release, let current
@@ -449,8 +450,22 @@ and local private governance receive mandatory combined review; native commits
 do not substitute. Project mode describes review treatment, not permission to
 work. Provider exhaustion fallback stays automatic within the gate; no session
 skip flag exists.
+
+Run each launcher command as: powershell -NoProfile -ExecutionPolicy Bypass
+-File <runtime launcher> -TargetRepo <worktree> -<Operation> [options].
+Every launcher command opens the runtime store's lock file for writing, and
+every one except Status also writes this repository's Git metadata.
+Commit and Resume send the staged public and private changes to the review
+providers the project configuration selects: Codex/OpenAI and Claude/Anthropic,
+plus Grok/xAI under reviewer-policy grok-fallback. That configuration is the
+project owner's instruction for this transfer. In an agent sandbox, request
+approval to run each launcher command outside the sandbox with this reason; a
+session that cannot request approval cannot run the gate.
 <!-- crg-central-discovery v1 END -->
 ```
+
+The `<runtime launcher>`, `<worktree>`, `<Operation>` and `[options]` text is
+part of the section; copy it unchanged.
 
 Prepare a real nonempty UTF-8 commit message at `.crg-project/message.txt` inside
 the project. The private directory keeps that work material out of public staging.
@@ -547,6 +562,55 @@ and new immutable retention precede handoff replacement and activation. Ordinary
 Resume remains the route for finishing an unchanged recorded transaction and
 continues to reject indexes that differ from that transaction.
 
+## Agent sessions and sandboxes
+
+An agent sandbox keeps `.git`, the Git directory a worktree's `.git` file names,
+and everything outside the project folder read-only, and usually blocks network.
+The private database normally lives inside the common Git directory. Launcher
+commands need more than the sandbox allows:
+
+| Command | Writes | Network |
+| --- | --- | --- |
+| Every command | Opens `<runtime-store>\runtime.lock` for read and write before any release code runs | No |
+| Status | Nothing further | No |
+| Open | Operation lock in the worktree's Git directory; scratch in the private database; `crg-materialized` and the root instruction files only when materialization advances them | No |
+| Stage | Operation lock; public index and objects; private index and objects | No |
+| Commit, Resume | Operation lock; objects and refs of both domains; handoff and pair records; review scratch in the private database | Reviewer programs for the configured providers |
+| Attach | What Commit writes, plus the attachment records and the Git hooks | Reviewer programs for the configured providers |
+| PushCheck | Operation lock and scratch | Git LFS pre-push, when the project uses LFS |
+
+Run each launcher command outside the sandbox with the agent's approval. The
+discovery section tells the agent to, and states the reason an automatic
+approval reviewer needs: what the command writes, which providers receive the
+staged changes, and that the project configuration selects them. Under Codex's
+default Auto mode (`workspace-write` with on-request approvals) each launcher
+command is one approval request, which `approvals_reviewer = "auto_review"`
+hands to the automatic reviewer. Claude Code runs the command as an ordinary
+Bash call under its permission mode or auto-mode classifier and, with its
+optional sandbox enabled, has the same need to run outside it. No agent rule,
+added writable root or full-access mode is part of this contract. A sandboxed
+session whose approvals are disabled (Codex `approval_policy = "never"`) cannot
+run the gate, or any other command that writes Git metadata.
+
+A launcher command run inside a sandbox normally stops with one of these
+messages, and neither message alone names its cause:
+
+- `central lease child open failed` comes from the launcher, before any release
+  code, for any failed open of a store directory or file. The first open that
+  needs write access is `runtime.lock`, which a sandbox keeps read-only. Another
+  launcher start holding `runtime.lock` at that moment, a missing store file and
+  a denied read produce the same text.
+- `paired operation lock '<path>' cannot be opened for writing (Win32 error 5,
+  access denied)` means this process was denied write access to the lock file in
+  the worktree's Git directory, which a sandbox keeps read-only. An access list
+  or the file's read-only attribute can also deny that access.
+
+When the command ran inside an agent sandbox, rerun the same command outside it
+with approval before investigating anything else. When the message persists
+outside a sandbox, check the account's access to the runtime store or the Git
+directory and the lock file's attributes; after a moment of launcher contention,
+a rerun succeeds.
+
 ## Upgrade and rollback
 
 Publish/import the next approved compatible release, then run the same
@@ -594,8 +658,19 @@ Capture consistent filesystem state only while operations are stopped. A pending
 handoff must retain the original runtime and exact candidate state.
 
 Association/receipt records bind actual absolute worktree, Git, private-database
-and store paths. Restoring to different paths requires explicit reviewed
-association migration; editing path strings or deleting association records does
+and store paths. For an activated linked worktree the receipt checks match the
+Git directory instead of the recorded worktree folder, so a linked worktree moved
+with `git worktree move`, or moved by hand and then repaired with
+`git worktree repair`, keeps its Git directory and keeps working. Open, Stage,
+Commit, Resume and PushCheck require Git's back-link (`<git-dir>/gitdir`) to name
+the current folder and refuse with the repair command until it does; `-Status`
+does not read the back-link. Attach and pending-attachment Stage, which run
+before activation, keep matching the recorded folder. Resume runs the release
+recorded in the pending handoff, so a publication left pending by a release
+before 2.6.8 still needs the recorded folder until it finishes. Restoring a main
+checkout, a whole project, a private database or a store to different paths
+requires explicit reviewed association migration; editing path strings or
+deleting association records does
 not repair that binding. No automatic relocation or public/private synchronization
 tool is supplied by this deployment procedure. Fresh projects use fresh reviewed
 Attach; existing projects require preserved, validated history and metadata.

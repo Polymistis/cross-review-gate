@@ -516,8 +516,11 @@ function Get-CrgCentralOpenState {
   $mode = if ([string]::Equals($prepared.ModeState, 'valid', [StringComparison]::Ordinal)) { $prepared.Mode.Mode } else { 'shipped' }
   $discovery = Sync-CrgCentralInstructions -Operation $Operation
   Assert-CrgPairedOperationReads -Owner $Operation.ReadOwner
+  $section = if (@($discovery | Where-Object { [string]::Equals($_.Discovery, 'previous', [StringComparison]::Ordinal) }).Count -gt 0) {
+    'previous; adopt the current section from packaged docs/central-deployment-v1.md in both root instruction files with the next Commit'
+  } else { 'current' }
   return [pscustomobject]@{ Status = 'open'; Root = $project.Root; Runtime = $runtime.Id
-    ProjectMode = $mode; ModeState = $prepared.ModeState; Instructions = @($discovery)
+    ProjectMode = $mode; ModeState = $prepared.ModeState; Instructions = @($discovery); DiscoverySection = $section
     PublicCommit = $project.Domains.public.Parent; PrivateCommit = $project.Domains.private.Parent
     CompletedPair = $Operation.PreviousReceipt.ReceiptSha256; Governance = 'preceding-completed-private-state' }
 }
@@ -539,7 +542,7 @@ function Get-CrgCentralGitExecutable {
 }
 
 function Assert-CrgContextIndirection {
-  param([object]$Context, [string]$Path, [string]$Base, [string]$Expected, [switch]$GitFile, [switch]$AllowAbsent)
+  param([object]$Context, [string]$Path, [string]$Base, [string]$Expected, [switch]$GitFile, [switch]$AllowAbsent, [string]$Mismatch)
   $file = & $Context.ReadFile -Path $Path -Maximum 16384 -AllowAbsent:$AllowAbsent
   if (-not $file.Present) {
     if (-not $AllowAbsent -or -not [string]::Equals($Base, $Expected, [StringComparison]::OrdinalIgnoreCase)) { throw 'captured Git namespace requires a missing indirection file' }
@@ -550,7 +553,11 @@ function Assert-CrgContextIndirection {
   if ($text -cnotmatch $pattern) { throw 'captured Git indirection has invalid grammar' }
   $target = $Matches[1].Replace('/', '\')
   if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path $Base $target }
-  if (-not [string]::Equals([IO.Path]::GetFullPath($target).TrimEnd('\'), $Expected.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { throw 'retained Git indirection differs from the captured namespace' }
+  $actual = [IO.Path]::GetFullPath($target).TrimEnd('\')
+  if (-not [string]::Equals($actual, $Expected.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+    if ($Mismatch) { throw "$Mismatch (Git records '$actual')" }
+    throw 'retained Git indirection differs from the captured namespace'
+  }
 }
 
 function Assert-CrgCentralGitState {
@@ -582,6 +589,18 @@ function Get-CrgCentralProjectContext {
   if (-not [string]::Equals($dotGit, $status.PublicGitDir, [StringComparison]::OrdinalIgnoreCase)) {
     Assert-CrgContextIndirection -Context $Context -Path $dotGit -Base $status.PublicRoot -Expected $status.PublicGitDir -GitFile
   }
+  # A linked worktree (Git directory distinct from the common directory) has a
+  # back-link naming the worktree folder, so receipt checks match the Git
+  # directory, which a move leaves in place, rather than the recorded folder,
+  # and a copied folder or a manual move without `git worktree repair` is
+  # refused here. Main checkouts, --separate-git-dir repositories and absorbed
+  # submodules have no back-link and keep matching the recorded folder.
+  $folderBinding = 'recorded-folder'
+  if (-not [string]::Equals($status.PublicGitDir, $status.PublicCommonDir, [StringComparison]::OrdinalIgnoreCase)) {
+    Assert-CrgContextIndirection -Context $Context -Path (Join-Path $status.PublicGitDir 'gitdir') -Base $status.PublicGitDir -Expected $dotGit `
+      -Mismatch "Git's worktree record does not name '$($status.PublicRoot)'; run 'git worktree repair' in that folder"
+    $folderBinding = 'git-back-link'
+  }
   Assert-CrgContextIndirection -Context $Context -Path (Join-Path $status.PublicGitDir 'commondir') -Base $status.PublicGitDir -Expected $status.PublicCommonDir -AllowAbsent
   Assert-CrgContextIndirection -Context $Context -Path (Join-Path $status.PrivateGitDir 'commondir') -Base $status.PrivateGitDir -Expected $status.PrivateGitDir -AllowAbsent
   Assert-CrgCentralGitState -Context $Context -PublicGitDir $status.PublicGitDir -PrivateGitDir $status.PrivateGitDir -PublicRef $status.PublicRef
@@ -611,7 +630,7 @@ function Get-CrgCentralProjectContext {
     if ($tree -cnotmatch ('\A[0-9a-f]{' + $width + '}\z') -or $tree -match '\A0+\z') { throw 'captured parent tree identity is invalid' }
     $domains[$name] = [pscustomobject]@{ GitDir = $directory; CommonDir = $common; ObjectDir = $objects; IndexPath = $index; Ref = $branch; Parent = $parent; ParentTree = $tree; ObjectFormat = $format }
   }
-  return [pscustomobject]@{ Schema = 1; Runtime = $Context; Root = $status.PublicRoot; GitExe = $gitExe; Status = $status; Domains = $domains; ValidationState = 'read-only-captured-context' }
+  return [pscustomobject]@{ Schema = 1; Runtime = $Context; Root = $status.PublicRoot; FolderBinding = $folderBinding; GitExe = $gitExe; Status = $status; Domains = $domains; ValidationState = 'read-only-captured-context' }
 }
 
 function Get-CrgContextObjectArguments {

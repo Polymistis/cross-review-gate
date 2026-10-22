@@ -192,7 +192,10 @@ An ordinary predecessor resolves the fixed private ref by the exact recorded
 receipt SHA256. Only an actual retained ordinary or first-origin receipt is
 accepted; raw receipt hash, fixed evidence-leaf shape, metadata message, sole
 private-result parent and actual prior result/tree/association bindings must
-match. The preceding public result-only ref must also exist exactly. Internal
+match; for a linked worktree bound through Git's back-link the association
+excludes the recorded worktree folder (see `private-governance-v1.md`). The
+preceding public result-only ref must also
+exist exactly. Internal
 closed dispatch constructs no persisted completion pointer and supplies no
 approval authority. Prior runtime IDs may differ after an approved upgrade;
 predecessor identity checks do not replay historical provider execution or claim

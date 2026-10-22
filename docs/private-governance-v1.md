@@ -86,7 +86,14 @@ Resolve the actual worktree/common-directory identities and configured private
 database before use; the two databases must be distinct and share no object
 alternates. Attachment paths cannot select a project configuration filename,
 different policy, fallback runtime, or public object destination. A moved store
-or database needs explicit attachment repair, not directory searching.
+or database needs explicit attachment repair, not directory searching. A moved
+linked worktree with an activated attachment needs only Git's own
+`git worktree move` or `git worktree repair`: the worktree's Git directory,
+which carries the attachment, stays in place, and Open, Stage, Commit, Resume
+and PushCheck require Git's back-link (`<git-dir>/gitdir`) to name the current
+folder. `-Status` does not read the back-link. Resume runs the release recorded
+in the pending handoff, so a publication left pending by a release before 2.6.8
+still needs the recorded folder until it finishes.
 
 Private storage must be outside the public worktree, except beneath the actual
 protected `<worktree>/.git` directory when that directory is the captured public
@@ -436,6 +443,13 @@ review-leg <leg> <preferred-provider> <required-pass-count>
 review-attempt-count <1-through-6>
 review-attempt <leg> <attempt> <actual-provider> <scheduled-pass-count> <observed-exit> <transcript-sha256> <verdict-sha256-or-dash> <exhaustion-sha256-or-dash>
 ```
+
+`public-worktree` records the worktree folder at capture. For a linked worktree
+bound through Git's back-link, association checks skip the field and match
+`public-git-dir`, which a move leaves unchanged, so receipts written before a
+move stay valid. Main checkouts, `--separate-git-dir` repositories and absorbed
+submodules have no such binding and keep matching the field, as do Attach and
+pending-attachment Stage, which run before activation.
 
 Emit exactly the counted legs followed by the attempt count and exactly the
 counted attempts. Leg numbers start at 1, contiguous; each leg has one through

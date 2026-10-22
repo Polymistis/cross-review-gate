@@ -7,20 +7,28 @@ instruction merge, review bypass or private-index reset belongs to this module.
 
 ## Reviewed discovery
 
-`New-CrgCentralInstructionDiscoveryBytes -RuntimeStore -PlanPath -HistoryPath`
-returns a canonical LF section bounded by
+`New-CrgCentralInstructionDiscoveryBytes -RuntimeStore -PlanPath -HistoryPath
+[-Previous]` returns a canonical LF section bounded by
 `<!-- crg-central-discovery v1 BEGIN -->` and
 `<!-- crg-central-discovery v1 END -->`. The section identifies the stable
 `<runtime-store>/launcher.ps1`, `.crg-project/project.conf`, and explicit private
 plan/history paths. Normal consumers select `PLAN.md` and `History.md`; custom
 paths are explicit document pointers, not roles inferred from description prose.
 The section names the central Open/Stage/Commit/Resume workflow and automatic
-provider fallback.
+provider fallback. The current edition also gives the exact launcher command
+form, states that every launcher command opens the runtime store's lock file for
+writing, that every operation except Status also writes the repository's Git
+metadata and that Commit and Resume send the staged changes to the configured
+review providers, and tells a sandboxed agent to request approval to run each
+launcher command outside the sandbox with that reason. Agent sandboxes keep Git metadata read-only, and an automatic reviewer
+that approves leaving the sandbox judges the request by the reason it gives, so
+this text is how both learn what the command needs.
 
 Consumer preparation places this same section in both root instruction files
 before review. The generator does not edit files. `Assert-CrgCentralInstructionDiscovery
 -Operation -CapturedInput` requires exactly one canonical matching section in
-each actual captured private blob. Both selected documents must be regular private
+each actual captured private blob, either edition, with both root files carrying
+the same one. Both selected documents must be regular private
 tree leaves with explicit configured roles. Runtime store, blob identities,
 section grammar and exact section equality are checked; a duplicate or modified
 section refuses. Candidate instructions remain review data and never supply the
@@ -36,11 +44,18 @@ to match staged instructions during this precheck.
 
 Opening a project never
 injects a missing section or upgrades instruction prose merely because a new
-central runtime was activated. A release that changes the canonical section
-bytes therefore leaves every attached project's approved section stale: after
-activation, that project's Open and Commit refuse until a reviewed Commit
-carries the new section in both root files. Only the candidate is checked on
-Commit, so that rewrite is admitted without accepting the old bytes.
+central runtime was activated. A release accepts exactly two editions as exact
+bytes: its own (`current`) and its predecessor's (`previous`, generated with
+`-Previous`). A release that
+changes the section therefore leaves every attached project working on the
+previous edition; Open reports `DiscoverySection` as `previous` with the
+instruction to adopt the current section in both root files with the next
+Commit. Adoption is an ordinary edit of both files, staged and carried by a
+reviewed Commit; nothing rewrites them automatically. The next release that
+changes the section drops the oldest edition, so a project still carrying it
+then refuses Open and Commit until a reviewed Commit carries an accepted
+section. Earlier releases accepted only the current bytes, and a changed
+section refused every project until each made that rewrite.
 
 ## Initial materialization
 
@@ -93,7 +108,8 @@ completed-pair admission. For each file:
 
 No existing file needs rewriting during a central runtime upgrade that keeps
 the canonical discovery section bytes.
-The result is a per-file array containing `Path`, `State` and `Changed`.
+The result is a per-file array containing `Path`, `State`, `Changed` and
+`Discovery` (the accepted edition, `current` or `previous`).
 
 ## Write custody and interrupted operations
 

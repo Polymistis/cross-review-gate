@@ -98,13 +98,18 @@ function Open-CrgPairedProjectOperation {
     & $retentionModule {
       param($ProjectContext, $Fields, $Origin)
       Assert-CrgRetentionAttachment -ProjectContext $ProjectContext -Fields $Fields -Origin $Origin
-      $expected = @{ 'project-id' = $ProjectContext.Status.ProjectId; 'public-worktree' = $ProjectContext.Root
+      $expected = @{ 'project-id' = $ProjectContext.Status.ProjectId
         'public-git-dir' = $ProjectContext.Domains.public.GitDir; 'public-common-dir' = $ProjectContext.Domains.public.CommonDir
         'private-git-dir' = $ProjectContext.Domains.private.GitDir; 'public-ref' = $ProjectContext.Domains.public.Ref
         'private-ref' = $ProjectContext.Domains.private.Ref }
       # Attachment bytes can survive a worktree move. Match receipt namespace
       # fields separately; matching the attachment digest alone does not bind them.
-      foreach ($name in $expected.Keys) { if (-not [string]::Equals($Fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "preceding receipt association differs at '$name'" } }
+      # For a linked worktree the context's FolderBinding is 'git-back-link':
+      # the Git directory, which a move leaves in place, is matched and Git's
+      # back-link already tied the current folder to it, so every receipt check
+      # skips public-worktree there. Matching the folder would strand every move.
+      if (-not [string]::Equals($ProjectContext.FolderBinding, 'git-back-link', [StringComparison]::Ordinal)) { $expected['public-worktree'] = $ProjectContext.Root }
+      foreach ($name in $expected.Keys) { if (-not [string]::Equals($Fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "preceding receipt association differs at '$name' (recorded '$($Fields[$name])', current '$($expected[$name])')" } }
       foreach ($domain in @('public', 'private')) {
         $selected = $ProjectContext.Domains[$domain]
         if (-not [string]::Equals($Fields[$domain + '-result'], $selected.Parent, [StringComparison]::Ordinal) -or -not [string]::Equals($Fields[$domain + '-tree'], $selected.ParentTree, [StringComparison]::Ordinal) -or

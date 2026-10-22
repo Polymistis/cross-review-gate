@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.6.7** (Windows / PowerShell) — the authoritative value is the
+**Version 2.6.9** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
@@ -121,6 +121,29 @@ launcher's exactly, so after activation every attached project needs one
 reviewed Commit that rewrites it in both files; until then the project's Open
 and Commit refuse, and a rewritten project refuses the same way under 2.6.6.
 The bootstrap did not change.
+Version 2.6.8 lets an attached linked worktree move. Receipts identify a
+linked worktree by the Git directory, which a move leaves in place, instead of
+the recorded folder, and Open, Stage, Commit, Resume and PushCheck require
+Git's back-link to name the current folder; after `git worktree move`, or a
+manual move followed by `git worktree repair`, the worktree keeps working, and
+an unrepaired move is refused with the repair command. Main checkouts,
+`--separate-git-dir` repositories, absorbed submodules and the pre-activation
+Attach paths still match the recorded folder, and a publication pending under
+2.6.7 resumes with that release and needs the recorded folder. Operation-lock
+refusals now report only what the Win32 error establishes. The bootstrap did
+not change.
+Version 2.6.9 lets the gate run from agent sessions with stock sandbox
+settings. The discovery section now gives the launcher command form, says what
+launcher commands write and which review providers receive the staged changes,
+and tells a sandboxed agent to request approval to run each launcher command
+outside the sandbox; packaged `docs/central-deployment-v1.md` (Agent sessions
+and sandboxes) describes the limits. A release now accepts its own discovery
+section and its predecessor's, so after activation every attached project keeps
+working with the section it carries: Open reports `DiscoverySection` as
+`previous` until a reviewed Commit carries the new section, edited into both
+root instruction files and staged with that Commit. A project that adopted the
+new section is refused under 2.6.8. The operation-lock access-denied refusal
+names the sandbox remedy. The bootstrap did not change.
 
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running

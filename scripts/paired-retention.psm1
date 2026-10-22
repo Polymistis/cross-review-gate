@@ -638,10 +638,12 @@ function Get-CrgRetentionPayload {
   $fields = $receipt.Fields; $runtime = $ProjectContext.Runtime
   $templateName = 'scripts/codex/review-prompt-template.md'
   if (-not [string]::Equals($runtime.Id, $fields['runtime-manifest-sha256'], [StringComparison]::Ordinal) -or $runtime.Payloads[$templateName].Bytes -isnot [byte[]]) { throw 'retention requires the exact recorded retained runtime and template' }
-  $expected = @{ 'public-worktree' = $ProjectContext.Root; 'public-git-dir' = $ProjectContext.Domains.public.GitDir
+  $expected = @{ 'public-git-dir' = $ProjectContext.Domains.public.GitDir
     'public-common-dir' = $ProjectContext.Domains.public.CommonDir; 'private-git-dir' = $ProjectContext.Domains.private.GitDir
     'public-ref' = $ProjectContext.Domains.public.Ref; 'private-ref' = $ProjectContext.Domains.private.Ref; 'project-id' = $ProjectContext.Status.ProjectId }
-  foreach ($name in $expected.Keys) { if (-not [string]::Equals($fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "retained receipt association differs at '$name'" } }
+  # Folder binding: see Open-CrgPairedProjectOperation.
+  if (-not [string]::Equals($ProjectContext.FolderBinding, 'git-back-link', [StringComparison]::Ordinal)) { $expected['public-worktree'] = $ProjectContext.Root }
+  foreach ($name in $expected.Keys) { if (-not [string]::Equals($fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "retained receipt association differs at '$name' (recorded '$($fields[$name])', current '$($expected[$name])')" } }
   Assert-CrgRetentionAttachment -ProjectContext $ProjectContext -Fields $fields -Origin $Origin -AttachmentBytes $AttachmentBytes
   if ($null -eq $Buffers -or $null -eq $TreeBytes -or $TreeBytes.Count -ne 2 -or
       $TreeBytes['public'] -isnot [byte[]] -or $TreeBytes['private'] -isnot [byte[]] -or
@@ -773,7 +775,10 @@ function Get-CrgRetentionPayload {
   }
   if ([string]::Equals($Origin, 'paired-v1', [StringComparison]::Ordinal)) {
     $previous = Read-CrgRetentionRecord -ProjectContext $ProjectContext -ReceiptSha256 $fields['previous-pair']
-    foreach ($name in @('project-id', 'attachment-sha256', 'public-ref', 'private-ref', 'public-worktree', 'public-git-dir', 'public-common-dir', 'private-git-dir')) {
+    $names = @('project-id', 'attachment-sha256', 'public-ref', 'private-ref', 'public-git-dir', 'public-common-dir', 'private-git-dir')
+    # Folder binding: see Open-CrgPairedProjectOperation.
+    if (-not [string]::Equals($ProjectContext.FolderBinding, 'git-back-link', [StringComparison]::Ordinal)) { $names += 'public-worktree' }
+    foreach ($name in $names) {
       if (-not [string]::Equals($previous.Receipt.Fields[$name], $fields[$name], [StringComparison]::Ordinal)) { throw 'preceding retention belongs to a different association' }
     }
     foreach ($domain in @('public', 'private')) {

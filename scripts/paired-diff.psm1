@@ -590,7 +590,17 @@ function Open-CrgPairedOperationLock {
     $parent = Enter-CrgAttributeNeutralDirectoryChain -Path $PublicGitDirectory -Pins $pins -DenyLeafRename
     $errorCode = 0
     $handle = [CrgAttributeNeutral.NativeV1]::OpenOperationLockRelative($parent.Handle, [ref]$errorCode)
-    if ($null -eq $handle -or $handle.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) { throw "paired operation lock is unavailable or not ordinary (Win32 error $errorCode); preserve the occupant and retry after the active operation finishes" }
+    # The lock file persists between operations; only an open handle holds the
+    # lock. A sharing violation shows that some handle is open, not whose, and
+    # access denied shows nothing about other operations, so neither message
+    # names a cause the error code does not establish.
+    $lockPath = Join-Path $PublicGitDirectory 'crg-operation.lock'
+    if ($null -eq $handle -or $handle.IsInvalid) {
+      if ($errorCode -eq 32) { throw "paired operation lock '$lockPath' is open elsewhere (Win32 error 32, sharing violation); if another gate operation is running in this worktree, retry after it finishes" }
+      if ($errorCode -eq 5) { throw "paired operation lock '$lockPath' cannot be opened for writing (Win32 error 5, access denied); check this process's write access to the worktree's Git directory and the lock file's read-only attribute. Inside an agent sandbox that keeps Git metadata read-only, rerun the same launcher command outside the sandbox with approval" }
+      throw "paired operation lock '$lockPath' is unavailable (Win32 error $errorCode); preserve the occupant"
+    }
+    if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) { throw "paired operation lock '$lockPath' is not an ordinary single-link file; preserve the occupant for explicit repair" }
     $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::ReadWrite); $handle = $null
     if ($stream.Length -ne 0) { throw 'paired operation lock contains unexpected data; preserve the occupant for explicit repair' }
     $result = [pscustomobject]@{

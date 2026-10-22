@@ -28,10 +28,19 @@ function Get-CrgInstructionDigest {
 }
 
 function New-CrgCentralInstructionDiscoveryBytes {
+  # A release accepts exactly its own section and, with -Previous, its
+  # predecessor's, so a changed section never refuses Open or Commit before a
+  # project edits it into both root files and a reviewed Commit carries it.
+  # Refusing until every project rewrote its section (2.6.7) stalled projects
+  # whose sessions could not run that rewrite. Drop the predecessor's text when
+  # the next release replaces it.
+  # A switch, not an edition string: ValidateSet admits case variants that an
+  # ordinal comparison would then misroute to the other edition.
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$RuntimeStore,
     [Parameter(Mandatory = $true)][string]$PlanPath,
-    [Parameter(Mandatory = $true)][string]$HistoryPath)
+    [Parameter(Mandatory = $true)][string]$HistoryPath,
+    [switch]$Previous)
   $reader = @(Get-Command Read-CrgAttachmentBytes -Module private-governance -CommandType Function -ListImported -ErrorAction Stop)
   if ($reader.Count -ne 1) { throw 'discovery construction requires the already imported governance schema' }
   & $reader[0].Module {
@@ -49,8 +58,24 @@ function New-CrgCentralInstructionDiscoveryBytes {
     'and local private governance receive mandatory combined review; native commits',
     'do not substitute. Project mode describes review treatment, not permission to',
     'work. Provider exhaustion fallback stays automatic within the gate; no session',
-    'skip flag exists.',
-    '<!-- crg-central-discovery v1 END -->')
+    'skip flag exists.')
+  # Agents in a sandbox, and the automatic reviewers that approve leaving it,
+  # learn what a launcher command does only from this text and the request
+  # that cites it; a refused or unexplained request stalls the session.
+  if (-not $Previous) {
+    $lines += @('',
+      'Run each launcher command as: powershell -NoProfile -ExecutionPolicy Bypass',
+      '-File <runtime launcher> -TargetRepo <worktree> -<Operation> [options].',
+      "Every launcher command opens the runtime store's lock file for writing, and",
+      "every one except Status also writes this repository's Git metadata.",
+      'Commit and Resume send the staged public and private changes to the review',
+      'providers the project configuration selects: Codex/OpenAI and Claude/Anthropic,',
+      'plus Grok/xAI under reviewer-policy grok-fallback. That configuration is the',
+      "project owner's instruction for this transfer. In an agent sandbox, request",
+      'approval to run each launcher command outside the sandbox with this reason; a',
+      'session that cannot request approval cannot run the gate.')
+  }
+  $lines += '<!-- crg-central-discovery v1 END -->'
   return ,([Text.UTF8Encoding]::new($false, $true).GetBytes(($lines -join "`n") + "`n"))
 }
 
@@ -68,10 +93,15 @@ function Read-CrgInstructionDiscovery {
   $plan = [regex]::Matches($section, '(?m)^Private plan: ([^\r\n]+)$')
   $history = [regex]::Matches($section, '(?m)^Private history: ([^\r\n]+)$')
   if ($plan.Count -ne 1 -or $history.Count -ne 1) { throw 'discovery lacks explicit plan/history records' }
-  $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $history[0].Groups[1].Value
-  $actual = [Text.UTF8Encoding]::new($false, $true).GetBytes($section)
-  if (-not [string]::Equals((Get-CrgInstructionDigest -Bytes $actual), (Get-CrgInstructionDigest -Bytes $expected), [StringComparison]::Ordinal)) { throw 'discovery section differs from the selected stable launcher contract' }
-  return [pscustomobject]@{ Bytes = $expected; PlanPath = $plan[0].Groups[1].Value; HistoryPath = $history[0].Groups[1].Value }
+  $actual = Get-CrgInstructionDigest -Bytes ([Text.UTF8Encoding]::new($false, $true).GetBytes($section))
+  foreach ($previous in @($false, $true)) {
+    $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $history[0].Groups[1].Value -Previous:$previous
+    if ([string]::Equals($actual, (Get-CrgInstructionDigest -Bytes $expected), [StringComparison]::Ordinal)) {
+      $edition = if ($previous) { 'previous' } else { 'current' }
+      return [pscustomobject]@{ Bytes = $expected; Edition = $edition; PlanPath = $plan[0].Groups[1].Value; HistoryPath = $history[0].Groups[1].Value }
+    }
+  }
+  throw 'discovery section matches neither the current nor the previous canonical section; a reviewed Commit must carry the current section from packaged docs/central-deployment-v1.md in both root instruction files'
 }
 
 function Assert-CrgCentralInstructionDiscovery {
@@ -140,9 +170,12 @@ function Get-CrgInstructionApprovedState {
   param([object]$Operation, [object]$Receipt, [string]$Origin)
   $project = $Operation.ProjectContext; $runtime = $Operation.Runtime
   $fields = $Receipt.Fields
-  foreach ($pair in @(@('attachment-sha256', (Get-CrgInstructionDigest -Bytes $Operation.AttachmentBytes)),
-      @('public-worktree', $project.Root), @('public-git-dir', $project.Domains.public.GitDir),
-      @('private-git-dir', $project.Domains.private.GitDir), @('private-ref', $project.Domains.private.Ref))) {
+  $pairs = @(@('attachment-sha256', (Get-CrgInstructionDigest -Bytes $Operation.AttachmentBytes)),
+    @('public-git-dir', $project.Domains.public.GitDir),
+    @('private-git-dir', $project.Domains.private.GitDir), @('private-ref', $project.Domains.private.Ref))
+  # Folder binding: see Open-CrgPairedProjectOperation.
+  if (-not [string]::Equals($project.FolderBinding, 'git-back-link', [StringComparison]::Ordinal)) { $pairs += ,@('public-worktree', $project.Root) }
+  foreach ($pair in $pairs) {
     if (-not [string]::Equals($fields[$pair[0]], $pair[1], [StringComparison]::Ordinal)) { throw 'materialization receipt differs from the current project association' }
   }
   $tree = Get-CrgInstructionCommand -Runtime $runtime -Module central-context -Name Read-CrgCentralTreeBytes
@@ -193,7 +226,7 @@ function Sync-CrgCentralInstructions {
   foreach ($name in @('AGENTS.md', 'CLAUDE.md')) { $buffers[$name] = $approved.Files[$name].Bytes }
   $input = [pscustomobject]@{ Indexes = @{ private = @{ TreeBytes = $approved.TreeBytes } }; ContextBlobBuffers = $buffers
     PreparationSources = @{ candidate = @{ ConfigBytes = $approved.Files['.crg-project/project.conf'].Bytes } } }
-  $null = Assert-CrgCentralInstructionDiscovery -Operation $Operation -CapturedInput $input
+  $edition = (Assert-CrgCentralInstructionDiscovery -Operation $Operation -CapturedInput $input).Edition
   $attachmentSha = Get-CrgInstructionDigest -Bytes $Operation.AttachmentBytes
   $recordFile = & $runtime.ReadFile -Path (Join-Path $project.Domains.public.GitDir 'crg-materialized') -Maximum 1024 -AllowAbsent
   $records = if ($recordFile.Present) { Read-CrgMaterializedBytes -Bytes $recordFile.Bytes -AttachmentSha256 $attachmentSha } else { $null }
@@ -217,7 +250,7 @@ function Sync-CrgCentralInstructions {
     if ($Initial) {
       if (-not $indexMatches -or -not $workingMatches) { throw "initial attachment preserves conflicting/staged/deleted '$name'; exact reviewed bytes must be present before activation" }
       $next[$name] = [pscustomobject]@{ Origin = $origin; ReceiptSha256 = $receipt.ReceiptSha256 }
-      $results.Add([pscustomobject]@{ Path = $name; State = 'approved-bytes'; Changed = $false })
+      $results.Add([pscustomobject]@{ Path = $name; State = 'approved-bytes'; Changed = $false; Discovery = $edition })
       continue
     }
     if ($null -ne $records) { $next[$name] = $records[$name] }
@@ -238,7 +271,7 @@ function Sync-CrgCentralInstructions {
         $state = 'advanced-clean'; $next[$name] = [pscustomobject]@{ Origin = $origin; ReceiptSha256 = $receipt.ReceiptSha256 }
       } else { $state = 'working-edits-preserved' }
     }
-    $results.Add([pscustomobject]@{ Path = $name; State = $state; Changed = ($state -ceq 'advanced-clean') })
+    $results.Add([pscustomobject]@{ Path = $name; State = $state; Changed = ($state -ceq 'advanced-clean'); Discovery = $edition })
   }
   if (-not $Initial -and $null -eq $records) { return ,$results.ToArray() }
   $nextBytes = New-CrgMaterializedBytes -Records $next -AttachmentSha256 $attachmentSha

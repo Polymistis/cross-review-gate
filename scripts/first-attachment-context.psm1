@@ -45,6 +45,13 @@ function Get-CrgCentralFirstAttachmentProjectContext {
   if (-not [string]::Equals($dotGit, $gitDir, [StringComparison]::OrdinalIgnoreCase)) {
     & $readIndirection -Context $Context -Path $dotGit -Base $root -Expected $gitDir -GitFile
   }
+  # Same folder binding as Get-CrgCentralProjectContext.
+  $folderBinding = 'recorded-folder'
+  if (-not [string]::Equals($gitDir, $commonDir, [StringComparison]::OrdinalIgnoreCase)) {
+    & $readIndirection -Context $Context -Path (Join-Path $gitDir 'gitdir') -Base $gitDir -Expected $dotGit `
+      -Mismatch "Git's worktree record does not name '$root'; run 'git worktree repair' in that folder"
+    $folderBinding = 'git-back-link'
+  }
   foreach ($item in @(@($gitDir, $commonDir), @($attachment.PrivateGitDir, $attachment.PrivateGitDir))) {
     & $readIndirection -Context $Context -Path (Join-Path $item[0] 'commondir') -Base $item[0] -Expected $item[1] -AllowAbsent
   }
@@ -86,7 +93,7 @@ function Get-CrgCentralFirstAttachmentProjectContext {
   $status = [pscustomobject]@{ ProjectId = $attachment.ProjectId; Attachment = 'unactivated proposed association'
     PublicRoot = $root; PublicGitDir = $gitDir; PublicCommonDir = $commonDir; PublicRef = $publicRef
     PrivateGitDir = $attachment.PrivateGitDir; PrivateRef = $attachment.PrivateRef }
-  $result = [pscustomobject]@{ Schema = 1; Runtime = $Context; Root = $root; GitExe = $gitExe; Status = $status
+  $result = [pscustomobject]@{ Schema = 1; Runtime = $Context; Root = $root; FolderBinding = $folderBinding; GitExe = $gitExe; Status = $status
     Domains = $domains; ValidationState = 'read-only-first-attachment-context'; ReadyForReview = $false }
   foreach ($domain in @('public', 'private')) {
     $selected = $domains[$domain]

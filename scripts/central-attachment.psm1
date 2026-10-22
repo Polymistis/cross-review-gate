@@ -222,12 +222,14 @@ function Read-CrgCentralAttachmentCorrectionAnchor {
   $handoff = & $handoffReader -Bytes $actualHandoff -ReceiptBytes $record.ReceiptBytes `
     -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
   $fields = $record.Receipt.Fields
+  # The pending-attachment context is not bound through Git's worktree
+  # back-link, so this anchor keeps matching the recorded folder.
   $expected = @{ 'project-id' = $project.Status.ProjectId; 'public-worktree' = $project.Root
     'public-git-dir' = $project.Domains.public.GitDir; 'public-common-dir' = $project.Domains.public.CommonDir
     'private-git-dir' = $project.Domains.private.GitDir; 'public-ref' = $project.Domains.public.Ref
     'private-ref' = $project.Domains.private.Ref }
   foreach ($name in $expected.Keys) {
-    if (-not [string]::Equals($fields[$name], $expected[$name], [System.StringComparison]::Ordinal)) { throw "attachment correction prior receipt differs at '$name'" }
+    if (-not [string]::Equals($fields[$name], $expected[$name], [System.StringComparison]::Ordinal)) { throw "attachment correction prior receipt differs at '$name' (recorded '$($fields[$name])', current '$($expected[$name])')" }
   }
   if (-not [string]::Equals($fields['attachment-sha256'], (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal)) {
     throw 'attachment correction prior receipt differs from the exact proposal'
