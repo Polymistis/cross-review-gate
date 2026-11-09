@@ -594,7 +594,6 @@ function Read-CrgPreparedFilesCore {
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBufferBytes,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumHistoryBytes,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][long]$MaximumContextBytes,
     [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
   $originCommands = Get-CrgPreparedOriginCommands -Origin $Origin
   foreach ($pin in @($PreparedPairSha256, $PreparedPublicTreeSha256, $PreparedPrivateTreeSha256, $ExpectedRuntimeSha256)) {
@@ -638,10 +637,7 @@ function Read-CrgPreparedFilesCore {
   $total = 0L
   foreach ($path in $leaves.Keys) {
     if ($leaves[$path].Entry.Mode -cnotin @('100644', '100755')) { throw "prepared file input does not support mode $($leaves[$path].Entry.Mode) at '$path'" }
-    $remaining = $MaximumContextBytes - $total
-    if ($remaining -lt 0) { throw 'prepared file context exceeds the caller bound' }
-    $maximum = [int][Math]::Min([long]$MaximumBlobBytes, $remaining)
-    $bytes = Read-CrgPreparedHeldFileBytes -ReadFile $ReadFile -Path (Join-Path (Join-Path $root 'REVIEW_SRC') $path) -Maximum $maximum
+    $bytes = Read-CrgPreparedHeldFileBytes -ReadFile $ReadFile -Path (Join-Path (Join-Path $root 'REVIEW_SRC') $path) -Maximum $MaximumBlobBytes
     $blobs.Add($path, $bytes); $total += $bytes.Length
   }
   $metadata = Read-CrgPreparedBundleCore -DescriptorBytes $descriptorBytes -ExpectedDescriptorSha256 $PreparedPairSha256 -Buffers $buffers -GoverningConfigBytes $preparations.governing.ConfigBytes -CandidateConfigBytes $preparations.candidate.ConfigBytes -PublicTreeBytes $treeBuffers.public -PrivateTreeBytes $treeBuffers.private -RuntimeTemplateBytes $RuntimeTemplateBytes -ContextBlobBuffers $blobs -Origin $Origin
@@ -742,8 +738,7 @@ function Read-CrgPreparedPairFiles {
     [Parameter(Mandatory = $true)][scriptblock]$ReadFile,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBufferBytes,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumHistoryBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][long]$MaximumContextBytes)
+    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes)
   return Read-CrgPreparedFilesCore @PSBoundParameters -Origin 'paired-v1'
 }
 
@@ -758,8 +753,7 @@ function Read-CrgPreparedFirstAttachmentFiles {
     [Parameter(Mandatory = $true)][scriptblock]$ReadFile,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBufferBytes,
     [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumHistoryBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][long]$MaximumContextBytes)
+    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes)
   return Read-CrgPreparedFilesCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 

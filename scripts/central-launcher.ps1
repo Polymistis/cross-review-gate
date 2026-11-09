@@ -1,7 +1,17 @@
-# Stable launcher ABI 2. Supports retained ABI 1/2 releases and config schema 1.
+# Stable launcher ABI 3. Project clients retain central files read-only.
 [CmdletBinding(DefaultParameterSetName = 'Status')]
 param(
-  [Parameter(Mandatory = $true)][string]$TargetRepo,
+  [Parameter(Mandatory = $true, ParameterSetName = 'Status')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'Open')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'StageAll')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'StagePaths')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'Commit')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'Attach')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'Resume')]
+  [Parameter(Mandatory = $true, ParameterSetName = 'PushCheck')][string]$TargetRepo,
+  [Parameter(Mandatory = $true, ParameterSetName = 'Serve')][switch]$Serve,
+  [Parameter(DontShow = $true)][switch]$CrgHostExecution,
+  [Parameter(DontShow = $true)][switch]$CrgRequestStdin,
   [Parameter(Mandatory = $true, ParameterSetName = 'Status')][switch]$Status,
   [Parameter(Mandatory = $true, ParameterSetName = 'Open')][switch]$Open,
   [Parameter(Mandatory = $true, ParameterSetName = 'StageAll')]
@@ -21,7 +31,8 @@ param(
   [Parameter(Mandatory = $true, ParameterSetName = 'PushCheck')][string]$PushRemoteLocation
 )
 $ErrorActionPreference = 'Stop'
-if ([string]::IsNullOrWhiteSpace($TargetRepo) -or $TargetRepo.Length -gt 32767 -or $TargetRepo -match '[\x00-\x1f\x7f]') { throw 'TargetRepo is invalid' }
+if (-not $Serve -and ([string]::IsNullOrWhiteSpace($TargetRepo) -or $TargetRepo.Length -gt 32767 -or $TargetRepo -match '[\x00-\x1f\x7f]')) { throw 'TargetRepo is invalid' }
+if ($CrgHostExecution -ne $CrgRequestStdin -or ($Serve -and $CrgHostExecution)) { throw 'host execution requires its bounded stdin request' }
 $script:CrgLaunchOperation = if ($Stage) { 'Stage' } else { $PSCmdlet.ParameterSetName }
 # ValidateSet matches by culture ('co'+U+00AD+'dex' passes); map to the exact canonical value.
 $canonicalAgent = [string]$AuthoringAgent
@@ -67,8 +78,8 @@ if (-not [string]::Equals([IO.Path]::GetFileName($PSCommandPath), 'launcher.ps1'
 # process, so an unversioned guard would accept an older launcher's
 # definition whenever two versions run in one process. A new method set gets
 # a new suffix.
-if (-not ('CrgCentralLaunch.ReadLeaseV1' -as [type])) {
-  Add-Type -Namespace 'CrgCentralLaunch' -Name 'ReadLeaseV1' -MemberDefinition @'
+if (-not ('CrgCentralLaunch.ReadLeaseV2' -as [type])) {
+  Add-Type -Namespace 'CrgCentralLaunch' -Name 'ReadLeaseV2' -MemberDefinition @'
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
 struct UNICODE_STRING { public ushort Length, MaximumLength; public System.IntPtr Buffer; }
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
@@ -108,10 +119,9 @@ public static Microsoft.Win32.SafeHandles.SafeFileHandle OpenDrive(string path) 
     if (path == null || path.Length != 3 || !System.Char.IsLetter(path[0]) || path[1] != ':' || path[2] != '\\') { throw new System.ArgumentException("an absolute local drive root is required"); }
     return Check(CreateFileW(path, 0xA1u, 0x3u, System.IntPtr.Zero, 3u, 0x02200080u, System.IntPtr.Zero), true);
 }
-public static Microsoft.Win32.SafeHandles.SafeFileHandle OpenChild(Microsoft.Win32.SafeHandles.SafeFileHandle parent, string leaf, bool directory, bool protectDirectory, bool lockFile) {
+public static Microsoft.Win32.SafeHandles.SafeFileHandle OpenChild(Microsoft.Win32.SafeHandles.SafeFileHandle parent, string leaf, bool directory, bool protectDirectory) {
     if (parent == null || parent.IsInvalid || System.String.IsNullOrWhiteSpace(leaf) || leaf == "." || leaf == ".." ||
-        leaf.IndexOfAny(new char[] {'\\','/',':','\0','*','?','"','<','>','|'}) >= 0 || leaf.EndsWith(".", System.StringComparison.Ordinal) || leaf.EndsWith(" ", System.StringComparison.Ordinal) ||
-        (lockFile && (directory || leaf != "runtime.lock"))) { throw new System.ArgumentException("invalid central read-lease child"); }
+        leaf.IndexOfAny(new char[] {'\\','/',':','\0','*','?','"','<','>','|'}) >= 0 || leaf.EndsWith(".", System.StringComparison.Ordinal) || leaf.EndsWith(" ", System.StringComparison.Ordinal)) { throw new System.ArgumentException("invalid central read-lease child"); }
     FILE_INFO parentInfo;
     if (!GetFileInformationByHandle(parent, out parentInfo) || (parentInfo.Attributes & 0x410u) != 0x10u) { throw new System.IO.IOException("central lease parent lost ordinary directory shape"); }
     System.IntPtr text = System.IntPtr.Zero, name = System.IntPtr.Zero, raw = System.IntPtr.Zero;
@@ -127,8 +137,8 @@ public static Microsoft.Win32.SafeHandles.SafeFileHandle OpenChild(Microsoft.Win
         attributes.Length = System.Runtime.InteropServices.Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES));
         attributes.RootDirectory = parent.DangerousGetHandle(); attributes.ObjectName = name; attributes.Attributes = 0x40u;
         IO_STATUS_BLOCK status;
-        uint access = directory ? 0xA1u : (lockFile ? 0xC0000000u : 0x80000000u);
-        uint share = lockFile ? 0u : (directory && !protectDirectory ? 3u : 1u);
+        uint access = directory ? 0xA1u : 0x80000000u;
+        uint share = directory && !protectDirectory ? 3u : 1u;
         int result = NtCreateFile(out raw, access | 0x00100000u, ref attributes, out status, System.IntPtr.Zero, 0x80u,
             share, 1u, 0x00200020u | (directory ? 1u : 0x40u), System.IntPtr.Zero, 0u);
         if (result < 0 || raw == System.IntPtr.Zero || raw == new System.IntPtr(-1)) {
@@ -164,7 +174,7 @@ function Open-CrgLaunchDirectory {
   if (-not [string]::Equals($full, $Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'central lease refuses noncanonical paths' }
   $cursor = $full.Substring(0, 3)
   if (-not $script:CrgLaunchDirectories.ContainsKey($cursor)) {
-    $drive = [CrgCentralLaunch.ReadLeaseV1]::OpenDrive($cursor)
+    $drive = [CrgCentralLaunch.ReadLeaseV2]::OpenDrive($cursor)
     $script:CrgLaunchOwners.Add($drive) | Out-Null
     $script:CrgLaunchDirectories.Add($cursor, [pscustomobject]@{ Handle = $drive; Protected = $false })
   }
@@ -173,7 +183,7 @@ function Open-CrgLaunchDirectory {
     $cursor = [IO.Path]::Combine($cursor, $part)
     $protect = $ProtectedRoot.Length -gt 0 -and ([string]::Equals($cursor, $ProtectedRoot, [StringComparison]::OrdinalIgnoreCase) -or $cursor.StartsWith($ProtectedRoot + '\', [StringComparison]::OrdinalIgnoreCase))
     if (-not $script:CrgLaunchDirectories.ContainsKey($cursor) -or ($protect -and -not $script:CrgLaunchDirectories[$cursor].Protected)) {
-      $directory = [CrgCentralLaunch.ReadLeaseV1]::OpenChild($parent, $part, $true, $protect, $false)
+      $directory = [CrgCentralLaunch.ReadLeaseV2]::OpenChild($parent, $part, $true, $protect)
       $script:CrgLaunchOwners.Add($directory) | Out-Null
       $script:CrgLaunchDirectories[$cursor] = [pscustomobject]@{ Handle = $directory; Protected = $protect }
     }
@@ -185,7 +195,7 @@ function Read-CrgLaunchFile {
   $handle = $null; $stream = $null
   try {
     $parent = Open-CrgLaunchDirectory -Path ([IO.Path]::GetDirectoryName($Path)) -ProtectedRoot $ProtectedRoot
-    $handle = [CrgCentralLaunch.ReadLeaseV1]::OpenChild($parent, [IO.Path]::GetFileName($Path), $false, $false, $false)
+    $handle = [CrgCentralLaunch.ReadLeaseV2]::OpenChild($parent, [IO.Path]::GetFileName($Path), $false, $false)
     $stream = New-Object IO.FileStream($handle, [IO.FileAccess]::Read); $handle = $null
     $script:CrgLaunchOwners.Add($stream) | Out-Null
     if ($Maximum -lt 0 -or $stream.Length -gt $Maximum) { throw "central read buffer exceeds its bound: '$Path'" }
@@ -212,7 +222,7 @@ function Read-CrgRuntimeManifestBytes {
   }
   $rtLines = @([System.Text.Encoding]::ASCII.GetString($Bytes).Split([char]10))
   if ($rtLines.Count -lt 7 -or $rtLines.Count -gt 262 -or $rtLines[-1] -cne '' -or
-      $rtLines[0] -cne 'crg-runtime-manifest v1' -or $rtLines[3] -cnotin @('launcher-abi 1', 'launcher-abi 2') -or $rtLines[4] -cne 'config-schema 1') {
+      $rtLines[0] -cne 'crg-runtime-manifest v1' -or $rtLines[3] -cnotin @('launcher-abi 1', 'launcher-abi 2', 'launcher-abi 3') -or $rtLines[4] -cne 'config-schema 1') {
     throw 'runtime manifest header, ABI, schema, inventory count, or final LF is invalid'
   }
   $rtLauncherAbi = [int]$rtLines[3].Substring('launcher-abi '.Length)
@@ -244,13 +254,14 @@ function Read-CrgRuntimeManifestBytes {
     $rtPrevious = $rtPath
     $rtEntries.Add([pscustomobject]@{ Path = $rtPath; Length = $rtLength; Hash = $rtHash }) | Out-Null
   }
-  # ABIs 1/2 keep these dispatch/review entrypoints stable, not the publisher's
+  # Retained ABIs keep these dispatch/review entrypoints stable, not the publisher's
   # entire optional helper inventory. Approved manifests own release contents.
   foreach ($rtRequired in @('VERSION', 'scripts/run-gate.sh', 'scripts/git-hooks/pre-commit',
       'scripts/codex/auto-review.ps1', 'scripts/codex/auto-merge.ps1', 'scripts/codex/commit.ps1',
       'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1', 'scripts/claude/commit.ps1')) {
     if (@($rtEntries | Where-Object { $_.Path -ceq $rtRequired }).Count -ne 1) { throw "runtime manifest lacks required entrypoint '$rtRequired'" }
   }
+  if ($rtLauncherAbi -ge 3 -and @($rtEntries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) }).Count -ne 1) { throw 'ABI 3 manifest lacks the local gate transport' }
   return [pscustomobject]@{ Bytes = $Bytes; Id = (Get-CrgSha256HexOfBytes -Bytes $Bytes); Version = $rtVersion; Source = $rtSource; LauncherAbi = $rtLauncherAbi; Entries = $rtEntries }
 }
 
@@ -270,8 +281,8 @@ function Read-CrgRuntimeLauncherBytes {
   if ($text -cmatch '\Acrg-runtime-launcher v1\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\n\z') {
     return [pscustomobject]@{ Schema = 1; LauncherAbi = 1; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = '-'; PreviousHash = '-' }
   }
-  if ($text -cnotmatch '\Acrg-runtime-launcher v2\nlauncher-abi 2\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
-  $record = [pscustomobject]@{ Schema = 2; LauncherAbi = 2; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = $Matches['p']; PreviousHash = $Matches['s'] }
+  if ($text -cnotmatch '\Acrg-runtime-launcher v(?<a>[23])\nlauncher-abi \k<a>\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
+  $record = [pscustomobject]@{ Schema = [int]$Matches['a']; LauncherAbi = [int]$Matches['a']; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = $Matches['p']; PreviousHash = $Matches['s'] }
   if (($record.PreviousReleaseId -ceq '-') -ne ($record.PreviousHash -ceq '-') -or $record.PreviousReleaseId -ceq $record.ReleaseId) { throw 'launcher provenance predecessor is inconsistent' }
   return $record
 }
@@ -322,6 +333,7 @@ function Add-CrgLaunchContext {
   $Selection | Add-Member -NotePropertyName ReadFile -NotePropertyValue (Get-Command Read-CrgLaunchFile -CommandType Function).ScriptBlock
   $Selection | Add-Member -NotePropertyName RetainRelease -NotePropertyValue (Get-Command Open-CrgLaunchRetainedRelease -CommandType Function).ScriptBlock
   $Selection | Add-Member -NotePropertyName RetainFailure -NotePropertyValue (Get-Command Save-CrgLaunchFailureOwners -CommandType Function).ScriptBlock
+  if ($null -ne $script:CrgLaunchHostAdmission) { $Selection | Add-Member -NotePropertyName HostAdmission -NotePropertyValue $script:CrgLaunchHostAdmission }
   return $Selection
 }
 function Save-CrgLaunchFailureOwners {
@@ -337,15 +349,15 @@ function Open-CrgLaunchRetainedRelease {
   if ($script:CrgLaunchOperation -cne 'Resume') { throw 'retained runtime reopening is available only during Resume' }
   return Add-CrgLaunchContext -Selection (Open-CrgLaunchRelease -Store $script:CrgLaunchStore -Id $Id)
 }
-$lock = $null
 $script:CrgLaunchRetainOwners = $false
+$script:CrgLaunchHostAdmission = $null
 try {
   $store = [IO.Path]::GetFullPath($PSScriptRoot)
   $script:CrgLaunchStore = $store
   $storeHandle = Open-CrgLaunchDirectory -Path $store
   $installation = Read-CrgLaunchFile -Path (Join-Path $store 'launcher-install') -Maximum 1024
   $installationRecord = Read-CrgRuntimeLauncherBytes -Bytes $installation.Bytes
-  if ($installationRecord.LauncherAbi -ne 2) { throw 'ABI 2 launcher requires completed ABI 2 installation provenance' }
+  if ($installationRecord.LauncherAbi -ne 3) { throw 'ABI 3 launcher requires completed ABI 3 installation provenance' }
   $installedReleaseId = $installationRecord.ReleaseId; $installedLauncherHash = $installationRecord.Hash
   $installedLauncher = Read-CrgLaunchFile -Path $PSCommandPath -Maximum 16777216
   if (-not [string]::Equals((Get-CrgSha256HexOfBytes -Bytes $installedLauncher.Bytes), $installedLauncherHash, [StringComparison]::Ordinal)) { throw 'stable launcher bytes differ from recorded first installation' }
@@ -355,22 +367,62 @@ try {
   $originLauncher = @($originManifest.Entries | Where-Object { $_.Path -ceq 'scripts/central-launcher.ps1' })
   if (-not [string]::Equals($originManifest.Id, $installedReleaseId, [StringComparison]::Ordinal) -or $originManifest.LauncherAbi -ne $installationRecord.LauncherAbi -or
       $originLauncher.Count -ne 1 -or $originLauncher[0].Hash -cne $installedLauncherHash) { throw 'stable launcher provenance differs from the recorded approved manifest' }
-  $lock = [CrgCentralLaunch.ReadLeaseV1]::OpenChild($storeHandle, 'runtime.lock', $false, $false, $true)
-  $active = Read-CrgLaunchFile -Path (Join-Path $store 'active-release') -Maximum 95
+  $transportEntry = @($originManifest.Entries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) })
+  if ($transportEntry.Count -ne 1) { throw 'installed origin lacks the local gate transport' }
+  $transport = Read-CrgLaunchFile -Path (Join-Path $originRoot 'scripts\central-transport.psm1') -Maximum 16777216 -ProtectedRoot $originRoot
+  if ($transport.Bytes.Length -ne $transportEntry[0].Length -or -not [string]::Equals((Get-CrgSha256HexOfBytes -Bytes $transport.Bytes), $transportEntry[0].Hash, [StringComparison]::Ordinal)) { throw 'installed gate transport differs from approved origin bytes' }
+  Import-Module -Name $transport.Path -ErrorAction Stop
+  if ($Serve) {
+    $hostOrigin = Open-CrgLaunchRelease -Store $store -Id $installedReleaseId
+    Start-CrgLocalHost -Store $store -LauncherPath $PSCommandPath -ModulePath $transport.Path -Origin $hostOrigin
+    return
+  }
+  if (-not $CrgHostExecution) {
+    Invoke-CrgHostClient -Store $store -TargetRepo $TargetRepo -Operation $operation
+    exit $global:LASTEXITCODE
+  }
+  $requestInput = [Console]::OpenStandardInput()
+  try { $envelope = Read-CrgHostExecutionRequest -Text ([CrgTransport.NativeV2]::Decode([CrgTransport.NativeV2]::ReadRequestInput($requestInput))) }
+  finally { $requestInput.Dispose() }
+  $request = $envelope.Request
+  if (-not [string]::Equals($request.TargetRepo, [IO.Path]::GetFullPath($TargetRepo.Replace('/', '\')), [StringComparison]::OrdinalIgnoreCase)) { throw 'owned child request target differs from the admitted target' }
+  $TargetRepo = $request.TargetRepo; $operation = $request.Operation
+  $script:CrgLaunchHostAdmission = New-CrgHostChildAdmission -Binding $envelope.Admission -Store $store
+  $script:CrgLaunchOperation = $operation.Name
+  $captureDeadline = [Diagnostics.Stopwatch]::StartNew()
+  while ($true) {
+    try { $active = Read-CrgLaunchFile -Path (Join-Path $store 'active-release') -Maximum 95; break }
+    catch {
+      $failure = $_.Exception
+      while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+      if ($failure -isnot [ComponentModel.Win32Exception] -or $failure.NativeErrorCode -notin @(2, 3, 32) -or $captureDeadline.ElapsedMilliseconds -ge 5000) { throw }
+      # Maintenance can briefly own or move the selector. Only that namespace
+      # transition is retried; denied access or malformed authority never is.
+      Start-Sleep -Milliseconds 50
+    }
+  }
   $selectedId = Read-CrgRuntimeActiveBytes -Bytes $active.Bytes
   $selected = Open-CrgLaunchRelease -Store $store -Id $selectedId
   # The selector lease ends before delegation; retaining the selector itself
   # would prevent central upgrades while an invocation finishes.
-  $active.Stream.Dispose(); $lock.Dispose(); $lock = $null
-  Import-Module -Name $selected.Payloads['scripts/private-governance.psm1'].Path -Force -ErrorAction Stop
-  Import-Module -Name $selected.Payloads['scripts/central-context.psm1'].Path -Force -ErrorAction Stop
+  $active.Stream.Dispose()
+  $legacyDispatcher = $null
+  if ($selected.Manifest.LauncherAbi -lt 3) {
+    $guardOrigin = Open-CrgLaunchRelease -Store $store -Id $installedReleaseId
+    $legacyDispatcher = Import-Module -Name $guardOrigin.Payloads['scripts/central-context.psm1'].Path -Force -Global -PassThru -ErrorAction Stop
+  }
+  # Resume can select another retained release. Operation admission imports
+  # dependencies after that selection; preloading active dependencies left
+  # duplicate generations and blocked retained-runtime author lint in 2026-10.
+  Import-Module -Name $selected.Payloads['scripts/central-context.psm1'].Path -Force -Global -ErrorAction Stop
   $selected = Add-CrgLaunchContext -Selection $selected
-  Invoke-CrgCentralOperation -TargetRepo $TargetRepo -Operation $operation -Context $selected
+  if ($null -ne $legacyDispatcher) {
+    & $legacyDispatcher { param($Root, $Request, $Runtime) Invoke-CrgCentralOperation -TargetRepo $Root -Operation $Request -Context $Runtime } $TargetRepo $operation $selected
+  } else { Invoke-CrgCentralOperation -TargetRepo $TargetRepo -Operation $operation -Context $selected }
 } catch {
-  # Admission and status failures come before any operation owner can call
-  # RetainFailure. One raised for a Git child or native session whose exit was
-  # not confirmed keeps the runtime leases, as RetainFailure does, until this
-  # process ends rather than releasing them under that child.
+  # Admission and status can fail before an operation owner retains failure.
+  # An unconfirmed descendant needs the selected runtime and native owners to
+  # outlive the error response; an owned worker keeps that process custody.
   $marked = $_.Exception
   while ($null -ne $marked) {
     foreach ($key in $marked.Data.Keys) {
@@ -378,10 +430,14 @@ try {
     }
     $marked = $marked.InnerException
   }
+  if ($script:CrgLaunchRetainOwners -and $CrgHostExecution) {
+    try { [Console]::Error.WriteLine($_.Exception.Message) } catch { }
+    [CrgTransport.NativeV2]::HoldUncertainWorker()
+  }
   throw
 } finally {
-  if ($null -ne $lock) { $lock.Dispose() }
   if (-not $script:CrgLaunchRetainOwners) {
-    for ($ownerIndex = $script:CrgLaunchOwners.Count - 1; $ownerIndex -ge 0; $ownerIndex--) { $script:CrgLaunchOwners[$ownerIndex].Dispose() }
+    try { if ($null -ne $script:CrgLaunchHostAdmission) { Close-CrgHostChildAdmission -Admission $script:CrgLaunchHostAdmission } }
+    finally { for ($ownerIndex = $script:CrgLaunchOwners.Count - 1; $ownerIndex -ge 0; $ownerIndex--) { $script:CrgLaunchOwners[$ownerIndex].Dispose() } }
   }
 }

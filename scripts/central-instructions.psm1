@@ -28,19 +28,15 @@ function Get-CrgInstructionDigest {
 }
 
 function New-CrgCentralInstructionDiscoveryBytes {
-  # A release accepts exactly its own section and, with -Previous, its
-  # predecessor's, so a changed section never refuses Open or Commit before a
-  # project edits it into both root files and a reviewed Commit carries it.
-  # Refusing until every project rewrote its section (2.6.7) stalled projects
-  # whose sessions could not run that rewrite. Drop the predecessor's text when
-  # the next release replaces it.
-  # A switch, not an edition string: ValidateSet admits case variants that an
-  # ordinal comparison would then misroute to the other edition.
+  # Keep deployed discovery bytes admissible during central migration. Requiring
+  # an instruction rewrite before a sandbox can launch the gate recreates the
+  # deployment deadlock that this client/host boundary removes.
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$RuntimeStore,
     [Parameter(Mandatory = $true)][string]$PlanPath,
     [Parameter(Mandatory = $true)][string]$HistoryPath,
-    [switch]$Previous)
+    [switch]$Previous, [switch]$Legacy)
+  if ($Previous -and $Legacy) { throw 'discovery variants are mutually exclusive' }
   $reader = @(Get-Command Read-CrgAttachmentBytes -Module private-governance -CommandType Function -ListImported -ErrorAction Stop)
   if ($reader.Count -ne 1) { throw 'discovery construction requires the already imported governance schema' }
   & $reader[0].Module {
@@ -59,10 +55,7 @@ function New-CrgCentralInstructionDiscoveryBytes {
     'do not substitute. Project mode describes review treatment, not permission to',
     'work. Provider exhaustion fallback stays automatic within the gate; no session',
     'skip flag exists.')
-  # Agents in a sandbox, and the automatic reviewers that approve leaving it,
-  # learn what a launcher command does only from this text and the request
-  # that cites it; a refused or unexplained request stalls the session.
-  if (-not $Previous) {
+  if ($Previous) {
     $lines += @('',
       'Run each launcher command as: powershell -NoProfile -ExecutionPolicy Bypass',
       '-File <runtime launcher> -TargetRepo <worktree> -<Operation> [options].',
@@ -74,6 +67,19 @@ function New-CrgCentralInstructionDiscoveryBytes {
       "project owner's instruction for this transfer. In an agent sandbox, request",
       'approval to run each launcher command outside the sandbox with this reason; a',
       'session that cannot request approval cannot run the gate.')
+  } elseif (-not $Legacy) {
+    $lines += @('',
+      'Run each launcher command as: powershell -NoProfile -ExecutionPolicy Bypass',
+      '-File <runtime launcher> -TargetRepo <worktree> -<Operation> [options].',
+      'The launcher reads the central runtime without writing the installation.',
+      'The installed local gate host executes project operations with independent',
+      'project locks and project-owned review and recovery state. Normal sandboxed',
+      'sessions require no permission exception or additional writable root.',
+      'Commit and Resume send the staged public and private changes to the review',
+      'providers selected by project configuration: Codex/OpenAI and Claude/Anthropic,',
+      'plus Grok/xAI under reviewer-policy grok-fallback. Reviewed configuration',
+      'authorizes that transfer. Review, provider routing and publication guards',
+      'remain mandatory through the installed host.')
   }
   $lines += '<!-- crg-central-discovery v1 END -->'
   return ,([Text.UTF8Encoding]::new($false, $true).GetBytes(($lines -join "`n") + "`n"))
@@ -94,10 +100,12 @@ function Read-CrgInstructionDiscovery {
   $history = [regex]::Matches($section, '(?m)^Private history: ([^\r\n]+)$')
   if ($plan.Count -ne 1 -or $history.Count -ne 1) { throw 'discovery lacks explicit plan/history records' }
   $actual = Get-CrgInstructionDigest -Bytes ([Text.UTF8Encoding]::new($false, $true).GetBytes($section))
-  foreach ($previous in @($false, $true)) {
-    $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $history[0].Groups[1].Value -Previous:$previous
+  foreach ($variant in @('current', 'previous', 'legacy')) {
+    $previous = [string]::Equals($variant, 'previous', [StringComparison]::Ordinal)
+    $legacy = [string]::Equals($variant, 'legacy', [StringComparison]::Ordinal)
+    $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $history[0].Groups[1].Value -Previous:$previous -Legacy:$legacy
     if ([string]::Equals($actual, (Get-CrgInstructionDigest -Bytes $expected), [StringComparison]::Ordinal)) {
-      $edition = if ($previous) { 'previous' } else { 'current' }
+      $edition = if ($previous -or $legacy) { 'previous' } else { 'current' }
       return [pscustomobject]@{ Bytes = $expected; Edition = $edition; PlanPath = $plan[0].Groups[1].Value; HistoryPath = $history[0].Groups[1].Value }
     }
   }

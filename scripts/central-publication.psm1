@@ -271,7 +271,7 @@ function Invoke-CrgCentralCommit {
       else { [IO.Path]::GetFullPath((Join-Path $TargetRepo $MessageFile)) }
     $message = & $operation.Runtime.ReadFile -Path $messagePath -Maximum 1048576
     $capture = Get-CrgPublicationCommand -Runtime $operation.Runtime -Module paired-preparation -Name Get-CrgCentralStagedReviewInput
-    $input = & $capture -ProjectContext $operation.ProjectContext -OperationId ([guid]::NewGuid().ToString('N')) -PreviousPairSha256 $operation.PreviousReceipt.ReceiptSha256 -MessageBytes $message.Bytes -TempParent $operation.ProjectContext.Domains.private.GitDir -MaximumBlobBytes 33554432 -MaximumContextBytes 536870912
+    $input = & $capture -ProjectContext $operation.ProjectContext -OperationId ([guid]::NewGuid().ToString('N')) -PreviousPairSha256 $operation.PreviousReceipt.ReceiptSha256 -MessageBytes $message.Bytes -TempParent $operation.ProjectContext.Domains.private.GitDir -MaximumBlobBytes 33554432
     if (-not $input.HasChanges) { return [pscustomobject]@{ Status = 'no-change'; Runtime = $Context.Id } }
     return Invoke-CrgCentralCapturedPublication -Operation $operation -CapturedInput $input -Origin paired-v1 -AuthoringAgent $AuthoringAgent
   } catch {

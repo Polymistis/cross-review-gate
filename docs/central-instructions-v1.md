@@ -8,7 +8,7 @@ instruction merge, review bypass or private-index reset belongs to this module.
 ## Reviewed discovery
 
 `New-CrgCentralInstructionDiscoveryBytes -RuntimeStore -PlanPath -HistoryPath
-[-Previous]` returns a canonical LF section bounded by
+[-Previous|-Legacy]` returns a canonical LF section bounded by
 `<!-- crg-central-discovery v1 BEGIN -->` and
 `<!-- crg-central-discovery v1 END -->`. The section identifies the stable
 `<runtime-store>/launcher.ps1`, `.crg-project/project.conf`, and explicit private
@@ -16,18 +16,15 @@ plan/history paths. Normal consumers select `PLAN.md` and `History.md`; custom
 paths are explicit document pointers, not roles inferred from description prose.
 The section names the central Open/Stage/Commit/Resume workflow and automatic
 provider fallback. The current edition also gives the exact launcher command
-form, states that every launcher command opens the runtime store's lock file for
-writing, that every operation except Status also writes the repository's Git
-metadata and that Commit and Resume send the staged changes to the configured
-review providers, and tells a sandboxed agent to request approval to run each
-launcher command outside the sandbox with that reason. Agent sandboxes keep Git metadata read-only, and an automatic reviewer
-that approves leaving the sandbox judges the request by the reason it gives, so
-this text is how both learn what the command needs.
+form, describes the read-only central client and installed local host, and states
+that Commit and Resume send staged changes to configured review providers. Normal
+sandboxed sessions require no permission exception or additional writable root.
+The host owns protected execution while retaining project-specific locks and state.
 
 Consumer preparation places this same section in both root instruction files
 before review. The generator does not edit files. `Assert-CrgCentralInstructionDiscovery
 -Operation -CapturedInput` requires exactly one canonical matching section in
-each actual captured private blob, either edition, with both root files carrying
+each actual captured private blob, an accepted edition, with both root files carrying
 the same one. Both selected documents must be regular private
 tree leaves with explicit configured roles. Runtime store, blob identities,
 section grammar and exact section equality are checked; a duplicate or modified
@@ -44,18 +41,16 @@ to match staged instructions during this precheck.
 
 Opening a project never
 injects a missing section or upgrades instruction prose merely because a new
-central runtime was activated. A release accepts exactly two editions as exact
-bytes: its own (`current`) and its predecessor's (`previous`, generated with
-`-Previous`). A release that
-changes the section therefore leaves every attached project working on the
-previous edition; Open reports `DiscoverySection` as `previous` with the
+central runtime was activated. Exact accepted bytes include the current host/client
+section, the preceding escalation section (`-Previous`), and the earlier baseline
+section (`-Legacy`). Both deployed older forms report the edition `previous`.
+Central migration therefore leaves attached projects working; Open reports
+`DiscoverySection` as `previous` with the
 instruction to adopt the current section in both root files with the next
 Commit. Adoption is an ordinary edit of both files, staged and carried by a
-reviewed Commit; nothing rewrites them automatically. The next release that
-changes the section drops the oldest edition, so a project still carrying it
-then refuses Open and Commit until a reviewed Commit carries an accepted
-section. Earlier releases accepted only the current bytes, and a changed
-section refused every project until each made that rewrite.
+reviewed Commit; nothing rewrites root instructions automatically. Preserving the
+deployed forms avoids requiring a project rewrite before the project can launch
+the corrected gate. Unrecognized or edited sections still refuse.
 
 ## Initial materialization
 

@@ -12,7 +12,9 @@ once, retain the executable through the launcher's existing read lease, and use
 that exact executable for all children in the operation. Resolve the actual
 public worktree/Git/common directories, hold Git indirection files, require a
 matching public branch, and resolve the distinct attached private database.
-Absent attachment permits read-only unattached Status only. A private database
+Absent attachment permits unattached Status inspection only. The installed host
+uses the project operation lock to bind inspection to the admitted namespace;
+application files, indexes and refs remain unchanged. A private database
 must be the actual configured common root, without public/private alternates.
 Both object formats come from Git, not object-ID width guesses.
 
@@ -38,6 +40,9 @@ Read-CrgCentralTreeBytes -ProjectContext <captured context>
   -Domain public|private -TreeOid <concrete tree OID>
 Read-CrgCentralBlobBytes -ProjectContext <captured context>
   -Domain public|private -BlobOid <concrete blob OID> -Maximum <byte bound>
+Read-CrgCentralObjectBatch -ProjectContext <captured context>
+  -Domain public|private -Requests <OID/type/per-object-maximum records>
+  [-MaximumAggregate <caller contract budget>] [-ValidationOnly]
 ```
 
 Only already imported paired-tree syntax validation is used for NUL tree output.
@@ -51,6 +56,13 @@ Independently recompute the Git `blob <length>\0` hash. Symlink blob contents ar
 data; materialization support is not inferred from a successful object read.
 No private object is written into the public object store or exposed through an
 alternate. A missing object refuses without contacting a promisor remote.
+
+Object batches read and independently hash each requested object into a separate
+byte array. An aggregate quota is optional and applies only when a caller supplies
+a separate format-specific budget. Full project context omits that quota. Each
+array length uses the runtime's signed 32-bit index; summing separate arrays does
+not impose the same boundary on the batch. Context byte accounting remains
+64-bit, and allocation failures propagate without dropping source or evidence.
 
 These APIs return captured data, not a review approval or permanent repository
 association. The live coordinator retains runtime/context lifetime and repeats

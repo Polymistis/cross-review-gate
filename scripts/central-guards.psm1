@@ -75,17 +75,20 @@ function Get-CrgCentralGuardState {
 }
 
 function Read-CrgCentralGuardLeaf {
-  param([object]$State, [object]$Directory, [string]$Leaf)
+  param([object]$State, [object]$Directory, [string]$Leaf, [switch]$PublicationCapable)
   return & $State.NativeModule {
-    param($State, $Directory, $Leaf)
+    param($State, $Directory, $Leaf, $PublicationCapable)
     $errorCode = 0; $handle = $null
     try {
-      $handle = if ([string]::Equals($State.Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
+      $handle = if ($PublicationCapable) {
         [CrgAttributeNeutral.NativeV1]::OpenPublicationFileRelative($Directory.Handle, $Leaf, [ref]$errorCode)
       } else { [CrgAttributeNeutral.NativeV1]::OpenReadFileRelative($Directory.Handle, $Leaf, [ref]$errorCode) }
       if ($null -eq $handle -or $handle.IsInvalid) {
+        # Every worktree of a repository shares these common-directory hooks.
+        # The error code shows a conflicting open handle, not whose.
+        if ($errorCode -eq 32) { throw "hook '$Leaf' is open elsewhere in a conflicting mode (Win32 error 32, sharing violation); worktrees of one repository share these hooks, so if a gate operation is running in another worktree, retry after it finishes" }
         if ($errorCode -ne 2) { throw "hook '$Leaf' presence is indeterminate (Win32 error $errorCode)" }
-        return [pscustomobject]@{ Leaf = $Leaf; Path = (Join-Path $Directory.Path $Leaf); Handle = $null; Bytes = $null; Present = $false; Sha256 = $null }
+        return [pscustomobject]@{ Leaf = $Leaf; Path = (Join-Path $Directory.Path $Leaf); Handle = $null; Bytes = $null; Present = $false; Sha256 = $null; Publication = $false }
       }
       if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) { throw "hook '$Leaf' is not one ordinary single-link file" }
       $text = [CrgAttributeNeutral.NativeV1]::ReadUtf8Exact($handle, [ref]$errorCode)
@@ -93,11 +96,20 @@ function Read-CrgCentralGuardLeaf {
       $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($text)
       $digest = Get-CrgOwnedBinaryFileDigest -Record @{ Handle = $handle }
       if ($digest.Length -ne $bytes.Length) { throw 'hook text differs from its raw byte length' }
-      $record = [pscustomobject]@{ Leaf = $Leaf; Path = (Join-Path $Directory.Path $Leaf); Handle = $handle; Bytes = $bytes; Present = $true; Sha256 = $digest.Sha256 }
+      $record = [pscustomobject]@{ Leaf = $Leaf; Path = (Join-Path $Directory.Path $Leaf); Handle = $handle; Bytes = $bytes; Present = $true; Sha256 = $digest.Sha256; Publication = [bool]$PublicationCapable }
       $handle = $null
       return $record
     } finally { if ($null -ne $handle) { $handle.Dispose() } }
-  } $State $Directory $Leaf
+  } $State $Directory $Leaf $PublicationCapable.IsPresent
+}
+
+# Install-CrgCentralGuards replaces only these leaves; every other hook file
+# stays under read custody for the whole operation.
+function Get-CrgCentralGuardInstallTargets {
+  param([string]$Domain)
+  $targets = @('pre-commit', 'pre-commit.crg-sha256')
+  if ($Domain -ceq 'public') { $targets += @('pre-push', 'pre-push.crg-sha256') }
+  return $targets
 }
 
 function Assert-CrgCentralGuardInventory {
@@ -263,6 +275,43 @@ function Open-CrgCentralGuardCustody {
     }
     $state.LfsEnabled = Get-CrgCentralLfsHookMode -State $state
     Assert-CrgCentralGuardInventory -State $state
+    if ([string]::Equals($Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) {
+      # The per-worktree operation lock does not serialize sibling worktrees,
+      # which share these hooks. A replacement-capable owner excludes their read
+      # owners for the whole attachment, review included, so it is taken only
+      # for a present install target whose bytes must change. Holding one for
+      # matching hooks blocked staging in other worktrees on 2026-11-07, and the
+      # operator directed that no file be held longer than necessary.
+      foreach ($domain in @('public', 'private')) {
+        $directory = $state.Domains[$domain]
+        if ($null -eq $directory.Hooks) { continue }
+        foreach ($leaf in @(Get-CrgCentralGuardInstallTargets -Domain $domain)) {
+          $observed = $directory.Files[$leaf]
+          if (-not $observed.Present -or [string]::Equals($observed.Sha256, (Get-CrgCentralGuardDigest -Bytes $state.Templates[$leaf]), [StringComparison]::Ordinal)) { continue }
+          # The retained read owner denies delete sharing, so it closes before
+          # the replacement-capable open. A share-all bridge proven to be the
+          # admitted file spans that gap; equal bytes alone would admit a
+          # byte-identical replacement file.
+          $bridge = & $state.NativeModule {
+            param($Directory, $Observed)
+            $errorCode = 0
+            $handle = [CrgAttributeNeutral.NativeV1]::OpenFeedbackFileRelative($Directory.Handle, $Observed.Leaf, 0, [ref]$errorCode)
+            if ($null -eq $handle -or $handle.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::SameIdentity($Observed.Handle, $handle)) {
+              if ($null -ne $handle) { $handle.Dispose() }
+              throw "hook '$($Observed.Leaf)' admitted-file bridge failed (Win32 error $errorCode)"
+            }
+            return $handle
+          } $directory.Hooks $observed
+          try {
+            $observed.Handle.Dispose(); $observed.Handle = $null
+            $upgraded = Read-CrgCentralGuardLeaf -State $state -Directory $directory.Hooks -Leaf $leaf -PublicationCapable
+            $directory.Files[$leaf] = $upgraded
+            $same = $upgraded.Present -and (& $state.NativeModule { param($Bridge, $Handle) [CrgAttributeNeutral.NativeV1]::SameIdentity($Bridge, $Handle) } $bridge $upgraded.Handle)
+            if (-not $same -or -not [string]::Equals($upgraded.Sha256, $observed.Sha256, [StringComparison]::Ordinal)) { throw "hook '$leaf' changed during custody acquisition" }
+          } finally { $bridge.Dispose() }
+        }
+      }
+    }
     New-CrgCentralHookProjection -State $state
     $script:CrgCentralGuardOwners.Add($state.Owner.Id, $state)
     $complete = $true
@@ -400,11 +449,10 @@ function Install-CrgCentralGuards {
       } $state $directory
       foreach ($leaf in @($state.HookNames) + @('pre-commit.crg-sha256', 'pre-push.crg-sha256')) { $directory.Files[$leaf] = Read-CrgCentralGuardLeaf -State $state -Directory $directory.Hooks -Leaf $leaf }
     }
-    $targets = @('pre-commit', 'pre-commit.crg-sha256')
-    if ($domain -ceq 'public') { $targets += @('pre-push', 'pre-push.crg-sha256') }
-    foreach ($leaf in $targets) {
+    foreach ($leaf in @(Get-CrgCentralGuardInstallTargets -Domain $domain)) {
       $prior = $directory.Files[$leaf]; $bytes = $state.Templates[$leaf]; $digest = Get-CrgCentralGuardDigest -Bytes $bytes
       if ($prior.Present -and [string]::Equals($prior.Sha256, $digest, [StringComparison]::Ordinal)) { continue }
+      if ($prior.Present -and -not $prior.Publication) { throw "hook '$leaf' requires replacement but custody holds only read access" }
       $record = & $state.NativeModule {
         param($State, $Directory, $Prior, $Leaf, $Bytes, $Digest)
         $created = $null; $published = $false; $moved = $false; $errorCode = 0
@@ -424,7 +472,7 @@ function Install-CrgCentralGuards {
           }
           if (-not [CrgAttributeNeutral.NativeV1]::RenamePublicationFileRelative($created, $Directory.Hooks.Handle, $Leaf, [ref]$errorCode)) { throw "hook no-replace publication failed (Win32 error $errorCode)" }
           $published = $true
-          $result = [pscustomobject]@{ Leaf = $Leaf; Path = (Join-Path $Directory.Hooks.Path $Leaf); Handle = $created; Bytes = $Bytes; Present = $true; Sha256 = $Digest }
+          $result = [pscustomobject]@{ Leaf = $Leaf; Path = (Join-Path $Directory.Hooks.Path $Leaf); Handle = $created; Bytes = $Bytes; Present = $true; Sha256 = $Digest; Publication = $true }
           if (-not [CrgAttributeNeutral.NativeV1]::PathNamesExactHandle($result.Path, $created, $false, [ref]$errorCode)) { throw 'published hook lost exact identity' }
           $created = $null
           return $result

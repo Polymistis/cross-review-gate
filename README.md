@@ -1,7 +1,14 @@
 # cross-review-gate
 
-**Version 2.6.9** (Windows / PowerShell) — the authoritative value is the
+**Version 2.7.2** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
+
+Version 2.7 supplies a read-only central launcher and an installation-managed
+local gate host. Project operations use independent project locks and retain
+review and recovery state in the project. Normal sandboxed sessions need no
+permission exception or writable access to the central installation. Existing
+ABI 2 stores use explicit launcher migration; compatible runtime activation
+remains central. See [sandbox execution](docs/sandbox-execution-v1.md).
 
 Version 2.4 moves the Grok model choice into the central runtime: a project
 enables Grok fallback and names at most a profile (`recommended`, `strong` or
@@ -132,8 +139,8 @@ Attach paths still match the recorded folder, and a publication pending under
 2.6.7 resumes with that release and needs the recorded folder. Operation-lock
 refusals now report only what the Win32 error establishes. The bootstrap did
 not change.
-Version 2.6.9 lets the gate run from agent sessions with stock sandbox
-settings. The discovery section now gives the launcher command form, says what
+Version 2.6.9 documented approval-based launches from sandboxed agent sessions.
+The discovery section gave the launcher command form, stated what
 launcher commands write and which review providers receive the staged changes,
 and tells a sandboxed agent to request approval to run each launcher command
 outside the sandbox; packaged `docs/central-deployment-v1.md` (Agent sessions

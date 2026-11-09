@@ -364,7 +364,9 @@ function Open-CrgRetentionContext {
 function Read-CrgRetentionObjects {
   param([object]$ProjectContext, [string]$Domain, [object[]]$Requests, [long]$MaximumAggregate, [switch]$ValidationOnly)
   $reader = Get-CrgRetentionCommand -Module central-context -Name Read-CrgCentralObjectBatch
-  return & $reader -ProjectContext $ProjectContext -Domain $Domain -Requests $Requests -MaximumAggregate $MaximumAggregate -ValidationOnly:$ValidationOnly
+  $aggregateArguments = @{}
+  if ($PSBoundParameters.ContainsKey('MaximumAggregate')) { $aggregateArguments.MaximumAggregate = $MaximumAggregate }
+  return & $reader -ProjectContext $ProjectContext -Domain $Domain -Requests $Requests -ValidationOnly:$ValidationOnly @aggregateArguments
 }
 
 function Read-CrgRetentionObject {
@@ -577,12 +579,9 @@ function Get-CrgRetentionFiles {
     }
   }
   $bounds = Get-CrgRetentionLeafBounds -Receipt $Receipt
-  [long]$total = 0
   if ($files.Count -ne $bounds.Count) { throw 'retention payload differs from the exact fixed leaf set' }
   foreach ($name in $files.Keys) {
     if (-not [System.Linq.Enumerable]::Contains([string[]]@($bounds.Keys), [string]$name, [StringComparer]::Ordinal) -or $files[$name] -isnot [byte[]] -or $files[$name].Length -gt $bounds[$name]) { throw 'retention leaf exceeds its fixed byte boundary' }
-    $total += $files[$name].Length
-    if ($total -gt 536870912) { throw 'retention evidence exceeds the complete 512 MiB bound' }
   }
   return ,$files
 }
@@ -680,14 +679,12 @@ function Get-CrgRetentionPayload {
     [long]$directoryMaximum = [long]$directoryRequests.Count * [long]16777216
     $null = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain $domain -Requests $directoryRequests -MaximumAggregate $directoryMaximum -ValidationOnly
     $requests = @(foreach ($entry in $regular) { [pscustomobject]@{ Oid = $entry.Oid; Type = 'blob'; Maximum = [int]33554432 } })
-    $remaining = 536870912 - $contextTotal
-    if ($remaining -lt 0) { throw 'retained context exceeds its bound' }
-    $batch = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain $domain -Requests @($requests) -MaximumAggregate $remaining
+    $batch = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain $domain -Requests @($requests)
     foreach ($entry in $regular) {
       $blob = $batch[$entry.Oid]
       if ($blob -isnot [byte[]]) { throw 'retention batch omitted a regular context blob' }
       $contextTotal += $blob.Length
-      if ($contextTotal -gt 536870912 -or $contextBlobs.ContainsKey($entry.Path)) { throw 'retained context exceeds its bound or overlaps domains' }
+      if ($contextBlobs.ContainsKey($entry.Path)) { throw 'retained context overlaps domains' }
       $contextBlobs.Add($entry.Path, $blob)
     }
     $results.Add($domain, [pscustomobject]@{ Parent = $parent; Result = $result })
@@ -804,13 +801,10 @@ function Read-CrgRetentionCore {
     $requests = @(foreach ($name in $record.Entries.Keys) {
       [pscustomobject]@{ Oid = $record.Entries[$name]; Type = 'blob'; Maximum = [int]$record.Bounds[$name] }
     })
-    $batch = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain private -Requests $requests -MaximumAggregate 536870912
-    [long]$total = 0
+    $batch = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain private -Requests $requests
     foreach ($name in $record.Entries.Keys) {
       $bytes = $batch[$record.Entries[$name]]
       if ($bytes -isnot [byte[]]) { throw 'retention evidence batch omitted a declared leaf' }
-      $total += $bytes.Length
-      if ($total -gt 536870912) { throw 'retained evidence exceeds the complete 512 MiB bound' }
       $files.Add($name, $bytes)
     }
     $buffers = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
@@ -893,13 +887,10 @@ function Write-CrgRetentionCore {
     $requests = @(foreach ($name in $payload.Files.Keys) {
       [pscustomobject]@{ Oid = $record.Entries[$name]; Type = 'blob'; Maximum = [int]$record.Bounds[$name] }
     })
-    $batch = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain private -Requests $requests -MaximumAggregate 536870912
-    [long]$readbackTotal = 0
+    $batch = Read-CrgRetentionObjects -ProjectContext $ProjectContext -Domain private -Requests $requests
     foreach ($name in $payload.Files.Keys) {
       $bytes = $batch[$record.Entries[$name]]
       if ($bytes -isnot [byte[]]) { throw 'private retention readback batch omitted a requested evidence leaf' }
-      $readbackTotal += $bytes.Length
-      if ($readbackTotal -gt 536870912) { throw 'private retention readback exceeds the complete 512 MiB bound' }
       if ((Get-CrgRetentionDigest -Bytes $bytes) -cne (Get-CrgRetentionDigest -Bytes $payload.Files[$name])) { throw 'existing private retention differs from the exact requested evidence' }
     }
     if ($null -eq $existingPublic) { New-CrgRetentionRef -ProjectContext $ProjectContext -OperationLock $OperationLock -Domain public -Ref $publicRef -Oid $receipt.Fields['public-result'] }

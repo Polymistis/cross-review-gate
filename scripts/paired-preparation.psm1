@@ -28,8 +28,7 @@ function Get-CrgCentralStagedReviewInput {
     [Parameter(Mandatory = $true)][string]$PreviousPairSha256,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$MessageBytes,
     [Parameter(Mandatory = $true)][string]$TempParent,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][long]$MaximumContextBytes)
+    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes)
   if ($OperationId -cnotmatch '\A[0-9a-f]{32}\z' -or $PreviousPairSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'paired preparation requires canonical operation and preceding-pair identities' }
   Assert-CrgPairedMessageBytes -Bytes $MessageBytes
   if ($null -eq $ProjectContext -or $ProjectContext.Schema -ne 1 -or
@@ -94,14 +93,11 @@ function Get-CrgCentralStagedReviewInput {
     if ($domain -ceq 'private') { $entries = $trees.PrivateEntries }
     $regular = @($entries | Where-Object { -not ([StringComparer]::Ordinal.Equals($_.Mode, '040000') -or [StringComparer]::Ordinal.Equals($_.Mode, '160000')) })
     $requests = @(foreach ($entry in $regular) { [pscustomobject]@{ Oid = $entry.Oid; Type = 'blob'; Maximum = [int]$MaximumBlobBytes } })
-    $remaining = $MaximumContextBytes - $totalBytes
-    if ($remaining -lt 0) { throw 'paired context exceeds the aggregate byte bound' }
-    $batch = & $commands['Read-CrgCentralObjectBatch'] -ProjectContext $ProjectContext -Domain $domain -Requests @($requests) -MaximumAggregate $remaining
+    $batch = & $commands['Read-CrgCentralObjectBatch'] -ProjectContext $ProjectContext -Domain $domain -Requests @($requests)
     foreach ($entry in $regular) {
       $bytes = $batch[$entry.Oid]
       if ($bytes -isnot [byte[]]) { throw 'paired batch capture omitted a regular context blob' }
       $totalBytes += $bytes.Length
-      if ($totalBytes -gt $MaximumContextBytes) { throw 'paired context exceeds the aggregate byte bound' }
       $blobs.Add($entry.Path, $bytes)
     }
   }
@@ -298,7 +294,7 @@ function Open-CrgPairedHostInput {
     $hostInput.RuntimeTemplateBytes = $template
     $getHistoryBounds = Get-CrgPairedPreparationCommand -Module 'paired-review-input' -Name 'Get-CrgPreparedHistoryBounds'
     $historyBounds = & $getHistoryBounds
-    $bundle = & $readFiles -PreparedPairPath $PreparedPairPath -PreparedPairSha256 $PreparedPairSha256 -PreparedPublicTreeSha256 $PreparedPublicTreeSha256 -PreparedPrivateTreeSha256 $PreparedPrivateTreeSha256 -ExpectedRuntimeSha256 $runtimeId -RuntimeTemplateBytes $template -ReadFile $hostInput.ReadContext.ReadFile -MaximumBufferBytes 20971520 -MaximumHistoryBytes $historyBounds.RenderedBytes -MaximumBlobBytes 33554432 -MaximumContextBytes 536870912
+    $bundle = & $readFiles -PreparedPairPath $PreparedPairPath -PreparedPairSha256 $PreparedPairSha256 -PreparedPublicTreeSha256 $PreparedPublicTreeSha256 -PreparedPrivateTreeSha256 $PreparedPrivateTreeSha256 -ExpectedRuntimeSha256 $runtimeId -RuntimeTemplateBytes $template -ReadFile $hostInput.ReadContext.ReadFile -MaximumBufferBytes 20971520 -MaximumHistoryBytes $historyBounds.RenderedBytes -MaximumBlobBytes 33554432
     & $assertRead -Context $hostInput.ReadContext -InputBundle $bundle
     $hostInput.InputBundle = $bundle
     $unit = $bundle.Metadata.ReviewUnit

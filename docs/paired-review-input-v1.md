@@ -283,7 +283,7 @@ encoding; no returned metadata becomes an approval token.
 
 `scripts/paired-preparation.psm1` supplies the dependent internal
 `Get-CrgCentralStagedReviewInput -ProjectContext -OperationId -PreviousPairSha256
--MessageBytes -TempParent -MaximumBlobBytes -MaximumContextBytes` interface.
+-MessageBytes -TempParent -MaximumBlobBytes` interface.
 The caller imports the capture, compiler and bundle modules from the retained
 runtime first. No launcher operation or public caller override is added here.
 
@@ -293,8 +293,9 @@ without generating a review unit, diff or message object. Otherwise capture
 preceding preparation from the recorded parent trees and candidate preparation
 from the staged trees, compile both with the retained runtime prompt bytes,
 validate the full preceding/candidate ownership union, and read every blob leaf
-from the original domain. Explicit caller bounds apply per blob and to the
-total context; exceeding a bound refuses without truncation or omission.
+from the original domain. Caller bounds apply per blob; no fixed aggregate
+project-size quota applies. Every declared context file remains mandatory,
+without truncation or omission.
 Symlink bytes and gitlink metadata remain data, not materialization support.
 
 Capture both raw-domain diffs and pinned histories, write/read back the exact
@@ -352,8 +353,8 @@ consume at most four, so full admitted raw history remains representable.
 Prepared file readers require an explicit `MaximumHistoryBytes`, clamped to this
 closed limit, independently of `MaximumBufferBytes`. The common provider host
 supplies the complete history bound while preserving the ordinary 20 MiB buffer
-limit. Retention uses the same history leaf bound and keeps the separate 512 MiB
-complete metadata limit. Provider context/request limits remain independent:
+limit. Retention uses the same history leaf bound without a fixed aggregate
+metadata quota. Provider context/request limits remain independent:
 valid history can exceed a provider's complete-input capacity without being
 malformed; such a failure supplies no review approval or truncation authority.
 SCOPE.md derives from the identity fields and states the preceding/candidate
@@ -474,7 +475,7 @@ The returned snapshot is retained input, not a provider working root or review
 approval. `Read-CrgPreparedPairFiles` reads that snapshot using the live caller's
 retained `ReadFile -Path -Maximum` callback. The caller supplies the descriptor
 and two raw-tree digest pins, expected retained runtime identity/template and
-explicit per-buffer/blob/complete-context byte bounds. Require one present
+explicit per-buffer/blob byte bounds. Require one present
 byte-array result within each bound. Parse the digest-bound descriptor fields
 before interpreting object formats, recompile both preparations, validate the
 complete paired tree namespace before resolving REVIEW_SRC leaves, and rerun
@@ -720,8 +721,9 @@ and semantic verdict/artifact boundary without execution tools. Governing privat
 configuration must explicitly enable the supported API/model/effort record.
 Initial routes remain Codex/Claude; only two complete positive-exhaustion attempts
 permit the bounded third Grok attempt. Default policy still permits at most two
-attempts. Full context bounds refuse without silently omitting source, and no
-HTTP status alone proves account exhaustion. Grok remains inactive on default
+attempts. Central capture and retention require complete source without a project
+aggregate quota; the API adapter has independent request-size bounds. No HTTP
+status alone proves account exhaustion. Grok remains inactive on default
 consumer configuration; no API call is required merely to install the adapter.
 
 The operator code unit-test ban applies to this integration. Source inspection,

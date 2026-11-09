@@ -174,7 +174,7 @@ function Invoke-CrgPairedStage {
     }
     $publicAdd = [Collections.Generic.List[string]]::new(); $publicRemove = [Collections.Generic.List[string]]::new()
     $privateAdd = [Collections.Generic.List[object]]::new(); $privateRemove = [Collections.Generic.List[object]]::new()
-    $selected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); [long]$privateBytes = 0
+    $selected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($entry in $ownership) {
       # Literal file selectors can enumerate a replacement directory's children.
       # Such public children still require ordinary public ignore eligibility.
@@ -204,8 +204,6 @@ function Invoke-CrgPairedStage {
               if ($mode -cnotin @('100644', '100755')) { throw 'private staging cannot reinterpret a tracked nonregular leaf' }
             }
           }
-          $privateBytes += $leaf.Bytes.Length
-          if ($privateBytes -gt 536870912) { throw 'private working capture exceeds the combined bound' }
           $privateAdd.Add([pscustomobject]@{ Path = $entry.Path; Mode = $mode; Bytes = $leaf.Bytes })
         } elseif ($tracked.private.ContainsKey($entry.Path)) {
           $privateRemove.Add([pscustomobject]@{ Path = $entry.Path; Mode = '0'; Bytes = $null })

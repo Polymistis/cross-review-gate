@@ -75,9 +75,19 @@ validation precedes the preserved Git LFS pre-push transfer; Git remains owner o
 the eventual public ref push.
 
 Read owners pin both default hook directories and every relevant ordinary,
-single-link hook file. Ordinary operations use concurrent read owners; first
-attachment retains publication-capable owners for the bounded replacement.
-Foreign/custom hooks, nonordinary occupants, indeterminate presence, configured
+single-link hook file. Every operation, first attachment included, holds hook
+files as concurrent read owners. All worktrees of a repository share the
+common-directory hooks, while the operation lock covers one worktree, so a
+publication-capable owner would refuse every sibling worktree's gate operation
+for as long as custody lasts. First attachment therefore takes one only for a
+present install target (`pre-commit`, public `pre-push` and their `.crg-sha256`
+attestations) whose bytes differ from the required dispatcher. A share-all bridge
+proven to be the admitted file stays open while the read owner is exchanged, and
+custody refuses unless the publication-capable owner names that same file with
+the admitted bytes; equal bytes in another file do not qualify. Matching and absent targets
+need no replacement access. A sharing violation on a hook reports that another
+handle, possibly a gate operation in another worktree, holds it in a conflicting
+mode. Foreign/custom hooks, nonordinary occupants, indeterminate presence, configured
 hook redirection, and unknown active hook material refuse. Standard inactive
 `.sample` files and named gate recovery material remain untouched. Existing custom
 `prepare-commit-msg`, `commit-msg`, `reference-transaction`, or other hooks cannot

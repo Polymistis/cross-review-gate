@@ -91,7 +91,8 @@ linked worktree with an activated attachment needs only Git's own
 `git worktree move` or `git worktree repair`: the worktree's Git directory,
 which carries the attachment, stays in place, and Open, Stage, Commit, Resume
 and PushCheck require Git's back-link (`<git-dir>/gitdir`) to name the current
-folder. `-Status` does not read the back-link. Resume runs the release recorded
+folder. Installed-host Status validates the back-link and admitted namespace
+under the project operation lock. Resume runs the release recorded
 in the pending handoff, so a publication left pending by a release before 2.6.8
 still needs the recorded folder until it finishes.
 

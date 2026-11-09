@@ -358,7 +358,8 @@ function Invoke-CrgCentralOperation {
 function Invoke-CrgCentralOperationRequest {
   param([string]$TargetRepo, [object]$Operation, [object]$Context)
   if ($null -eq $Operation -or -not [System.Linq.Enumerable]::Contains([string[]]@('Open', 'Status', 'Stage', 'Commit', 'Resume', 'Attach', 'PushCheck'), [string]$Operation.Name, [System.StringComparer]::Ordinal)) { throw 'central operation is invalid' }
-  if ($Operation.Name -ceq 'Status') { return Get-CrgCentralProjectStatus -TargetRepo $TargetRepo -Context $Context }
+  $hostAdmission = if ($null -ne $Context.PSObject.Properties['HostAdmission']) { $Context.HostAdmission } else { $null }
+  if ($Operation.Name -ceq 'Status' -and $null -eq $hostAdmission) { return Get-CrgCentralProjectStatus -TargetRepo $TargetRepo -Context $Context }
   if ($Operation.Name -ceq 'Resume' -and $null -eq $Context.PSObject.Properties['ResumeHandoffSha256']) {
     # Select the recorded approved release before importing any live native
     # operation module. A current central activation must not mix generations
@@ -386,10 +387,36 @@ function Invoke-CrgCentralOperationRequest {
     $selected | Add-Member -NotePropertyName ResumeHandoffSha256 -NotePropertyValue $handoffDigest
     if (-not [string]::Equals($selected.Id, $Context.Id, [StringComparison]::Ordinal)) {
       $module = Import-Module -Name $selected.Payloads['scripts/central-context.psm1'].Path -Force -Global -PassThru -ErrorAction Stop
+      if ($null -ne $hostAdmission -and $selected.Manifest.LauncherAbi -lt 3) {
+        # Retained compilers stay selected. Older orchestration predates the
+        # host admission boundary, so the trusted dispatcher keeps that guard.
+        return Invoke-CrgCentralOperation -TargetRepo $TargetRepo -Operation $Operation -Context $selected
+      }
       return & $module { param($Root, $Request, $Runtime) Invoke-CrgCentralOperation -TargetRepo $Root -Operation $Request -Context $Runtime } $TargetRepo $Operation $selected
     }
   }
   Import-CrgCentralOperationModules -Context $Context
+  if ($null -ne $hostAdmission) { Install-CrgHostOperationReadGuard -Context $Context }
+  if ($Operation.Name -ceq 'Status') {
+    $binding = $hostAdmission.Binding
+    $roots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in @($binding.Root, $binding.GitDir, $binding.CommonDir)) { $null = $roots.Add($path) }
+    if ([IO.Directory]::Exists($binding.PrivateGitDir)) { $null = $roots.Add($binding.PrivateGitDir) }
+    $statusLock = $null; $statusReads = $null; $statusRetained = $false
+    try {
+      $statusLock = Open-CrgPairedOperationLock -PublicGitDirectory $binding.GitDir
+      $statusReads = Open-CrgPairedOperationReads -Runtime $Context -OperationLock $statusLock -ProjectRoots ([string[]]@($roots))
+      return Get-CrgCentralProjectStatus -TargetRepo $TargetRepo -Context $statusReads.Runtime
+    } catch {
+      $statusRetained = Test-CrgContextUncertainFailure -Failure $_.Exception
+      throw
+    } finally {
+      if (-not $statusRetained) {
+        try { if ($null -ne $statusReads) { Close-CrgPairedOperationReads -Owner $statusReads } }
+        finally { if ($null -ne $statusLock) { Close-CrgPairedOperationLock -Lock $statusLock } }
+      }
+    }
+  }
   if ($Operation.Name -ceq 'Stage') {
     $prefix = @('-C', $TargetRepo)
     $actualRoot = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--show-toplevel'))).Replace('/', '\')
@@ -397,7 +424,7 @@ function Invoke-CrgCentralOperationRequest {
     $gitDir = (Get-CrgStatusGitLine -Arguments ($prefix + @('rev-parse', '--absolute-git-dir'))).Replace('/', '\')
     $attachment = & $Context.ReadFile -Path (Join-Path $gitDir 'crg-attachment') -Maximum 16384 -AllowAbsent
     $proposal = & $Context.ReadFile -Path (Join-Path $gitDir 'crg-attachment-pending') -Maximum 16384 -AllowAbsent
-    if ($attachment.Present -and $proposal.Present) { throw 'Stage refuses conflicting active and pending attachment records' }
+    if ($attachment.Present -and $proposal.Present -and -not [Linq.Enumerable]::SequenceEqual([byte[]]$attachment.Bytes, [byte[]]$proposal.Bytes)) { throw 'Stage refuses conflicting active and pending attachment records' }
     if (-not $attachment.Present -and $proposal.Present) {
       if ($Operation.All) { throw 'pending attachment staging requires explicit paths; All is unsupported' }
       return Invoke-CrgCentralPendingAttachmentStage -TargetRepo $TargetRepo -Context $Context -Paths $Operation.Paths
@@ -504,6 +531,49 @@ function Import-CrgCentralOperationModules {
     if ($payload.Bytes -isnot [byte[]] -or -not [string]::Equals($payload.Path, (Join-Path $Context.Root $relative.Replace('/', '\')), [StringComparison]::Ordinal)) { throw 'central module path differs from the retained release' }
     Import-Module -Name $payload.Path -Force -Global -ErrorAction Stop
   }
+}
+
+function Install-CrgHostOperationReadGuard {
+  param([object]$Context)
+  $commands = @(Get-Command Open-CrgPairedOperationReads -Module paired-operation -CommandType Function -ListImported)
+  if ($commands.Count -ne 1 -or -not [string]::Equals($commands[0].Module.Path, $Context.Payloads['scripts/paired-operation.psm1'].Path, [StringComparison]::Ordinal) -or $Context.HostAdmission.Validate -isnot [scriptblock] -or $Context.HostAdmission.Protect -isnot [scriptblock]) { throw 'host admission requires the selected operation-read implementation' }
+  $expected = [string[]]@('Runtime', 'OperationLock', 'ProjectRoots', 'RetainedFiles', 'ExecutableReads')
+  $common = [string[]]@('Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable')
+  foreach ($name in $expected) { if (-not $commands[0].Parameters.ContainsKey($name)) { throw 'retained operation-read signature lacks a required field' } }
+  foreach ($name in $commands[0].Parameters.Keys) {
+    if (-not [Linq.Enumerable]::Contains($expected, $name, [StringComparer]::Ordinal) -and -not [Linq.Enumerable]::Contains($common, $name, [StringComparer]::Ordinal)) { throw 'retained operation-read signature has an unsupported field' }
+  }
+  # The extra boundary runs after the original runtime acquired its lock, and
+  # before that runtime captures metadata. Preserve the complete original call
+  # and implementation, including retained ABI 2 recovery and read ownership.
+  $wrapper = & $commands[0].Module {
+    param($Admission)
+    $script:CrgHostOriginalReads = (Get-Command Open-CrgPairedOperationReads -CommandType Function).ScriptBlock
+    $script:CrgHostReadAdmission = $Admission
+    $guard = {
+      [CmdletBinding()]
+      param([Parameter(Mandatory = $true)][object]$Runtime,
+        [Parameter(Mandatory = $true)][object]$OperationLock,
+        [Parameter(Mandatory = $true)][string[]]$ProjectRoots,
+        [object[]]$RetainedFiles = @(), [object[]]$ExecutableReads = @())
+      & $script:CrgHostReadAdmission.Validate -OperationLock $OperationLock -ProjectRoots $ProjectRoots
+      $owner = & $script:CrgHostOriginalReads @PSBoundParameters
+      try { & $script:CrgHostReadAdmission.Protect -Owner $owner; return $owner }
+      catch {
+        # A wrapping failure owns the newly created facade, not its caller's
+        # lock. Close that facade before the original caller unwinds its lock.
+        try { Close-CrgPairedOperationReads -Owner $owner }
+        catch { throw [InvalidOperationException]::new('host facade cleanup failed after guard installation failure', $_.Exception) }
+        throw
+      }
+    }
+    $guard = $ExecutionContext.SessionState.Module.NewBoundScriptBlock($guard)
+    Set-Item -Path Function:script:Open-CrgPairedOperationReads -Value $guard
+    Set-Item -Path Function:global:Open-CrgPairedOperationReads -Value $guard
+    return $guard
+  } $Context.HostAdmission
+  $installed = @(Get-Command Open-CrgPairedOperationReads -Module paired-operation -CommandType Function -ListImported)
+  if ($installed.Count -ne 1 -or -not [string]::Equals($installed[0].Module.Path, $commands[0].Module.Path, [StringComparison]::Ordinal) -or -not [string]::Equals($installed[0].ScriptBlock.ToString(), $wrapper.ToString(), [StringComparison]::Ordinal)) { throw 'host admission guard is not the selected exported operation-read command' }
 }
 
 function Get-CrgCentralOpenState {
@@ -700,10 +770,13 @@ function Read-CrgCentralObjectBatch {
   param([Parameter(Mandatory = $true)][object]$ProjectContext,
     [Parameter(Mandatory = $true)][ValidatePattern('\A(?:public|private)\z', Options = 'None')][string]$Domain,
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Requests,
-    [Parameter(Mandatory = $true)][long]$MaximumAggregate,
+    [long]$MaximumAggregate,
     [switch]$ValidationOnly)
   if ($null -eq $Requests) { throw 'batch object requests are absent' }
-  if ($MaximumAggregate -lt 0 -or (-not $ValidationOnly -and $MaximumAggregate -gt 2147483647)) { throw 'batch object aggregate bound is invalid' }
+  $aggregateBounded = $PSBoundParameters.ContainsKey('MaximumAggregate')
+  if ($aggregateBounded -and $MaximumAggregate -lt 0) { throw 'batch object aggregate bound is invalid' }
+  # Objects occupy separate arrays. Only each array's length uses Int32;
+  # a batch has no corresponding aggregate allocation or project-size quota.
   $objects = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
   if ($Requests.Count -eq 0) { return ,$objects }
   $specifications = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
@@ -785,7 +858,7 @@ function Read-CrgCentralObjectBatch {
       if ($actualOid -cne $specification.Oid -or $actualType -cne $specification.Type) { throw 'batch object header differs from the requested identity or type' }
       if ($size -gt $specification.Maximum) { throw 'batch object exceeds its per-object byte bound' }
       $aggregate += $size
-      if ($aggregate -gt $MaximumAggregate) { throw 'batch object contents exceed the aggregate byte bound' }
+      if ($aggregateBounded -and $aggregate -gt $MaximumAggregate) { throw 'batch object contents exceed the aggregate byte bound' }
       $bytes = New-Object byte[] ([int]$size)
       Read-CrgCentralBatchStreamBytes -State $state -Destination $bytes -Deadline $deadline
       if ((Read-CrgCentralBatchStreamByte -State $state -Deadline $deadline) -ne 10) { throw 'batch object contents lack the required record terminator' }

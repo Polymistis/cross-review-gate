@@ -114,7 +114,7 @@ context; no database, index, association or activation is created by this reader
 
 `first-attachment-preparation.psm1` exports
 `Get-CrgCentralFirstAttachmentReviewInput -ProjectContext -AttachmentBytes
--OperationId -MessageBytes -TempParent -MaximumBlobBytes -MaximumContextBytes`.
+-OperationId -MessageBytes -TempParent -MaximumBlobBytes`.
 The live owner supplies the actual captured public parent and either the actual
 adopted private parent or literal `absent`, with an existing private database,
 selected candidate index and real empty-tree object. Absent private ancestry

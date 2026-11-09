@@ -179,9 +179,9 @@ buffers16MiB. `COMMIT-LOG.txt` instead uses the shared
 `Get-CrgPreparedHistoryBounds` rendered limit of201,392,128 bytes: four times
 the48MiB raw history aggregate plus64KiB for authority/domain/commit framing.
 Both retention writing and rereading admit the same complete escaped history as
-capture and the provider host. The complete metadata payload remains at most512MiB;
-the larger history leaf does not relax that independent aggregate limit. Context admits
-regular files only, at most32MiB per blob and512MiB total. Missing objects refuse;
+capture and the provider host. Complete metadata and context have no fixed
+aggregate byte quota. Context admits regular files only, at most32MiB per blob.
+Every declared evidence leaf and source file remains required. Missing objects refuse;
 lazy fetch, alternates, replacements and caller Git environment selectors are not
 fallbacks. Native directory pins retain both object namespaces through use.
 Namespace roots acquire rename-denying custody in ancestor-first order, including

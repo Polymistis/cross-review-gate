@@ -7711,7 +7711,7 @@ $gitOverrideEnvNames = @($gitConfigEnvNames + $gitRepositoryEnvNames + $gitAttri
 # Central publication is deliberately separate from target installation. No
 # package input is executed, and no consumer authorization is inferred here.
 function Get-CrgRuntimePayloadPaths {
-  [string[]]$rtPaths = @('VERSION', 'scripts/central-launcher.ps1', 'scripts/central-context.psm1',
+  [string[]]$rtPaths = @('VERSION', 'scripts/central-launcher.ps1', 'scripts/central-transport.psm1', 'scripts/central-context.psm1',
     'scripts/private-governance.psm1', 'scripts/paired-governance.psm1', 'scripts/paired-tree.psm1',
     'scripts/review-preparation.psm1', 'scripts/project-preparation.psm1',
     'scripts/paired-review-input.psm1', 'scripts/paired-diff.psm1', 'scripts/paired-preparation.psm1',
@@ -7735,7 +7735,7 @@ function Read-CrgRuntimeManifestBytes {
   $rtLines = @([System.Text.Encoding]::ASCII.GetString($Bytes).Split([char]10))
   if ($rtLines.Count -lt 7 -or $rtLines.Count -gt 262 -or -not [string]::Equals($rtLines[-1], '', [System.StringComparison]::Ordinal) -or
       -not [string]::Equals($rtLines[0], 'crg-runtime-manifest v1', [System.StringComparison]::Ordinal) -or
-      -not ([string]::Equals($rtLines[3], 'launcher-abi 1', [System.StringComparison]::Ordinal) -or [string]::Equals($rtLines[3], 'launcher-abi 2', [System.StringComparison]::Ordinal)) -or
+      -not ([Linq.Enumerable]::Contains([string[]]@('launcher-abi 1', 'launcher-abi 2', 'launcher-abi 3'), $rtLines[3], [StringComparer]::Ordinal)) -or
       -not [string]::Equals($rtLines[4], 'config-schema 1', [System.StringComparison]::Ordinal)) {
     throw 'runtime manifest header, ABI, schema, inventory count, or final LF is invalid'
   }
@@ -7767,13 +7767,14 @@ function Read-CrgRuntimeManifestBytes {
     $rtPrevious = $rtPath
     $rtEntries.Add([pscustomobject]@{ Path = $rtPath; Length = $rtLength; Hash = $rtHash }) | Out-Null
   }
-  # ABIs 1/2 keep these dispatch/review entrypoints stable, not the publisher's
+  # Retained ABIs keep these dispatch/review entrypoints stable, not the publisher's
   # entire optional helper inventory. Approved manifests own release contents.
   foreach ($rtRequired in @('VERSION', 'scripts/run-gate.sh', 'scripts/git-hooks/pre-commit',
       'scripts/codex/auto-review.ps1', 'scripts/codex/auto-merge.ps1', 'scripts/codex/commit.ps1',
       'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1', 'scripts/claude/commit.ps1')) {
     if (@($rtEntries | Where-Object { $_.Path -ceq $rtRequired }).Count -ne 1) { throw "runtime manifest lacks required entrypoint '$rtRequired'" }
   }
+  if ($rtLauncherAbi -ge 3 -and @($rtEntries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) }).Count -ne 1) { throw 'ABI 3 manifest lacks the local gate transport' }
   return [pscustomobject]@{ Bytes = $Bytes; Id = (Get-CrgSha256HexOfBytes -Bytes $Bytes); Version = $rtVersion; Source = $rtSource; LauncherAbi = $rtLauncherAbi; Entries = $rtEntries }
 }
 
@@ -7785,8 +7786,8 @@ function Read-CrgRuntimeLauncherBytes {
   if ($text -cmatch '\Acrg-runtime-launcher v1\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\n\z') {
     return [pscustomobject]@{ Schema = 1; LauncherAbi = 1; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = '-'; PreviousHash = '-' }
   }
-  if ($text -cnotmatch '\Acrg-runtime-launcher v2\nlauncher-abi 2\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
-  $record = [pscustomobject]@{ Schema = 2; LauncherAbi = 2; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = $Matches['p']; PreviousHash = $Matches['s'] }
+  if ($text -cnotmatch '\Acrg-runtime-launcher v(?<a>[23])\nlauncher-abi \k<a>\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
+  $record = [pscustomobject]@{ Schema = [int]$Matches['a']; LauncherAbi = [int]$Matches['a']; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = $Matches['p']; PreviousHash = $Matches['s'] }
   if (($record.PreviousReleaseId -ceq '-') -ne ($record.PreviousHash -ceq '-') -or $record.PreviousReleaseId -ceq $record.ReleaseId) { throw 'launcher provenance predecessor is inconsistent' }
   return $record
 }
@@ -7794,7 +7795,7 @@ function Read-CrgRuntimeLauncherBytes {
 function New-CrgRuntimeLauncherBytes {
   param([int]$LauncherAbi, [string]$ReleaseId, [string]$Hash, [string]$PreviousReleaseId = '-', [string]$PreviousHash = '-')
   $text = if ($LauncherAbi -eq 1) { "crg-runtime-launcher v1`nrelease $ReleaseId`nsha256 $Hash`n" }
-    elseif ($LauncherAbi -eq 2) { "crg-runtime-launcher v2`nlauncher-abi 2`nrelease $ReleaseId`nsha256 $Hash`nprevious-release $PreviousReleaseId`nprevious-sha256 $PreviousHash`n" }
+    elseif ($LauncherAbi -in @(2, 3)) { "crg-runtime-launcher v$LauncherAbi`nlauncher-abi $LauncherAbi`nrelease $ReleaseId`nsha256 $Hash`nprevious-release $PreviousReleaseId`nprevious-sha256 $PreviousHash`n" }
     else { throw 'unsupported installed launcher ABI' }
   $bytes = [Text.Encoding]::ASCII.GetBytes($text)
   $null = Read-CrgRuntimeLauncherBytes -Bytes $bytes
@@ -7813,23 +7814,33 @@ function Assert-CrgRuntimeLauncherOrigin {
 
 function Update-CrgRuntimeLauncherAbi {
   param([string]$Store, [object]$Release, [object]$Owners)
-  if ($Release.Manifest.LauncherAbi -ne 2) { throw 'launcher migration requires an approved ABI 2 target' }
+  $targetAbi = $Release.Manifest.LauncherAbi
+  if ($targetAbi -notin @(2, 3)) { throw 'launcher migration requires an approved successor ABI target' }
   $target = @($Release.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })
   if ($target.Count -ne 1) { throw 'launcher migration target lacks the exact launcher payload' }
   $targetHash = Get-CrgSha256HexOfBytes -Bytes $target[0].Bytes
-  $migrationPath = Join-Path $Store 'launcher-upgrade'
+  $migrationPath = Join-Path $Store $(if ($targetAbi -eq 3) { 'launcher-upgrade-v3' } else { 'launcher-upgrade' })
   $migrationOwner = Open-CrgPackageSourceHold -Path $migrationPath -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
   if ($null -ne $migrationOwner) { $Owners.Add($migrationOwner) | Out-Null }
   $installOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'launcher-install') -RelativePath 'installed launcher provenance' -MaxLength 1024 -AllowAbsent
   $launcherOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'launcher.ps1') -RelativePath 'installed launcher' -AllowAbsent
   foreach ($owner in @($installOwner, $launcherOwner)) { if ($null -ne $owner) { $Owners.Add($owner) | Out-Null } }
   if ($null -eq $migrationOwner) {
-    if ($null -eq $installOwner -or $null -eq $launcherOwner) { throw 'new launcher migration requires a complete verified ABI 1 installation' }
+    if ($null -eq $installOwner -or $null -eq $launcherOwner) { throw 'new launcher migration requires a complete verified predecessor installation' }
     $predecessor = Read-CrgRuntimeLauncherBytes -Bytes $installOwner.Bytes
-    if ($predecessor.LauncherAbi -ne 1) { throw 'only the explicit ABI 1 to ABI 2 launcher migration is supported; routine releases use activation' }
+    if ($predecessor.LauncherAbi -ne ($targetAbi - 1)) { throw 'launcher migration requires the immediately preceding ABI; routine releases use activation' }
     Assert-CrgRuntimeLauncherOrigin -Store $Store -Installation $predecessor -Owners $Owners
-    if ((Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -cne $predecessor.Hash) { throw 'existing launcher differs from its approved ABI 1 origin' }
-    $desired = New-CrgRuntimeLauncherBytes -LauncherAbi 2 -ReleaseId $Release.Manifest.Id -Hash $targetHash -PreviousReleaseId $predecessor.ReleaseId -PreviousHash $predecessor.Hash
+    if ((Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -cne $predecessor.Hash) { throw 'existing launcher differs from its approved predecessor origin' }
+    if ($targetAbi -eq 3) {
+      $priorPath = Join-Path $Store 'launcher-prior-v3'
+      $priorBytes = [byte[]]$installOwner.Bytes
+      $null = Update-CrgRootedFileBytes -Path $priorPath -MaxLength 1024 -Label 'exact preceding launcher provenance' -Transform {
+        param([byte[]]$Previous)
+        if (($Previous.Length -gt 0 -or (Get-CrgPathOccupantKind -Path $priorPath) -cne 'empty') -and -not [Linq.Enumerable]::SequenceEqual([byte[]]$Previous, $priorBytes)) { throw 'preceding launcher provenance conflicts with the current verified installation' }
+        return [pscustomobject]@{ Ok = $true; Bytes = $priorBytes }
+      }
+    }
+    $desired = New-CrgRuntimeLauncherBytes -LauncherAbi $targetAbi -ReleaseId $Release.Manifest.Id -Hash $targetHash -PreviousReleaseId $predecessor.ReleaseId -PreviousHash $predecessor.Hash
     # Retain the exact transition before replacing either fixed leaf. The
     # existing no-replace writer can leave a temporary name absent after a
     # crash; this bounded record authorizes only the recorded old/new bytes.
@@ -7843,11 +7854,17 @@ function Update-CrgRuntimeLauncherAbi {
     $Owners.Add($migrationOwner) | Out-Null
   }
   $migration = Read-CrgRuntimeLauncherBytes -Bytes $migrationOwner.Bytes
-  if ($migration.Schema -ne 2 -or $migration.PreviousReleaseId -ceq '-' -or
+  if ($migration.Schema -ne $targetAbi -or $migration.PreviousReleaseId -ceq '-' -or
       $migration.ReleaseId -cne $Release.Manifest.Id -or $migration.Hash -cne $targetHash) { throw 'launcher upgrade record selects another exact transition' }
-  $predecessor = [pscustomobject]@{ LauncherAbi = 1; ReleaseId = $migration.PreviousReleaseId; Hash = $migration.PreviousHash }
+  $predecessor = [pscustomobject]@{ LauncherAbi = ($targetAbi - 1); ReleaseId = $migration.PreviousReleaseId; Hash = $migration.PreviousHash }
   Assert-CrgRuntimeLauncherOrigin -Store $Store -Installation $predecessor -Owners $Owners
-  $previousBytes = New-CrgRuntimeLauncherBytes -LauncherAbi 1 -ReleaseId $predecessor.ReleaseId -Hash $predecessor.Hash
+  if ($targetAbi -eq 3) {
+    $priorOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'launcher-prior-v3') -RelativePath 'exact preceding launcher provenance' -MaxLength 1024
+    $Owners.Add($priorOwner) | Out-Null
+    $priorRecord = Read-CrgRuntimeLauncherBytes -Bytes $priorOwner.Bytes
+    if ($priorRecord.LauncherAbi -ne $predecessor.LauncherAbi -or $priorRecord.ReleaseId -cne $predecessor.ReleaseId -or $priorRecord.Hash -cne $predecessor.Hash) { throw 'preceding launcher provenance differs from the retained transition' }
+    $previousBytes = [byte[]]$priorOwner.Bytes
+  } else { $previousBytes = New-CrgRuntimeLauncherBytes -LauncherAbi 1 -ReleaseId $predecessor.ReleaseId -Hash $predecessor.Hash }
   $desired = [byte[]]$migrationOwner.Bytes
   if ($null -ne $installOwner -and
       -not [Linq.Enumerable]::SequenceEqual([byte[]]$installOwner.Bytes, [byte[]]$previousBytes) -and
@@ -7856,14 +7873,14 @@ function Update-CrgRuntimeLauncherAbi {
   if ($null -ne $installOwner -and $null -ne $launcherOwner -and
       [Linq.Enumerable]::SequenceEqual([byte[]]$installOwner.Bytes, [byte[]]$desired) -and
       (Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -ceq $targetHash) {
-    Write-Host "[bootstrap] exact ABI 2 launcher migration is already complete for release $($Release.Manifest.Id); no release activated and no consumer changed."
+    Write-Host "[bootstrap] exact ABI $targetAbi launcher migration is already complete for release $($Release.Manifest.Id); no release activated and no consumer changed."
     return
   }
   foreach ($owner in @($installOwner, $launcherOwner)) {
     if ($null -ne $owner) { $owner.Stream.Dispose(); $owner.Stream = $null }
   }
   $installPath = Join-Path $Store 'launcher-install'
-  $null = Update-CrgRootedFileBytes -Path $installPath -MaxLength 1024 -Label 'ABI 2 launcher provenance' -Transform {
+  $null = Update-CrgRootedFileBytes -Path $installPath -MaxLength 1024 -Label 'successor launcher provenance' -Transform {
     param([byte[]]$Previous)
     $absent = $Previous.Length -eq 0 -and (Get-CrgPathOccupantKind -Path $installPath) -ceq 'empty'
     if (-not $absent -and -not [Linq.Enumerable]::SequenceEqual([byte[]]$Previous, [byte[]]$previousBytes) -and
@@ -7874,7 +7891,7 @@ function Update-CrgRuntimeLauncherAbi {
   $Owners.Add($verifiedInstall) | Out-Null
   if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$verifiedInstall.Bytes, [byte[]]$desired)) { throw 'upgraded launcher provenance readback differs' }
   $launcherPath = Join-Path $Store 'launcher.ps1'
-  $null = Update-CrgRootedFileBytes -Path $launcherPath -Label 'ABI 2 stable launcher' -Transform {
+  $null = Update-CrgRootedFileBytes -Path $launcherPath -Label 'successor stable launcher' -Transform {
     param([byte[]]$Previous)
     $absent = $Previous.Length -eq 0 -and (Get-CrgPathOccupantKind -Path $launcherPath) -ceq 'empty'
     if (-not $absent -and (Get-CrgSha256HexOfBytes -Bytes $Previous) -cnotin @($predecessor.Hash, $targetHash)) { throw 'launcher bytes changed outside the recorded migration' }
@@ -7883,8 +7900,38 @@ function Update-CrgRuntimeLauncherAbi {
   $verifiedLauncher = Open-CrgPackageSourceHold -Path $launcherPath -RelativePath 'upgraded stable launcher'
   $Owners.Add($verifiedLauncher) | Out-Null
   if ((Get-CrgSha256HexOfBytes -Bytes $verifiedLauncher.Bytes) -cne $targetHash) { throw 'upgraded launcher readback differs from the approved release' }
-  Write-Host "[bootstrap] stable launcher upgraded from ABI 1 to ABI 2 using verified release $($Release.Manifest.Id); no release activated and no consumer changed."
+  Write-Host "[bootstrap] stable launcher upgraded from ABI $($targetAbi - 1) to ABI $targetAbi using verified release $($Release.Manifest.Id); no release activated and no consumer changed."
   Write-Host "[bootstrap] exact launcher transition retained at '$migrationPath'; preceding release $($predecessor.ReleaseId) remains required."
+}
+
+function Install-CrgRuntimeHost {
+  param([string]$Store, [object]$Release)
+  if ($Release.Manifest.LauncherAbi -lt 3) { return }
+  $transport = @($Release.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) })
+  if ($transport.Count -ne 1) { throw 'host installation requires the exact retained transport payload' }
+  Import-Module -Name $transport[0].Path -ErrorAction Stop
+  $launcher = Join-Path $Store 'launcher.ps1'
+  $shell = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
+  $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -Serve'
+  $startup = '"' + $shell + '" ' + $arguments
+  if ($startup.Length -gt 260) { throw 'runtime store path exceeds the Windows Run startup command bound; host installation is incomplete' }
+  $name = 'CrossReviewGate-' + (Get-CrgSha256HexOfBytes -Bytes ([Text.Encoding]::UTF8.GetBytes($Store.ToUpperInvariant())))
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+  try {
+    $previous = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if ($null -ne $previous -and ($key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::String -or $previous -isnot [string] -or -not [string]::Equals($previous, $startup, [StringComparison]::Ordinal))) { throw 'gate startup registration is occupied by a different command; preserve the existing entry' }
+    if ($null -eq $previous) { $key.SetValue($name, $startup, [Microsoft.Win32.RegistryValueKind]::String); $key.Flush() }
+    if (-not [string]::Equals([string]$key.GetValue($name), $startup, [StringComparison]::Ordinal)) { throw 'gate startup registration readback differs from the installed command' }
+  } finally { $key.Dispose() }
+  if (Test-CrgHostAvailable -Store $Store) { Write-Host '[bootstrap] installed local gate host is available.'; return }
+  $process = Start-Process -FilePath $shell -ArgumentList $arguments -WorkingDirectory $Store -WindowStyle Hidden -PassThru
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  while ($watch.ElapsedMilliseconds -lt 15000) {
+    if (Test-CrgHostAvailable -Store $Store) { Write-Host '[bootstrap] installed local gate host started; project commands require no sandbox exception.'; return }
+    if ($process.HasExited) { throw 'installed gate host exited before availability; launcher installation is incomplete' }
+    Start-Sleep -Milliseconds 100
+  }
+  throw "installed gate host did not confirm availability; preserve process $($process.Id) and installation provenance for repair"
 }
 
 function Read-CrgRuntimeActiveBytes {
@@ -8093,7 +8140,7 @@ function Invoke-CrgCentralRuntimeOperation {
       $rtSource = Get-CrgHeldPackageProvenance -Candidate $rtCandidate -VersionBytes $rtVersionOwner.Bytes -SourceOwners $rtPayloadOwners.ToArray() -ScratchRoot (Join-Path $rtStore ('.proof-' + [Guid]::NewGuid().ToString('N')))
       if ($rtSource -cne $ApprovedSourceCommit) { throw 'retained runtime bytes do not match the approved source commit' }
       $null = Assert-CrgCapturedPackageProvenanceCandidate -Candidate $rtCandidate
-      $rtLines = @('crg-runtime-manifest v1', "version $rtVersion", "source-commit $rtSource", 'launcher-abi 2', 'config-schema 1')
+      $rtLines = @('crg-runtime-manifest v1', "version $rtVersion", "source-commit $rtSource", 'launcher-abi 3', 'config-schema 1')
       foreach ($rtOwner in $rtPayloadOwners) { $rtLines += "file $(Get-CrgSha256HexOfBytes -Bytes $rtOwner.Bytes) $($rtOwner.Bytes.Length) $($rtOwner.RelativePath)" }
       $rtManifest = Read-CrgRuntimeManifestBytes -Bytes ([System.Text.Encoding]::ASCII.GetBytes(($rtLines -join "`n") + "`n"))
       $rtRelease = Publish-CrgRuntimeSnapshot -Store $rtStore -Manifest $rtManifest -Owners $rtPayloadOwners.ToArray()
@@ -8102,20 +8149,25 @@ function Invoke-CrgCentralRuntimeOperation {
       $rtRelease = Publish-CrgRuntimeSnapshot -Store $rtStore -Manifest $rtImported.Manifest -Owners $rtImported.Owners.ToArray()
     } else {
       $rtRelease = Open-CrgRuntimeRelease -Root (Join-Path $rtStore "releases/$ReleaseId") -ExpectedId $ReleaseId
-      $rtMissingCapabilities = @('scripts/central-launcher.ps1', 'scripts/central-context.psm1', 'scripts/private-governance.psm1') | Where-Object {
+      $rtCapabilities = @('scripts/central-launcher.ps1', 'scripts/central-context.psm1', 'scripts/private-governance.psm1')
+      if ($rtRelease.Manifest.LauncherAbi -ge 3) { $rtCapabilities += 'scripts/central-transport.psm1' }
+      $rtMissingCapabilities = $rtCapabilities | Where-Object {
         $rtRequired = $_
         @($rtRelease.Manifest.Entries | Where-Object { $_.Path -ceq $rtRequired }).Count -ne 1
       }
       if ($Operation -ceq 'UpgradeRuntimeLauncher') {
         if (@($rtMissingCapabilities).Count -gt 0) { throw 'launcher migration target lacks required central entrypoints' }
         Update-CrgRuntimeLauncherAbi -Store $rtStore -Release $rtRelease -Owners $rtOwners
+        Install-CrgRuntimeHost -Store $rtStore -Release $rtRelease
         return
       }
       if ($Operation -ceq 'InstallRuntimeLauncher') {
-        $rtUpgrade = Open-CrgPackageSourceHold -Path (Join-Path $rtStore 'launcher-upgrade') -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
-        if ($null -ne $rtUpgrade) {
-          $rtOwners.Add($rtUpgrade) | Out-Null
-          throw 'a recorded launcher migration requires UpgradeRuntimeLauncher for retry; a completed migration needs only normal release activation'
+        foreach ($rtUpgradeName in @('launcher-upgrade', 'launcher-upgrade-v3')) {
+          $rtUpgrade = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtUpgradeName) -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
+          if ($null -ne $rtUpgrade) {
+            $rtOwners.Add($rtUpgrade) | Out-Null
+            throw 'a recorded launcher migration requires UpgradeRuntimeLauncher for retry; a completed migration needs only normal release activation'
+          }
         }
         if (@($rtMissingCapabilities).Count -gt 0) { throw "release lacks executable launcher capability: $($rtMissingCapabilities -join ', ')" }
         $rtLauncherOwner = @($rtRelease.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })[0]
@@ -8149,6 +8201,7 @@ function Invoke-CrgCentralRuntimeOperation {
           if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$rtInstalled.Bytes, [byte[]]$rtItem.Bytes)) { throw 'stable launcher installed readback differs from approved release bytes' }
         }
         Write-Host "[bootstrap] stable launcher installed from verified release $ReleaseId; no release activated and no consumer changed."
+        Install-CrgRuntimeHost -Store $rtStore -Release $rtRelease
         return
       }
       $rtInstalledFiles = New-Object System.Collections.Hashtable([System.StringComparer]::Ordinal)
@@ -8156,11 +8209,14 @@ function Invoke-CrgCentralRuntimeOperation {
         $rtExisting = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtItem) -RelativePath $rtItem -MaxLength 16777216 -AllowAbsent
         if ($null -ne $rtExisting) { $rtOwners.Add($rtExisting) | Out-Null; $rtInstalledFiles.Add($rtItem, $rtExisting) }
       }
-      $rtUpgrade = Open-CrgPackageSourceHold -Path (Join-Path $rtStore 'launcher-upgrade') -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
-      if ($null -ne $rtUpgrade) {
-        $rtOwners.Add($rtUpgrade) | Out-Null
-        $rtUpgradeRecord = Read-CrgRuntimeLauncherBytes -Bytes $rtUpgrade.Bytes
-        if ($rtUpgradeRecord.Schema -ne 2 -or $rtUpgradeRecord.PreviousReleaseId -ceq '-' -or $rtInstalledFiles.Count -ne 2) { throw 'activation requires completion of the recorded launcher migration' }
+      foreach ($rtUpgradeName in @('launcher-upgrade', 'launcher-upgrade-v3')) {
+        $rtUpgrade = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtUpgradeName) -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
+        if ($null -ne $rtUpgrade) {
+          $rtOwners.Add($rtUpgrade) | Out-Null
+          $rtUpgradeRecord = Read-CrgRuntimeLauncherBytes -Bytes $rtUpgrade.Bytes
+          $rtExpectedAbi = if ([string]::Equals($rtUpgradeName, 'launcher-upgrade-v3', [StringComparison]::Ordinal)) { 3 } else { 2 }
+          if ($rtUpgradeRecord.Schema -ne $rtExpectedAbi -or $rtUpgradeRecord.PreviousReleaseId -ceq '-' -or $rtInstalledFiles.Count -ne 2) { throw 'activation requires completion of the recorded launcher migration' }
+        }
       }
       $rtLauncherPresent = $rtInstalledFiles.Count -gt 0
       if ($rtLauncherPresent) {
@@ -8169,7 +8225,7 @@ function Invoke-CrgCentralRuntimeOperation {
         Assert-CrgRuntimeLauncherOrigin -Store $rtStore -Installation $rtInstallation -Owners $rtOwners
         if ((Get-CrgSha256HexOfBytes -Bytes $rtInstalledFiles['launcher.ps1'].Bytes) -cne $rtInstallation.Hash) { throw 'activation refuses launcher bytes outside the recorded approved origin; resume an interrupted ABI migration explicitly' }
         if ($rtInstallation.LauncherAbi -lt $rtRelease.Manifest.LauncherAbi) { throw 'installed launcher ABI cannot execute the requested release; run the explicit UpgradeRuntimeLauncher operation first' }
-      } elseif ($rtRelease.Manifest.LauncherAbi -eq 2) { throw 'ABI 2 activation requires InstallRuntimeLauncher first' }
+      } elseif ($rtRelease.Manifest.LauncherAbi -ge 2) { throw 'executable central activation requires InstallRuntimeLauncher first' }
       [byte[]]$rtDesired = [System.Text.Encoding]::ASCII.GetBytes("crg-runtime-active v1`nrelease $ReleaseId`n")
       $rtUpdate = Update-CrgRootedFileBytes -Path (Join-Path $rtStore 'active-release') -MaxLength 95 -Label 'central active release' -Transform {
         param([byte[]]$Previous)

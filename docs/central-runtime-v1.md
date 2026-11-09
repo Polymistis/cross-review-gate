@@ -16,7 +16,7 @@ not delivered or implicitly authorized by a successful publication or activation
    the same central release; no per-project version, pin, or upgrade command exists.
 4. An invocation captures one release before review and retains that selection
    through child reviews and commit/merge completion. Activation never redirects an
-   in-flight operation. Current releases retain launcher ABI 2 and configuration
+   in-flight operation. Current releases retain launcher ABI 3 and configuration
    schema 1; existing ABI 1 loaders require the explicit store-wide migration.
 
 Source approval and byte identity are distinct. An expected source commit or
@@ -82,7 +82,7 @@ is admitted to this new format; v2.1 `unknown` records remain valid v2.1 evidenc
 crg-runtime-manifest v1
 version <semver>
 source-commit <git-oid>
-launcher-abi 2
+launcher-abi 3
 config-schema 1
 file <sha256> <decimal-byte-length> <relative-path>
 ```
@@ -98,7 +98,7 @@ both ordinal and Windows ordinal-ignore-case comparison. Components ending in `.
 or matching a Windows reserved device name refuse. File/directory prefix conflicts
 are invalid. The manifest owns the exact inventory of an imported or retained
 release; helpers can change across compatible releases without a publisher update.
-Supported launcher ABIs 1/2 require exact `VERSION`, `scripts/run-gate.sh`, `scripts/git-hooks/pre-commit`,
+Supported launcher ABIs require exact `VERSION`, `scripts/run-gate.sh`, `scripts/git-hooks/pre-commit`,
 `scripts/codex/{auto-review,auto-merge,commit}.ps1`,
 `scripts/claude/{auto-review,commit}.ps1`, and
 `scripts/codex/review-prompt-template.md` entries (braces abbreviate this list only).
@@ -152,16 +152,16 @@ deletion remain forbidden. Uncertain cleanup preserves and reports the exact sta
 
 ## Activation, selection, and recovery
 
-`runtime.lock` serializes central mutation and the short selection-capture phase.
-Lock contention reports an operation in progress; no stale-path deletion or lock
-bypass. A released operating-system handle, not deleting the lock pathname, ends
-ownership. Provider work does not hold the central mutation lock.
+`runtime.lock` serializes explicit central maintenance only. Project operations
+never acquire that lock or request write access to the store. Read-only workers
+capture a selector with a retained read handle and hold the selected immutable
+release through execution. Project operation locks remain project-specific.
 
 Activation first retains and fully validates the named published manifest and
-payload, including launcher ABI and configuration schema support. Only ABIs 1/2
-and schema 1 are accepted; source publication now emits ABI 2. Installed launcher
+payload, including launcher ABI and configuration schema support. Retained ABIs
+and schema 1 are accepted; source publication emits ABI 3. Installed launcher
 bytes, installation provenance and the retained origin manifest must agree. An
-ABI 1 loader cannot activate an ABI 2 release; an ABI 2 release requires a complete
+older loader cannot activate a newer ABI release; an executable release requires a complete
 installed loader. Publish the new active record through the existing retained
 stage/prior-custody/no-replace update mechanism while holding the store lock.
 Re-read the resulting exact record before reporting activation complete. Selecting
@@ -197,8 +197,9 @@ never foreign occupants. Retain the transition record and both origin releases.
 No project configuration, hooks, active selector or private history changes.
 
 The existing custody mechanism can briefly remove the active pathname while the
-exact prior record is held at a recovery name. Cooperating selection readers take
-the same short lock and cannot observe this intermediate state. Process death
+exact prior record is held at a recovery name. Read-only selection retries only
+positive absence or sharing conflict during a bounded maintenance transition,
+without taking the maintenance lock or choosing a fallback release. Process death
 can leave no active record; this is a refusal, not permission to guess a release.
 An in-process failure restores the exact prior when custody permits. Otherwise
 report the current selector state and preserved recovery paths without claiming
@@ -213,6 +214,13 @@ launcher integration must hold validated payload authority through execution and
 pass the captured selection to descendants, never reread `active-release` midway.
 
 ## Stable interface and bounded completion
+
+Launcher ABI 3 uses the installation-managed local host described in
+[sandbox execution](sandbox-execution-v1.md). Explicit ABI 2 to ABI 3 migration
+retains exact preceding provenance at `launcher-prior-v3` and the successor
+transition at `launcher-upgrade-v3`. Ordinary operation forms and configuration
+schema remain stable. Fresh installs register and start the host; compatible
+activation preserves the existing installation-managed endpoint.
 
 Launcher ABI 2 extends ABI 1 with Attach/PushCheck arguments and the internal
 `RetainFailure` lifetime callback. Config schema remains 1. The ABI 2 loader reads

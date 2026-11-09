@@ -8,10 +8,11 @@ supplies an approval or fabricated release identity.
 
 One activation updates every attached project's next invocation. Existing
 invocations retain the selected release through completion. Routine compatible
-upgrades retain launcher ABI 2 and project configuration schema 1, with no
+upgrades retain launcher ABI 3 and project configuration schema 1, with no
 per-project release pin, copied runtime update or configuration rewrite.
-Existing ABI 1 stores require one explicit store-wide launcher migration before
-activating ABI 2; fresh stores install ABI 2 directly.
+Existing ABI 2 stores require explicit store-wide launcher migration before
+activating ABI 3; fresh stores install ABI 3 directly. An ABI 1 store first uses
+an approved retained ABI 2 release for the preceding migration.
 
 ## Prerequisites and input approval
 
@@ -244,7 +245,8 @@ and these operator documents from the source commit's `docs/`:
 `paired-retention-v1.md`, `paired-review-input-v1.md`,
 `private-governance-v1.md`, `project-mode-doctrine-v1.md`,
 `project-preparation-v1.md`, `review-feedback-v1.md`,
-`reviewer-liveness-design.md` and `v2.2-grok-reviewer-design.md`. The list is explicit because following links
+`reviewer-liveness-design.md`, `sandbox-execution-v1.md` and
+`v2.2-grok-reviewer-design.md`. The list is explicit because following links
 cannot tell operator documents from development records: the contracts cite
 plans, registers and audits by path. The gate source's own `AGENTS.md` and
 `CLAUDE.md`, earlier release records under `deploy/`, and the development
@@ -322,14 +324,14 @@ previous section, so attached projects keep working; each project's Open reports
 section in both root instruction files
 ([central instructions](central-instructions-v1.md)).
 
-For an existing ABI 1 store only, import the approved ABI 2 release, let current
+For an existing ABI 2 store, import the approved ABI 3 release, let current
 invocations finish, then run the explicit migration before activation:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -UpgradeRuntimeLauncher -RuntimeStore $CrgStore -ReleaseId $CrgReleaseId
 if ($LASTEXITCODE -ne 0) { throw 'Launcher ABI migration incomplete; preserve the recorded transition' }
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -ActivateRuntime -RuntimeStore $CrgStore -ReleaseId $CrgReleaseId
-if ($LASTEXITCODE -ne 0) { throw 'ABI 2 activation failed' }
+if ($LASTEXITCODE -ne 0) { throw 'ABI 3 activation failed' }
 ```
 
 After the last bootstrap command, release the private directories:
@@ -338,12 +340,14 @@ After the last bootstrap command, release the private directories:
 Close-CrgPrivateWork
 ```
 
-Migration preserves the predecessor release/hash in `launcher-install` and the
-bounded `launcher-upgrade` recovery record. An interrupted migration resumes only
+Migration preserves the predecessor release/hash in `launcher-install`, the
+bounded `launcher-upgrade-v3` transition and exact `launcher-prior-v3` provenance.
+An earlier ABI 1 store first completes the retained ABI 2 migration, preserving
+the existing `launcher-upgrade` record. An interrupted migration resumes only
 through the same command and target release; differing occupants are not replaced.
 Activation checks actual installed-loader provenance and refuses an ABI mismatch
 or incomplete pair. Project configuration, hooks and private history do not change.
-The ABI 2 launcher retains ABI 1/2 manifest support for recorded-runtime recovery
+The ABI 3 launcher retains earlier manifest support for recorded-runtime recovery
 and compatible rollback; keep the original releases required by pending work.
 
 ## Prepare the first project attachment
@@ -453,14 +457,15 @@ skip flag exists.
 
 Run each launcher command as: powershell -NoProfile -ExecutionPolicy Bypass
 -File <runtime launcher> -TargetRepo <worktree> -<Operation> [options].
-Every launcher command opens the runtime store's lock file for writing, and
-every one except Status also writes this repository's Git metadata.
+The launcher reads the central runtime without writing the installation.
+The installed local gate host executes project operations with independent
+project locks and project-owned review and recovery state. Normal sandboxed
+sessions require no permission exception or additional writable root.
 Commit and Resume send the staged public and private changes to the review
-providers the project configuration selects: Codex/OpenAI and Claude/Anthropic,
-plus Grok/xAI under reviewer-policy grok-fallback. That configuration is the
-project owner's instruction for this transfer. In an agent sandbox, request
-approval to run each launcher command outside the sandbox with this reason; a
-session that cannot request approval cannot run the gate.
+providers selected by project configuration: Codex/OpenAI and Claude/Anthropic,
+plus Grok/xAI under reviewer-policy grok-fallback. Reviewed configuration
+authorizes that transfer. Review, provider routing and publication guards
+remain mandatory through the installed host.
 <!-- crg-central-discovery v1 END -->
 ```
 
@@ -564,52 +569,28 @@ continues to reject indexes that differ from that transaction.
 
 ## Agent sessions and sandboxes
 
-An agent sandbox keeps `.git`, the Git directory a worktree's `.git` file names,
-and everything outside the project folder read-only, and usually blocks network.
-The private database normally lives inside the common Git directory. Launcher
-commands need more than the sandbox allows:
+Normal project commands run inside the existing sandbox. The installed launcher
+reads central files and sends a bounded local request to the installed gate host.
+The host verifies caller identity and writable access to the explicit project,
+then runs the existing gate operation. Protected Git writes and configured
+review-provider calls happen through that installation-managed execution path.
+No session exception, extra writable root, network grant or approval-policy edit
+is required. Project operations never acquire the central maintenance lock.
 
-| Command | Writes | Network |
-| --- | --- | --- |
-| Every command | Opens `<runtime-store>\runtime.lock` for read and write before any release code runs | No |
-| Status | Nothing further | No |
-| Open | Operation lock in the worktree's Git directory; scratch in the private database; `crg-materialized` and the root instruction files only when materialization advances them | No |
-| Stage | Operation lock; public index and objects; private index and objects | No |
-| Commit, Resume | Operation lock; objects and refs of both domains; handoff and pair records; review scratch in the private database | Reviewer programs for the configured providers |
-| Attach | What Commit writes, plus the attachment records and the Git hooks | Reviewer programs for the configured providers |
-| PushCheck | Operation lock and scratch | Git LFS pre-push, when the project uses LFS |
+The host starts during launcher installation/migration and at user logon through
+a verified per-user Windows Run entry. A conflicting entry is preserved and
+refused. Windows limits that startup command's length; installation reports an
+incomplete host installation if the selected store path exceeds the bound.
+Compatible activation changes the next worker's runtime without restarting
+project sessions. All mutable operation state remains owned by the project.
 
-Run each launcher command outside the sandbox with the agent's approval. The
-discovery section tells the agent to, and states the reason an automatic
-approval reviewer needs: what the command writes, which providers receive the
-staged changes, and that the project configuration selects them. Under Codex's
-default Auto mode (`workspace-write` with on-request approvals) each launcher
-command is one approval request, which `approvals_reviewer = "auto_review"`
-hands to the automatic reviewer. Claude Code runs the command as an ordinary
-Bash call under its permission mode or auto-mode classifier and, with its
-optional sandbox enabled, has the same need to run outside it. No agent rule,
-added writable root or full-access mode is part of this contract. A sandboxed
-session whose approvals are disabled (Codex `approval_policy = "never"`) cannot
-run the gate, or any other command that writes Git metadata.
-
-A launcher command run inside a sandbox normally stops with one of these
-messages, and neither message alone names its cause:
-
-- `central lease child open failed` comes from the launcher, before any release
-  code, for any failed open of a store directory or file. The first open that
-  needs write access is `runtime.lock`, which a sandbox keeps read-only. Another
-  launcher start holding `runtime.lock` at that moment, a missing store file and
-  a denied read produce the same text.
-- `paired operation lock '<path>' cannot be opened for writing (Win32 error 5,
-  access denied)` means this process was denied write access to the lock file in
-  the worktree's Git directory, which a sandbox keeps read-only. An access list
-  or the file's read-only attribute can also deny that access.
-
-When the command ran inside an agent sandbox, rerun the same command outside it
-with approval before investigating anything else. When the message persists
-outside a sandbox, check the account's access to the runtime store or the Git
-directory and the lock file's attributes; after a moment of launcher contention,
-a rerun succeeds.
+An unavailable host means installation is incomplete or the installed host has
+stopped. Repair the installation through the same explicit install/migration
+operation. A rejected target means the caller lacks project access; the host
+does not expand the sandbox's project scope. An unknown client outcome requires
+Status/Resume inspection before repeating a mutation. A disconnected client does
+not cancel an in-flight review or publication. The complete admission and failure
+contract is [sandbox execution](sandbox-execution-v1.md).
 
 ## Upgrade and rollback
 
@@ -663,8 +644,9 @@ Git directory instead of the recorded worktree folder, so a linked worktree move
 with `git worktree move`, or moved by hand and then repaired with
 `git worktree repair`, keeps its Git directory and keeps working. Open, Stage,
 Commit, Resume and PushCheck require Git's back-link (`<git-dir>/gitdir`) to name
-the current folder and refuse with the repair command until it does; `-Status`
-does not read the back-link. Attach and pending-attachment Stage, which run
+the current folder and refuse with the repair command until it does. Installed-host
+Status also validates the back-link and admitted namespace under the project
+operation lock. Attach and pending-attachment Stage, which run
 before activation, keep matching the recorded folder. Resume runs the release
 recorded in the pending handoff, so a publication left pending by a release
 before 2.6.8 still needs the recorded folder until it finishes. Restoring a main

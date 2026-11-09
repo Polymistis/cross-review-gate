@@ -15,8 +15,7 @@ function Get-CrgCentralFirstAttachmentReviewInput {
     [Parameter(Mandatory = $true)][string]$OperationId,
     [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$MessageBytes,
     [Parameter(Mandatory = $true)][string]$TempParent,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes,
-    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][long]$MaximumContextBytes)
+    [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaximumBlobBytes)
   if ($OperationId -cnotmatch '\A[0-9a-f]{32}\z') { throw 'first-attachment preparation requires a canonical operation identity' }
   $validateMessage = Get-CrgFirstAttachmentPreparationCommand -Module paired-preparation -Name Assert-CrgPairedMessageBytes
   & $validateMessage -Bytes $MessageBytes
@@ -100,14 +99,11 @@ function Get-CrgCentralFirstAttachmentReviewInput {
     if ($domain -ceq 'private') { $entries = $trees.PrivateEntries }
     $regular = @($entries | Where-Object { -not ([string]::Equals($_.Mode, '040000', [StringComparison]::Ordinal) -or [string]::Equals($_.Mode, '160000', [StringComparison]::Ordinal)) })
     $requests = @(foreach ($entry in $regular) { [pscustomobject]@{ Oid = $entry.Oid; Type = 'blob'; Maximum = [int]$MaximumBlobBytes } })
-    $remaining = $MaximumContextBytes - $totalBytes
-    if ($remaining -lt 0) { throw 'first-attachment context exceeds the aggregate byte bound' }
-    $batch = & $commands['Read-CrgCentralObjectBatch'] -ProjectContext $ProjectContext -Domain $domain -Requests @($requests) -MaximumAggregate $remaining
+    $batch = & $commands['Read-CrgCentralObjectBatch'] -ProjectContext $ProjectContext -Domain $domain -Requests @($requests)
     foreach ($entry in $regular) {
       $bytes = $batch[$entry.Oid]
       if ($bytes -isnot [byte[]]) { throw 'first-attachment batch capture omitted a regular context blob' }
       $totalBytes += $bytes.Length
-      if ($totalBytes -gt $MaximumContextBytes) { throw 'first-attachment context exceeds the aggregate byte bound' }
       $blobs.Add($entry.Path, $bytes)
     }
   }

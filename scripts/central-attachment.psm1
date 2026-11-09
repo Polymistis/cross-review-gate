@@ -784,7 +784,7 @@ function Open-CrgCentralAttachment {
       $null = Assert-CrgCentralAttachmentCorrectionCandidate -Operation $operation -Anchor $operation.CorrectionAnchor -RequireChanges
     }
     Update-CrgAttachmentProjectContext -Operation $operation -ReadContext $readContext
-    $operation.CapturedInput = & $readInput -ProjectContext $operation.ProjectContext -AttachmentBytes $operation.AttachmentBytes -OperationId ([guid]::NewGuid().ToString('N')) -MessageBytes $message.Bytes -TempParent $PrivateGitDir -MaximumBlobBytes 33554432 -MaximumContextBytes 536870912
+    $operation.CapturedInput = & $readInput -ProjectContext $operation.ProjectContext -AttachmentBytes $operation.AttachmentBytes -OperationId ([guid]::NewGuid().ToString('N')) -MessageBytes $message.Bytes -TempParent $PrivateGitDir -MaximumBlobBytes 33554432
     if ($null -ne $pendingHandoffBytes -and -not $operation.CapturedInput.HasChanges) { throw 'attachment correction did not produce a changed captured pair' }
     return $operation
   } catch {

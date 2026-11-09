@@ -611,14 +611,12 @@ function Set-CrgPairedGitPrivateIndex {
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Entries)
   if ($null -eq $Entries -or $Entries.Count -gt 100000) { throw 'private staging requires a bounded entry array' }
   Assert-CrgOperationGitLiteralPaths -Runtime $ProjectContext.Runtime -Paths @($Entries | ForEach-Object { $_.Path })
-  $captured = [Collections.Generic.List[object]]::new(); [long]$total = 0
+  $captured = [Collections.Generic.List[object]]::new()
   foreach ($entry in $Entries) {
     if (-not [System.Linq.Enumerable]::Contains([string[]]@('0', '100644', '100755'), [string]$entry.Mode, [StringComparer]::Ordinal) -or
         ($entry.Mode -ceq '0' -and $null -ne $entry.Bytes) -or
         ($entry.Mode -cne '0' -and ($entry.Bytes -isnot [byte[]] -or $entry.Bytes.Length -gt 16777216))) { throw 'private staging requires explicit removal or bounded ordinary raw file bytes' }
     $bytes = if ($entry.Mode -ceq '0') { $null } else { ,([byte[]]$entry.Bytes.Clone()) }
-    if ($null -ne $bytes) { $total += $bytes.Length }
-    if ($total -gt 536870912) { throw 'private staging payload exceeds the combined bound' }
     $captured.Add([pscustomobject]@{ Path = [string]$entry.Path; Mode = [string]$entry.Mode; Bytes = $bytes })
   }
   if ($captured.Count -eq 0) { return }

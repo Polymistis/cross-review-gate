@@ -597,7 +597,7 @@ function Open-CrgPairedOperationLock {
     $lockPath = Join-Path $PublicGitDirectory 'crg-operation.lock'
     if ($null -eq $handle -or $handle.IsInvalid) {
       if ($errorCode -eq 32) { throw "paired operation lock '$lockPath' is open elsewhere (Win32 error 32, sharing violation); if another gate operation is running in this worktree, retry after it finishes" }
-      if ($errorCode -eq 5) { throw "paired operation lock '$lockPath' cannot be opened for writing (Win32 error 5, access denied); check this process's write access to the worktree's Git directory and the lock file's read-only attribute. Inside an agent sandbox that keeps Git metadata read-only, rerun the same launcher command outside the sandbox with approval" }
+      if ($errorCode -eq 5) { throw "paired operation lock '$lockPath' cannot be opened for writing (Win32 error 5, access denied); check the installed gate worker account's write access to the worktree's Git directory and the lock file's read-only attribute" }
       throw "paired operation lock '$lockPath' is unavailable (Win32 error $errorCode); preserve the occupant"
     }
     if (-not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) { throw "paired operation lock '$lockPath' is not an ordinary single-link file; preserve the occupant for explicit repair" }
