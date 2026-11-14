@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.7.2** (Windows / PowerShell) — the authoritative value is the
+**Version 2.7.3** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.7 supplies a read-only central launcher and an installation-managed

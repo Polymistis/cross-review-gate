@@ -7915,13 +7915,35 @@ function Install-CrgRuntimeHost {
   $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -Serve'
   $startup = '"' + $shell + '" ' + $arguments
   if ($startup.Length -gt 260) { throw 'runtime store path exceeds the Windows Run startup command bound; host installation is incomplete' }
-  $name = 'CrossReviewGate-' + (Get-CrgSha256HexOfBytes -Bytes ([Text.Encoding]::UTF8.GetBytes($Store.ToUpperInvariant())))
+  # Explorer reads the Run key at logon and stops at a value name it cannot
+  # enumerate. The original name, the prefix plus the full store hash, ended
+  # that enumeration at every logon from 2026-10-25 to 2026-11-13: neither the
+  # host nor any entry after it started, while a shorter name ahead of it
+  # launched. The exact limit is not established, so the name carries only a
+  # store-hash prefix; do not lengthen it.
+  $storeHash = Get-CrgSha256HexOfBytes -Bytes ([Text.Encoding]::UTF8.GetBytes($Store.ToUpperInvariant()))
+  $name = 'CrossReviewGate-' + $storeHash.Substring(0, 16)
+  $legacyName = 'CrossReviewGate-' + $storeHash
   $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
   try {
-    $previous = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    if ($null -ne $previous -and ($key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::String -or $previous -isnot [string] -or -not [string]::Equals($previous, $startup, [StringComparison]::Ordinal))) { throw 'gate startup registration is occupied by a different command; preserve the existing entry' }
-    if ($null -eq $previous) { $key.SetValue($name, $startup, [Microsoft.Win32.RegistryValueKind]::String); $key.Flush() }
-    if (-not [string]::Equals([string]$key.GetValue($name), $startup, [StringComparison]::Ordinal)) { throw 'gate startup registration readback differs from the installed command' }
+    # Presence comes from the value-name list: GetValue returns its default for
+    # a value whose type .NET cannot decode, which would read as absent. A
+    # failed enumeration throws and leaves the installation incomplete.
+    $present = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($valueName in $key.GetValueNames()) { [void]$present.Add($valueName) }
+    # A remaining legacy-name entry still ends enumeration before this entry.
+    # The registry has no conditional delete: removing it here could delete a
+    # value another writer put there after validation, so installation names
+    # it and stops, and the operator removes it.
+    if ($present.Contains($legacyName)) {
+      throw "legacy gate startup entry '$legacyName' in HKCU\Software\Microsoft\Windows\CurrentVersion\Run stops Explorer before the gate host starts at logon; host installation is incomplete. Remove it with: reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v $legacyName, then rerun this installation"
+    }
+    if (-not $present.Contains($name)) { $key.SetValue($name, $startup, [Microsoft.Win32.RegistryValueKind]::String); $key.Flush() }
+    $installed = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if ($key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::String -or $installed -isnot [string] -or -not [string]::Equals($installed, $startup, [StringComparison]::Ordinal)) {
+      if ($present.Contains($name)) { throw 'gate startup registration is occupied by a different command; preserve the existing entry' }
+      throw 'gate startup registration readback differs from the installed command'
+    }
   } finally { $key.Dispose() }
   if (Test-CrgHostAvailable -Store $Store) { Write-Host '[bootstrap] installed local gate host is available.'; return }
   $process = Start-Process -FilePath $shell -ArgumentList $arguments -WorkingDirectory $Store -WindowStyle Hidden -PassThru

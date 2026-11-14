@@ -581,6 +581,16 @@ The host starts during launcher installation/migration and at user logon through
 a verified per-user Windows Run entry. A conflicting entry is preserved and
 refused. Windows limits that startup command's length; installation reports an
 incomplete host installation if the selected store path exceeds the bound.
+Explorer also stops reading the Run key at an over-long value name, so the
+entry's name carries only a store-hash prefix. The full-hash entry an earlier
+installer wrote kept the host and every later Run entry from starting at
+logon. While that entry remains, installation reports an incomplete host
+installation and names it with its removal command: the registry offers no
+conditional delete, so the operator removes it and reruns the installation.
+A store migrated from ABI 2 reruns `-UpgradeRuntimeLauncher` with the release
+ID recorded in `launcher-upgrade-v3`; a store installed at ABI 3 reruns
+`-InstallRuntimeLauncher` with the release ID recorded in `launcher-install`.
+Neither rerun changes a launcher file.
 Compatible activation changes the next worker's runtime without restarting
 project sessions. All mutable operation state remains owned by the project.
 
