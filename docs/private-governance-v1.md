@@ -182,7 +182,7 @@ retained history holds either shape or a Grok review run under 2.4.0 or later,
 do not roll back below 2.4.0, even after its configuration changes back.
 
 Grok artifacts record the requested model and effort. Live acceptance (adapter
-self-check, review session, follow-up promotion) requires both to equal the
+self-check, review session) requires both to equal the
 current table entry for the governing profile. Historical validation (retention,
 push guards) requires governing `grok-fallback` enablement and a model and
 effort the governing selection could have run (`Get-CrgGrokAllowedIdentities`):

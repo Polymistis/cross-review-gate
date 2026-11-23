@@ -1045,7 +1045,7 @@ function Get-VerdictSuspectReason {
     # sum check above catches a whole-block miscount, but NOT a per-category
     # imbalance another category compensates (e.g. `PLAN-DRIFT: 2` with 1 row
     # while a sibling over-rows to keep the sum). dispatch-checklist's
-    # Get-CategoryFindings would misparse THAT, so both log-consumers reject it.
+    # Get-CategoryFindings would misparse THAT, so the log consumers reject it.
     # $inCatBlock stays set across a `none` block (declRemaining 0) so an
     # unexpected indented row under `none` is caught as overfill.
     $inCatBlock = $false

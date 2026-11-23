@@ -84,8 +84,8 @@ Matching files alone cannot supply any of those guarantees.
 Each existing review host imports the paired modules from the executed release
 only for its distinct PreparedPair parameter set, after legacy function
 declarations and before any legacy native initialization. The paired path skips
-ambient Git scope capture, loose prompt/mode/consistency lookup, public/default
-output selection, legacy follow-up routing and destructive log pruning. Legacy
+ambient Git scope capture, loose prompt/mode/consistency lookup and
+public/default output selection. Legacy
 parameter sets retain the existing behavior.
 
 `Open-CrgPairedHostInput` in `paired-preparation` accepts the internal invocation
@@ -162,40 +162,26 @@ permits cleanup or fallback. An uncertain failed launch carries the retained
 session and observation in exception data for subsequent cancellation/drain.
 These functions do not replace the live coordinator or successful artifact reader.
 
-Paired QUALITY capture uses `Write-CrgPairedFollowups -HostInput -VerdictText
--VerdictFile -Backend`. The private attempt receives an exclusively created
-`followups.pending.json` record with kind `paired-followups-v1`, complete paired
-identity, artifact basename and bounded structural finding fields: severity,
-validated citation, canonical finding digest and optional SCOPED claim. Only the
-first nonblank indented body line can supply that claim; the digest still covers
-the complete finding body. Model prose remains in the verdict artifact. Claims
-are not adjudicated authority and do not mint legacy single-tree tags or prune
-exemptions. Paired artifacts are retained. `Publish-CrgPairedFollowups` derives
-the same structural rows from the current successful artifacts after complete
-review and immutable receipt retention, before publication or attachment
-activation. Missing or malformed pending sidecars cannot suppress findings:
-the coordinator independently validates and parses the captured verdict bytes.
-Resume performs the same promotion using the fresh review, after retaining the
-recovery correlation record; an older PASS supplies no current rows.
-
-The private index is an append-only directory at
-`<private-git-dir>/crg-review-state/followups/`. Each `<sha256>.json` transaction
-has kind `paired-followups-index-v1`, receipt/input/runtime identities and
-successful-attempt finding rows with private artifact paths and digests.
-`publicationEvidence: false` is literal: reviewed findings can remain indexed
-when later publication fails, and only the completed pair proves landing.
-SCOPED claims remain unadjudicated data. No legacy index tags, automatic pruning
-or authority to dismiss a finding follows from promotion.
-
-Promotion creates and flushes a held temporary file, validates complete bytes,
-then publishes by same-parent no-replace rename under project operation custody.
-A matching existing transaction is validated before idempotent acceptance;
-conflicting contents are preserved. Unpublished `.crg-followups-*` files are
-failure evidence, never index entries. Readers accept only complete UTF-8 JSON
-with the matching payload digest and schema, not a filename alone. Triage copies
-findings into privately reviewed project work; indexed transactions are not edited.
-Capture or promotion failure warns with the preserved location and returns a
-warning status without converting a passing QUALITY verdict into a blocker.
+A passing paired review prints the non-blocking findings of each successful
+attempt to the submitting session: one line with the provider and the verdict
+file path, then QUALITY findings citing product code or configuration, QUALITY
+findings citing records or documentation, and NOTE findings, in that order.
+One reminder line follows, telling the session to delete a task the change
+completes from its task lists once the change has landed: the session prints
+it before central publication commits the result or recovery finalizes the
+retained result. The print is
+console output only; a print failure is reported on standard error, leaves
+the PASS unchanged, and does not stop the next verdict's print or the
+reminder. No separate follow-up record is written; the
+findings stay in the review evidence. Each attempt's directory under
+`<private-git-dir>/crg-review-state/runs/` keeps the coordinator's
+`transcript.log`, the attempt's verdict when one was produced, and any
+exhaustion sidecar or Grok provider response file the attempt wrote. When
+central publication commits the reviewed result, receipt retention also
+stores each counted attempt's transcript, and its verdict and exhaustion
+sidecar when the receipt records them, as `leg-N-attempt-N.transcript`,
+`.verdict` and `.exhaustion` records under the private
+`refs/crg-pairs/<receipt-sha256>` (`docs/paired-retention-v1.md`).
 
 `Write-CrgPairedExhaustionSidecar -HostInput -Path -Backend -SignatureClass
 -ProcessOutcome` exclusively writes the existing `token-exhaustion` kind with
@@ -649,9 +635,8 @@ public-only identity as equivalent. Compare both tree OIDs, unit digest,
 descriptor digest and displayed diff digest with the live parent's pins, plus
 actual backend, required passes, current child exit and semantic result.
 
-Existing private follow-up capture and exhaustion evidence must retain this
-same paired identity before attached mode activates. A public-only tree/diff
-SCOPED key cannot grant a paired prune exemption. Exhaustion still requires the
+Existing private exhaustion evidence must retain this
+same paired identity before attached mode activates. Exhaustion still requires the
 existing positive classification and complete-leg automatic fallback. Claude
 may emit an exhaustion sidecar and exit before constructing a verdict artifact;
 record positive absence rather than fabricating a successful/empty verdict.
@@ -660,12 +645,12 @@ exhaustion permits automatic substitution without distinct effective providers;
 mandatory pass coverage remains coordinator policy. This contract introduces no provider, quota switch or review bypass.
 
 The smallest downstream change is an explicit paired-context arm in existing
-capture/SCOPED authority resolution and artifact projection. Supply the captured
-preceding and candidate document bytes with original domain/path/OID, private
-capture destinations and paired identity; do not let a late default resolve
+SCOPED authority resolution and artifact projection. Supply the captured
+preceding and candidate document bytes with original domain/path/OID and
+paired identity; do not let a late default resolve
 authority documents through public Git, current private HEAD, loose working
-files or public logs. The same rule covers output-path selection, follow-up
-index/prune decisions, completion capture and exhaustion sidecars. All paired
+files or public logs. The same rule covers output-path selection, completion
+capture and exhaustion sidecars. All paired
 evidence remains private. An unchanged legacy reader must refuse paired input
 or report unsupported format, never accept a partial single-tree projection.
 No existing reader is broadened by this extraction unit.

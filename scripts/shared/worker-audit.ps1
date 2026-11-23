@@ -953,7 +953,7 @@ function Get-VerdictSuspectReason {
     # sum check above catches a whole-block miscount, but NOT a per-category
     # imbalance another category compensates (e.g. `PLAN-DRIFT: 2` with 1 row
     # while a sibling over-rows to keep the sum). dispatch-checklist's
-    # Get-CategoryFindings would misparse THAT, so both log-consumers reject it.
+    # Get-CategoryFindings would misparse THAT, so the log consumers reject it.
     # $inCatBlock stays set across a `none` block (declRemaining 0) so an
     # unexpected indented row under `none` is caught as overfill.
     $inCatBlock = $false
@@ -1007,10 +1007,9 @@ function Get-VerdictSuspectReason {
 # This is the era-NEUTRAL severity class of the verdict. Whether a QUALITY-class
 # verdict represents an ABORTED round is ERA-DEPENDENT: under the OLD contract the
 # gate aborted on QUALITY (exit 1), so a QUALITY verdict == an aborted round; the
-# 2026-07 severity contract made QUALITY NON-BLOCKING (exit 0, routed to
-# logs/review-followups.md), so a QUALITY verdict produced by a
-# post-contract wrapper is a PASSING round. BLOCKED always == a gate-BLOCKING
-# (aborted) round in every era; PASS always == a landing round.
+# 2026-07 severity contract made QUALITY NON-BLOCKING (exit 0), so a QUALITY
+# verdict produced by a post-contract wrapper is a PASSING round. BLOCKED always
+# == a gate-BLOCKING (aborted) round in every era.
 # Get-EraAwareRoundClass applies the era at RECORD CREATION using the artifact's
 # REVIEW-SEVERITY-CONTRACT header stamp (Test-VerdictContractStamp), so the class
 # stored on each record is already era-aware -- the attempt grouping +
@@ -1165,7 +1164,7 @@ function Get-VerdictScope {
 # a local Get-Date). Returns $null when the name has no parseable prefix.
 #
 # The wall-clock value is resolved under an explicit zone (the audit host's
-# local zone by default; the suite pins a DST zone). A value the zone cannot
+# local zone by default). A value the zone cannot
 # resolve to ONE instant -- a spring-forward gap time that never occurred,
 # a fall-back hour that occurred twice -- yields no epoch and a named
 # reason: choosing either instant silently would merge or split attempt
@@ -1442,7 +1441,7 @@ function Invoke-CommitGateCorrelation {
   # verdict" would let ONE staged verdict mark MULTIPLE commits HasPass -- inflating
   # passingTotal and wrongly making confidence `tight`. Time-disambiguation
   # attributes a shared-tree verdict to the commit it actually created (the staged
-  # review's mtime ~ that commit's committer time); a duplicate-tree sibling stays
+  # review's filename epoch ~ that commit's committer time); a duplicate-tree sibling stays
   # UNMATCHED unless it has its OWN distinct PASS verdict in range. Parallel arrays
   # (sized up front) so a $null passing round stores cleanly and the pass-2
   # confidence flag can read the predecessor's HasPass. (Codex BLOCKER: tree-only
@@ -1578,7 +1577,7 @@ function Invoke-CommitGateCorrelation {
         # A passing round exists, NO aborted round, AND that passing round is a TRUE
         # CLEAN (empty categories). A contract-stamped QUALITY verdict era-maps to a
         # non-aborted PASS (Class 'PASS') but KEEPS its finding categories, so it is NOT
-        # counted first-attempt-clean -- it carries a non-blocking follow-up entry, and
+        # counted first-attempt-clean -- it carries non-blocking QUALITY findings, and
         # counting that landing clean would hide the quality debt (a NOTE-only pass
         # likewise carries categories and is not a genuine CLEAN).
         # A tied PASS artifact on this row is UNDECIDED evidence about this very
@@ -1602,11 +1601,10 @@ function Invoke-CommitGateCorrelation {
 # From an ORDERED (chronological) list of aborted-round verdict records, the
 # reviewer categories that appear in >=2 CONSECUTIVE blocking rounds -- the
 # single-instance-fix signal (the worker fixed one instance of a category but the
-# next round raised the same category again). Returns the distinct repeating
-# category names (in $CatNamesAll order). A category raised in rounds 1 and 3 but
-# NOT 2 is NOT consecutive and is not reported here (a genuinely re-opened class,
-# not a same-round persistence). One or zero rounds -> no repeats.
-# Consecutive-repeat categories, split by whether the ORDER decides them.
+# next round raised the same category again) -- split by whether the ORDER
+# decides them. A category raised in rounds 1 and 3 but NOT 2 is NOT consecutive
+# and is not reported here (a genuinely re-opened class, not a same-round
+# persistence). One or zero rounds -> no repeats.
 #
 # Consecutive detection reads ADJACENCY, and attempts stamped in one second
 # carry no order evidence, so each category is judged against EVERY ordering
@@ -1617,10 +1615,11 @@ function Invoke-CommitGateCorrelation {
 # never as a silent zero. Suppressing per CATEGORY matters: an earlier definite
 # X/X repeat must survive an unrelated later tie, which a whole-row verdict
 # would have erased.
-# Returns @{ Invariant = @(...); Suppressed = @(...) }. PURE.
+# Returns @{ Invariant = @(...); Suppressed = @(...) }, each in $CatNamesAll
+# order. PURE.
 function Resolve-RepeatCategories {
   param([object[]]$OrderedRounds)
-  # Two QUANTIFIERS over the admissible arrangements, decided EXACTLY and per
+  # QUANTIFIERS over the admissible arrangements, decided EXACTLY and per
   # category -- no enumeration, so no budget and no cap that could erase
   # evidence:
   #   PROVEN    category X is adjacent to itself under EVERY arrangement
@@ -1634,7 +1633,7 @@ function Resolve-RepeatCategories {
   # quantifier -- a three-member block whose members all carry X has SOME pair
   # adjacent in every arrangement while no PARTICULAR pair is, so reading pairs
   # independently reports "possible" for a repeat that is forced (merge-panel
-  # BLOCKER 2026-08-30). Both quantifiers are therefore decided over the whole
+  # BLOCKER 2026-08-30). The quantifiers are therefore decided over the whole
   # block-and-boundary structure at once, by counting:
   #
   #   POSSIBLE(X): some block holds two X-bearers, or two ADJACENT blocks each
@@ -1661,7 +1660,6 @@ function Resolve-RepeatCategories {
   $invariantSet = New-Object 'System.Collections.Generic.HashSet[string]'
   $possibleSet = New-Object 'System.Collections.Generic.HashSet[string]'
   foreach ($cat in $universe) {
-    # Per block: how many members carry this category, and how many do not.
     $bear = New-Object 'System.Collections.Generic.List[int]'
     $free = New-Object 'System.Collections.Generic.List[int]'
     foreach ($b in $blocks) {
@@ -1711,7 +1709,7 @@ function Resolve-RepeatCategories {
   $invariant = New-Object 'System.Collections.Generic.List[string]'
   foreach ($c in $invariantSet) { $invariant.Add([string]$c) | Out-Null }
   foreach ($c in $possibleSet) { if (-not $invariantSet.Contains([string]$c)) { $suppressed.Add([string]$c) | Out-Null } }
-  return @{ Invariant = @($invariant.ToArray() | Sort-Object); Suppressed = @($suppressed.ToArray() | Sort-Object) }
+  return @{ Invariant = @($script:CatNamesAll | Where-Object { $invariant.Contains($_) }); Suppressed = @($script:CatNamesAll | Where-Object { $suppressed.Contains($_) }) }
 }
 
 
@@ -2571,9 +2569,10 @@ $windowEndEpoch = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) + 3600
 # ---------------------------------------------------------------------------
 # ONE producer event can be enumerated from SEVERAL scanned dirs: the merge
 # gate passes its run-owned dirs beside the central logs, and consolidation
-# copies each artifact between them under the SAME producer name. Identity is
-# therefore the producer NAME plus the evidence the file carries, not the path
-# it was found at.
+# copies each artifact between them under the SAME producer name. Artifacts are
+# therefore grouped by the backend their header declares ('legacy' without a
+# header) and the producer NAME, not the path each was found at. The key only names a
+# group to check for collisions; it does not identify one producer event.
 $seenArtifactByName = New-Object System.Collections.Hashtable([System.StringComparer]::OrdinalIgnoreCase)
 $duplicateArtifactCopies = New-Object 'System.Collections.Generic.List[string]'
 $commitGateAll = New-Object 'System.Collections.Generic.List[object]'
@@ -2994,8 +2993,7 @@ foreach ($dirRaw in $ReviewsDir) {
 foreach ($copyKey in @($seenArtifactByName.Keys)) {
   # .ToArray() on the hashtable's List value, never `@(...)`: array-wrapping a
   # generic List read out of a hashtable throws "Argument types do not match"
-  # under PS 5.1 -- and this branch only runs when a collision EXISTS, so no
-  # unit arm reached it. The end-to-end arm did, on its first run.
+  # under PS 5.1.
   $copySet = $seenArtifactByName[$copyKey].ToArray()
   if ($copySet.Count -lt 2) { continue }
   $copyDirs = @($copySet | ForEach-Object { "``$($_.Dir)``" }) -join ', '
@@ -3084,8 +3082,8 @@ foreach ($rec in @($commitGateAll.ToArray() + $otherAll.ToArray())) {
   } elseif ([long]$rec.Epoch -gt $lastCommitEpoch -and [long]$rec.Epoch -le $windowEndEpoch) {
     $suspectScanWarn.Add("[$($rec.Backend)] $($rec.Name) -- $($rec.SuspectReason)$sidecarNote") | Out-Null
   } else {
-    # CATCH-ALL, and deliberately not a fourth window test: the two scan-range
-    # branches above both EXCLUDE their lower bound, so a record stamped exactly
+    # CATCH-ALL, and deliberately not another window test: the scan-range
+    # branches above each EXCLUDE their lower bound, so a record stamped exactly
     # at the range's start second -- the base commit's own second -- matched
     # neither and fell out of the taxonomy entirely, leaving the counts and the
     # completeness flags untouched while blocking evidence went unreported
@@ -3878,8 +3876,8 @@ if ($orderAmbiguousCommitAttempts.Count -gt 0) {
   [void]$sb.AppendLine('## Same-second ORDER-UNSTABLE commit-gate attempts (NON-authoritative)')
   [void]$sb.AppendLine('')
   [void]$sb.AppendLine("$($orderAmbiguousCommitAttempts.Count) attempt(s) come out differently depending on the order of artifacts")
-  [void]$sb.AppendLine('the producers stamped in the SAME SECOND -- an order nothing records. Under')
-  [void]$sb.AppendLine('one reading these artifacts are one attempt, under another they are two, and')
+  [void]$sb.AppendLine('the producers stamped in the SAME SECOND -- an order nothing records. Different')
+  [void]$sb.AppendLine('readings group these artifacts into different attempts, and')
   [void]$sb.AppendLine('the difference changes the outcome, so they are EXCLUDED from every')
   [void]$sb.AppendLine('correlation statistic and listed here instead:')
   foreach ($oca in @($orderAmbiguousCommitAttempts)) {
@@ -4143,7 +4141,7 @@ if ($unreadableSuspects.Count -gt 0) {
 [void]$sb.AppendLine('never grants, counts, or erases). Aborted rounds are the')
 [void]$sb.AppendLine('blocking commit-gate reviews: BLOCKER always aborts; QUALITY aborts only for an')
 [void]$sb.AppendLine('artifact WITHOUT the REVIEW-SEVERITY-CONTRACT header stamp -- the 2026-07 severity')
-[void]$sb.AppendLine('contract made QUALITY NON-BLOCKING (exit 0, recorded as a follow-up) and its')
+[void]$sb.AppendLine('contract made QUALITY NON-BLOCKING (exit 0) and its')
 [void]$sb.AppendLine('wrappers stamp every artifact, so a stamped QUALITY verdict is a PASS, not an')
 [void]$sb.AppendLine('aborted round. An unstamped QUALITY artifact is conservatively an aborted round')
 [void]$sb.AppendLine('regardless of date: a stale branch running its pre-contract HEAD gate can emit')

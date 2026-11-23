@@ -1,11 +1,13 @@
-# Review feedback v1: findings files, TASKS.md, the PASS line and blocked retries
+# Review feedback v1: findings files, the non-blocking findings notice, the PASS line and blocked retries
 
 Audit source: a consumer project's corrective audit of 2026-10-07. It
 found that NOTE findings were not kept anywhere a later session would see
-them and that a gate PASS was being read as approval of target behaviour or
-deployment. This design covers those gaps. The audit also found that
-findings raised against a file were not shown to the next review of that
-file; section 2 says why that stays so. Section 5 covers a
+them, that findings raised against a file were not shown to the next review
+of that file, and that a gate PASS was being read as approval of target
+behaviour or deployment. Section 3 answers the first: a review is for the
+session that submitted the change, so its findings are shown to that
+session and none is recorded as work for a later session. Section 2 says
+why the second stays so, and section 4 covers the third. Section 5 covers a
 gap the review of this design itself exposed: a blocked commit was retried
 with only the cited line of each finding fixed, so each review round found
 the next instance of the same class. The review prompt's change-propagation
@@ -16,9 +18,14 @@ duties are separate and documented where they live.
 Ordinary review path of both review wrappers (`scripts/codex/auto-review.ps1`,
 `scripts/claude/auto-review.ps1`), which also serve the commit gate and the
 merge gate; the blocked-retry check (section 5) applies to staged reviews,
-the commit gate's. PreparedPair (paired) reviews and the Grok adapter keep their own
-follow-up path (`Write-CrgPairedFollowups`, the paired private index); they
-get only the coverage wording of the PASS line below.
+the commit gate's. Findings files and the blocked-retry check do not apply
+to PreparedPair (paired) reviews or the Grok adapter. The Grok adapter
+prints only the coverage wording of
+the PASS line below. The paired session prints that wording in its own PASS
+line and then, for each passing attempt, a line naming the provider and the
+verdict file, then that verdict's non-blocking findings through the notice
+of section 3 (`Write-CrgPairNonBlockingFindings`), and then the task
+reminder (section 4).
 
 ## File identity
 
@@ -30,7 +37,8 @@ Only the volume root is opened by path. Each directory below it is opened by its
 parent's handle, without following a link, with directory-listing access and
 delete sharing withheld, so it cannot be renamed or deleted meanwhile, and
 checked to be an ordinary directory. A missing folder the gate may create
-(`logs`, `review-findings`, `.git/info`) is created relative to its held
+(`logs`, `review-findings`, or a submodule's `crg-review-findings`,
+section 1) is created relative to its held
 parent. Paths are compared exactly, never ignoring letter case: in a
 case-sensitive folder `logs` and `LOGS` are different objects, so a held
 directory is reused only for the same spelling. Every file is then opened by
@@ -41,16 +49,11 @@ single-link whenever the handle may change or delete it. No full path is
 resolved again after a check, so a directory turned into a link afterwards
 (an empty held directory can still gain a junction) cannot redirect a name.
 Every read, change and delete goes through the handle that was checked:
-content reads are bounded (1 MiB, strict UTF-8; the task count in section 4
-only scans line prefixes and has no limit), a file is created only through a
+content reads are bounded (1 MiB, strict UTF-8), a file is created only through a
 no-follow CREATE_NEW, and the only explicit deletions set the delete
 disposition on the held handle, and only on files this run created through
-that handle: the recovery copies (`TASKS.md`'s and the exclude file's) and
-their `.partial` forms (section 3), a `TASKS.md` this run created and failed
-to write, and a findings file or `PRIOR-BLOCKERS.txt` this run created and
-failed to write (neither is yet a record). Apart from these, the main checkout's `index.lock`, which
-the task write creates delete-on-close (section 3), is removed by the
-system when its handle closes, the process's end included.
+that handle: a findings file or `PRIOR-BLOCKERS.txt` this run created and
+failed to write (neither is yet a record).
 No review record is ever deleted. Text a file must hold exactly (a path
 with a lone UTF-16 surrogate, which a Windows name may contain) is refused
 before anything is written, since UTF-8 would store U+FFFD and the file
@@ -60,63 +63,52 @@ change (a last name ending in whitespace, or any name ending in a dot,
 which .NET Framework drops; `.` and `..` segments are resolved first,
 keeping every name) is refused rather than replaced by the folder it would
 then name, as is a path that is not a full one (a drive root or a share):
-a main checkout so named is not confirmed, with that
-reason, and a working tree's Git directory so named gives no retry key
-(section 5). Folder
+a common Git directory so named gives the review no repository, so no
+findings file is written or read, and a working tree's Git directory so
+named gives no retry key (section 5). Folder
 listings go by path but only supply names, each then opened relative to the
 held folder. Work left undone is reported, as a WARN or, in the review
-evidence, a `NOT SHOWN` or `unavailable` line. The main checkout and its Git directory are confirmed once, while
-held, when the review's Git context is resolved, and their identities
-(volume serial and file ID) are kept with their paths; every later use
-(task writing, the task counts) holds them again
-and refuses a folder that is no longer the one confirmed
-(`Enter-CrgMainCheckoutBinding`). The identities of the common Git
-directory and of the logs folder's parent are kept the same way even when
-there is no main checkout, and writing a findings file or scanning for
-blocked rounds first holds the common Git directory and the parent of
-every findings folder written or read (section 1) and refuses one that changed
+evidence, a `NOT SHOWN` or `unavailable` line. When the review's Git
+context is resolved (`Resolve-ReviewGitContext`), the identities (volume
+serial and file ID) of the common Git directory, of the logs folder's
+parent and of the working tree's own Git directory are read and kept with
+their paths. Writing a findings file or scanning for blocked rounds first
+holds the common Git directory and the parent of every findings folder
+written or read (section 1) and refuses one that is no longer the folder
+whose identity was kept
 (`Enter-CrgReviewLogsBinding`). So a record goes into, and is matched
 against, the repository the review started in; the logs and findings
 folders are then reached through those held entries. A file's name is
 checked as stored on its held handle (`StoredName`), since a
-case-insensitive folder opens `x.FINDINGS` for `x.findings` and
-`tasks.md` for `TASKS.md`. That first confirmation
-(`Resolve-CrgMainCheckout`) has to discover the repository: its Git
-children run from the review's folder and from the candidate checkout,
-isolated from inherited repository selectors (`GIT_DIR`, `GIT_INDEX_FILE`
-and the rest of `Get-CrgGitSelectorEnvironmentKeys`), and Git run there
-must report the same common Git directory and top level, with that common
-directory as the checkout's own Git directory. Every Git child
-after it is isolated the same way and names the repository explicitly
-(`--git-dir` and `GIT_COMMON_DIR` set to the common Git directory). The
-task queries (`Read-ReviewMainGitBytes`) also set `--work-tree` to the main
-checkout, whose Git directory the common one is, so they read that
-checkout's own index, not a hook's. They never
-rediscover the repository through the checkout's `.git` entry
-or a `commondir` file in the Git directory: in a submodule or a
-`--separate-git-dir` checkout that entry is a file naming the Git
-directory, and either file can be rewritten while the folders stay held.
-A path Git names for a file the gate changes or creates (`info/exclude`,
-the recovery copies, the index and its lock) must be exactly that name in
-the confirmed Git directory, or no task is added
-(`Resolve-ReviewGitDirPath`).
+case-insensitive folder opens `x.FINDINGS` for `x.findings`. The
+repository is discovered once (`Resolve-CrgMainCheckout`): its Git
+children run from the review's folder and from the candidate main
+checkout, isolated from inherited repository selectors (`GIT_DIR`,
+`GIT_INDEX_FILE` and the rest of `Get-CrgGitSelectorEnvironmentKeys`). The
+first must report the same common Git directory the review used; it also
+names the working tree's own Git directory. Git run in the candidate
+checkout must report that common directory and the checkout as its top
+level, with both folders held, and the common directory's identity is
+taken from that hold. Where no main checkout is confirmed, that identity
+is read by path, as the identity of the working tree's own Git directory
+always is.
 
-## 1. Findings file per passing verdict
+## 1. Findings files
 
-When a wrapper's verdict passes (exit 0) and it has findings, the wrapper
-writes one findings file in the
+When a staged review blocks, the wrapper records the round (section 5) as
+one findings file in the
 repository's findings folder (beside the review logs, or for a submodule
 inside its common Git directory, below):
 
     <logs>/review-findings/<backend>-review-<written, UTC yyyyMMdd-HHmmss>-<12 hex>.findings
 
-`<logs>` is the folder that holds `review-followups.md`
-(`Get-FollowupIndexDir`: `logs` beside the common Git directory, which is
+`<logs>` is the folder above the review logs
+(`Get-ReviewLogsFolder`: `logs` beside the common Git directory, which is
 the main checkout's in the usual layout). The folder is fixed by the
 common Git directory (`Get-ReviewFindingsLocation`), so every working tree
 of a repository writes and reads the same records and no checkout change
-moves them. A submodule is the exception to `<logs>`: its follow-up index
-is in the current working tree's `logs`, which each linked worktree has its
+moves them. A submodule is the exception to `<logs>`: its review logs
+are in the current working tree's `logs`, which each linked worktree has its
 own of, so its findings files go in `crg-review-findings` inside its common
 Git directory (`.git/modules/<name>/crg-review-findings`), never committed.
 Placing them under the submodule's main checkout was tried during 2.6.0
@@ -129,11 +121,11 @@ those files drops out of that working tree's scans. A non-submodule
 repository's earlier place is this same one. When Git cannot name the
 repository, or the common Git directory or the findings folder's parent is
 no longer the folder confirmed when the review started, no findings file
-is written (a WARN says why) and no task is added. Several
+is written (a WARN says why). Several
 repositories can share it (separate Git directories under one parent), so
 every file names its repository (below). A
 separate folder keeps these files out of `logs/<backend>/reviews`, whose
-age-prune, trend and checklist readers have their own file-name rules. The
+trend and checklist readers have their own file-name rules. The
 time in the name is the file's `written` time to the second, so the
 blocked-round scan (section 5) can pass over old files by name alone. The
 12 hex digits are the start of
@@ -154,33 +146,23 @@ Content (UTF-8 lines, each ending with LF, written once, never edited):
     verdict <verdict locator>
     backend codex|claude
     written <UTC, yyyy-MM-ddTHH:mm:ssZ>
-    finding QUALITY|NOTE <sha256 hex digest> <path>:<line>[:<col>] or -
+    retry-worktree <the working tree's own Git directory, absolute>
+    retry-head <the HEAD commit id, or unborn>
+    finding BLOCKER <sha256 hex digest> <path>:<line>[:<col>] or -
     cite <path>:<line>[:<col>]
     > <the finding's text, escaped, one line of it per quote line>
     end
 
-`finding` blocks repeat zero or more times; `-` stands for no opening
+`finding` blocks repeat one or more times; `-` stands for no opening
 citation. Each `finding` line is followed
 by zero or more `cite` lines, the finding's further citations (below), no
-two the same and none repeating the opening one. A blocked round (section 5) uses the same
-format and name with two more lines after `written`,
-
-    retry-worktree <the working tree's own Git directory, absolute>
-    retry-head <the HEAD commit id, or unborn>
-
-one or more `finding` blocks, all `BLOCKER`; a
-passing review's file has neither retry line and no `BLOCKER` finding. The
-writer refuses any other mix, and the reader's byte-for-byte check below
-holds both kinds to it. Each `finding` line and its `cite` lines are
+two the same and none repeating the opening one. This is the only valid
+form: a file without both retry lines, or with a finding other than
+`BLOCKER`, is not a valid findings file. Each `finding` line and its `cite` lines are
 followed by one or more quote lines holding the finding's text (the lines its digest covers)
 escaped and quoted exactly as in `COMMIT-LOG.txt` (injective `\xNN`
 escaping, `> ` prefix on every content line), so the
 quote lines hold only printable ASCII and none can pass for a format line.
-Records written before carry-forward was removed (section 2) can hold
-`carried <sha256 hex digest> <findings file name>` lines before `end`. The
-reader checks and ignores them in a passing review's record, so such a
-record is not counted invalid, and refuses them in a blocked round, which
-never held them; the writer no longer produces them.
 The file is UTF-8: the repository, the verdict locator and the retry
 working tree, all paths, may hold any other character except the ASCII
 control characters (U+0000 to U+001F and U+007F; a Windows name may hold
@@ -198,16 +180,14 @@ partly written file invalid.
   record to its repository: the blocked-round scan (section 5) uses only its
   own repository's files.
   A run without one writes no findings file.
-- The verdict locator is the follow-up index's (`Get-ReviewArtifactLocator`):
+- The verdict locator (`Get-ReviewArtifactLocator`) is
   the repository-relative central path when the verdict ends up in
   `logs/<backend>/reviews`; otherwise the path relative to the logs folder's
-  parent (the follow-up index's locator root, which is the main checkout in
+  parent (the main checkout in
   the usual layout) when the verdict lies inside it, else the absolute path.
-- A finding is a column-one `QUALITY:`, legacy `NON-BLOCKER:` (recorded as
-  QUALITY) or `NOTE:` line of the verdict artifact, or for a blocked round
-  a column-one `BLOCKER:` line. The digest is
+- A finding is a column-one `BLOCKER:` line of the verdict artifact. The digest is
   `Get-CaptureFindingDigest` over the finding's lines. The citation is the
-  follow-up index's strict `path:line[:col]` citation stored as a repository
+  strict `path:line[:col]` citation (`Get-ReviewFindingCitation`) stored as a repository
   path: backslashes become `/` and leading `./` is removed. Reviewers work
   from the review root, whose `REVIEW_SRC/` folder is the copy of the
   reviewed tree. A citation written relative to that root
@@ -239,31 +219,26 @@ partly written file invalid.
   and the refusal of a path starting with `/` decide; the live checkout is
   not read instead.
 - The file is self-contained: every later reader (the blocked-round scan of
-  section 5, a person or agent following a task in section 3) gets the
-  severity, citations and text
+  section 5, or a person reading the file) gets the severity, citations and text
   from it alone, through one parser that decodes each text (strict UTF-8)
   and checks it against its digest, and accepts the file only when the
-  writer, given the parsed values, would produce it byte for byte once a
-  passing review's legacy `carried` lines (above) are dropped (so a
+  writer, given the parsed values, would produce it byte for byte (so a
   `\x41` where the writer puts `A` makes the file invalid: each record has
-  one stored form apart from those lines, and the size limits of section 5
+  one stored form, and the size limits of section 5
   read that form), so a record cannot be read differently from how it was
   written. An earlier design kept the text only in the
   verdict artifact and re-read it there by digest; that re-interpretation
-  (verdict paths, the REVIEW_SRC decision, verdicts pruned over time) was
+  (verdict paths, the REVIEW_SRC decision, verdicts deleted over time) was
   a way for a record to be read differently from how it was written, and
   was dropped (2026-10-09); do not move the text back out of this file.
   The text stays reviewer output: it is escaped and quoted, never prose that
   a session-start file shows.
-- A failed review writes no findings file. A blocked review's QUALITY and
-  NOTE findings are not recorded either: they are re-raised by the review
-  that follows the fix. A blocked staged review records its BLOCKER
-  findings as a blocked round (section 5).
-- Findings files are never deleted by the gate. Review-log deletion goes
-  only through the operator's `CROSS_REVIEW_PRUNE_TOOL` safe-delete script
-  (off when unset; see `INSTALL.md`), which does not cover this folder; an
-  expiry that deleted these files directly was removed for bypassing
-  that contract. Files written more than 14 days ago are not read by the
+- A passing or failed review writes no findings file. A blocked review's
+  QUALITY and NOTE findings are not recorded either; the review that
+  follows the fix gives its own verdict. Only a blocked staged review records its
+  BLOCKER findings, as a blocked round (section 5).
+- The gate never deletes findings files or the review logs in the logs
+  folder. Files written more than 14 days ago are not read by the
   blocked-round scan (section 5); remove old ones by hand through the
   Recycle Bin when wanted.
 - Writing never affects the verdict or the exit code; a failure is a WARN.
@@ -276,8 +251,9 @@ reported at the changed line that causes it (operator rule, 2026-11-23; the
 prompt's "Scope of a finding"). Project-supplied text rendered into the
 prompt (project context and hazards) cannot make such content a finding, so
 retained project text that asks for findings on unchanged content has no
-effect. A passing review's findings file (section 1) feeds `TASKS.md`
-(section 3), and its findings are not shown to any later review. An
+effect. A passing review writes no findings file (section 1), and its
+findings are not shown to any later review; section 3 shows them to the
+session that submitted the change. An
 earlier design carried passing reviews' QUALITY and NOTE findings into
 every later review that touched a cited file: a `CARRIED-FINDINGS.txt`
 evidence file, a `CARRIED FINDINGS` scope-text section, a prompt duty to
@@ -290,203 +266,164 @@ them to a later staged review of the same working tree and HEAD, and
 another change staged on the same HEAD in the same working tree counts
 there as the same change.
 
-## 3. TASKS.md
+## 3. Non-blocking findings notice
 
-`TASKS.md` is per-user work tracking, not project state: it lives at the root
-of the main checkout, is never committed, and differs between people working
-on the same project. The main checkout is, from the main working tree
-itself, that tree's top level, and from a linked worktree the first working
-tree `git worktree list` names; either is accepted only when Git run there
-reports that top level with this repository's common Git directory as its
-own Git directory, so a linked worktree is never taken for it (only the
-main working tree uses the common directory's index). It is
-never inferred from `<logs>`, whose parent is not the checkout when the Git
-directory is kept elsewhere. When Git lists the Git directory itself as
-the first entry, the candidate is the main working tree the repository's
-`core.worktree` setting records (Git keeps a submodule's that way, so a
-linked worktree of a submodule finds its main checkout, as does any
-repository with that setting). A repository that records no usable main
-working tree there (a `--separate-git-dir` repository usually has no
-`core.worktree`) gives a review run from one of its linked worktrees no
-main checkout, while one run in its main working tree finds it. Without a
-confirmed main checkout (that case, a bare
-repository, or a checkout that cannot be confirmed) no task is added, and
-the task count reads `could not be counted`; a review that has findings to
-add as tasks also gets a WARN giving the reason.
-The checkout and its Git directory are confirmed while held, and every
-later use checks that the held folders are still the ones confirmed (see
-"File identity"). Every Git child for tasks is bound
-to that confirmed checkout and its Git directory (`--work-tree`,
-`--git-dir`).
+A review is for the session that submitted the change. After a passing
+verdict a wrapper run on its own shows that session the verdict's
+non-blocking findings (`Write-NonBlockingFindingsNotice`), and the paired
+review session does the same for each passing verdict; a wrapper launched
+by the commit hook or the merge gate prints no notice, and the gate shows
+the findings itself (below). The notice takes the finding lines exactly as
+the verdict classifier (`Get-VerdictExitCode`) counts them. The verdict text is
+split at line feeds only; one CR before a line feed is the line ending, and
+any other CR is part of its line. A finding line starts at column one with
+the exact, case-sensitive prefix `QUALITY:` (or legacy `NON-BLOCKER:`) or
+`NOTE:`; its indented explanation stays in the verdict file. Lines are never
+trimmed. A line that repeats an earlier one exactly (compared character by
+character, so a line differing only in letter case or trailing white space
+is kept) is dropped; the rest keep their first-seen order.
 
-After a passing verdict with QUALITY or NOTE findings, the wrapper adds
-tasks to that file:
+A finding line is reviewer text, so the notice shows a UTF-16 code unit as
+itself only when its Unicode category is a letter, mark, number,
+punctuation, symbol or space separator. Every other code unit is shown as a
+`\u{XXXX}` escape of four uppercase hex digits (an escape character as
+`\u{001B}`): control characters including tab, DEL and the C1 range, format
+characters such as the bidirectional and zero-width controls, line and
+paragraph separators, surrogates (so a character outside the Basic
+Multilingual Plane, such as an emoji, appears as two escapes), private-use
+and unassigned code units, and a CR inside a line. Grouping uses the
+original lines, and the verdict file keeps its bytes. Under a lead line
+saying that they do not block, the lines are grouped by what each finding's
+opening citation names (`Get-NonBlockingFindingGroups`), in this order:
 
-- QUALITY findings go under the heading `## Review follow-ups: QUALITY (do
-  these first)`; NOTE findings under `## Review follow-ups: NOTE`. An
-  existing section stays where it is. A missing QUALITY section is created
-  as the first section: before the file's first `## ` heading, else after a
-  `# ` title line, else at the top. QUALITY is an immediate follow-up by
-  design. A missing NOTE section is created at the end of the file.
-- Each task is one line:
-  `- [ ] QUALITY <citation> - <record> (<date>)`, with
-  `(no validated citation)` for a finding without any citation. A finding
-  gets one task per citation (its opening one and each `cite` line), so it
-  is found from every file it cites. `<record>` is
-  the findings file just written (its path relative to the main checkout
-  when inside it, else absolute), which the gate never deletes, so a task
-  keeps leading to its finding's text however old the verdict gets. When
-  the findings file could not be written, no task is added and a WARN says
-  so: a task names only a record the gate keeps. (Falling back to the
-  verdict locator was tried and dropped: verdicts are pruned, and the
-  duplicate check would then keep a task leading nowhere while blocking a
-  usable one.) Finding prose is not copied: agents read
-  `TASKS.md` at session start, and finding text is reviewer output (the same
-  boundary rule as the follow-up index; merge-gate BLOCKER 2026-07-11).
-- Tasks are kept one per severity and citation: a citation adds no task
-  when an unchecked task with the same severity and citation already exists
-  in its section as a complete task line of the form above (any other line,
-  however close, is kept and suppresses nothing), so distinct findings at one citation share the first
-  task's line and record. An uncited finding adds no task only when an
-  uncited task whose record field is exactly this record exists, so uncited
-  findings from different reviews are not merged. Each task line is read as
-  its fields (the citation, and the record running up to the final date), and
-  the fields are compared whole, never by prefix. Whether an existing task's record still exists is not
-  checked: the gate deletes none, and one removed by hand is the remover's
-  choice. (An earlier design pointed tasks at verdict files, which are
-  pruned over time, and so had to treat a task with a missing verdict as
-  absent, with a grace period for merge-panel verdicts published late; that
-  existence check is gone with the verdict link.)
-- The gate never removes, reorders or edits other lines; people and agents
-  check tasks off or delete them. Lines end at CR LF, CR or LF; every
-  existing line keeps its own line break, mixed endings included; new lines
-  use the file's first line break (LF for a new file), and a final line
-  without a break gets one only when a line is added after it. A leading
-  byte-order mark is kept. A `TASKS.md` that is not valid UTF-8, is over
-  1 MiB, or would grow past 1 MiB with the new lines, is left alone with a
-  WARN, so the gate never writes a file it could not read back.
-- Missing file: created with the needed sections.
-- If the main checkout cannot be resolved, or `TASKS.md` is tracked by Git
-  in that repository (matched case-insensitively, since `tasks.md` is the
-  same file on Windows), nothing is written and a WARN says why: editing a
-  tracked file would leave the checkout dirty and block merges. The check
-  runs first, before the exclude file is touched, and again where its
-  answer has to hold, under the main checkout's index lock: Git serializes
-  every index writer with `<index>.lock`, so a Git command that has already
-  hashed `TASKS.md` but not yet written the index holds it. The writer
-  creates that lock itself, exclusively and deleted when its handle closes
-  (a killed process leaves none behind), and runs this check and the ignore
-  check below (while the handle on an existing `TASKS.md` is held, or
-  immediately before a missing one is created) and the write under it; Git commands in the main checkout
-  meanwhile fail with Git's own `index.lock: File exists`. Plain
-  `git commit`, which the gate's commit wrappers run, holds no lock during
-  the pre-commit hook. A lock that already exists means no task is added,
-  with a WARN naming it: `git commit -a` and partial commits hold it through
-  the hook, as does any other Git command or a lock left behind. Earlier
-  approaches were dropped: relying on the exclusive `TASKS.md` handle alone
-  (a Git command that had hashed the file before the check could still
-  write an index tracking it afterwards), and accepting an existing lock
-  when an inherited `GIT_INDEX_FILE` named it, as `git commit -a` sets it (a
-  path in the environment proves neither who holds the lock nor that the
-  holder waits for this review, and a run not holding the lock cannot stop
-  the index changing between the check and the write).
-- Because the exclude file makes a local `TASKS.md` an ignored file, which a
-  checkout may overwrite silently, the merge gate fast-forwards with
-  `--no-overwrite-ignore`: an incoming tree that tracks `TASKS.md` (or any
-  other path ignored locally) makes the merge refuse instead.
-- `/TASKS.md` is appended to the repository's local exclude file
-  (`git rev-parse --git-path info/exclude`) when that exact line is absent,
-  through the handle that read it, unless that would take it past 1 MiB
-  (then a WARN). The file is read as Git reads it: a record ends at LF, a
-  CR right before the LF (or at the very end of the file, which Git ends
-  with an LF before reading) and trailing unescaped spaces are dropped, and
-  any other CR stays part of the record; the append starts with an LF
-  whenever the file does not already end with one. That file is itself
-  untracked and per-clone. A partly
-  written append is not harmless (`/TASKS` alone ignores another path), so
-  the file's original content is first copied to
-  `git rev-parse --git-path crg-exclude-recovery` (as a recovery copy,
-  below); a failed append is cut back to the original length through the
-  same handle and the copy deleted. A copy left by an earlier run (an
-  interrupted append, one that could not be cut back, or a copy whose
-  deletion failed) is looked for first, before the exclude file is opened or
-  created and before an already present line can count as done: it blocks
-  task writing with a WARN naming it until someone compares it with the
-  exclude file, restores that file from it if needed, and deletes it.
-  Writing then
-  goes ahead only when `git check-ignore` confirms `TASKS.md` is effectively
-  ignored (plain `check-ignore`, which prints only paths Git ends up
-  ignoring, with negation applied; no pattern text is parsed, since a
-  pattern can itself contain colons): a root `.gitignore` line `!TASKS.md`
-  outranks the exclude file, and then nothing is written and a WARN says
-  why. The check names exactly `TASKS.md`, so an existing task file stored
-  under another letter case (`tasks.md`, which `core.ignorecase=false`
-  leaves unignored) is refused with a WARN asking for the rename. The
-  ignore check runs again under the index lock with the tracking check: a
-  checkout or pull completing before the lock could bring in a `.gitignore`
-  with `!TASKS.md`.
-- A recovery copy (`TASKS.md`'s and the exclude file's) exists under its
-  name only once complete: it is written as `<copy>.partial`, created new,
-  and renamed to its name without replacing anything. A copy written in
-  place could be cut off and then read, by its name alone, as complete. A
-  run deletes only a `.partial` it created itself, through the handle that
-  created it. A `.partial` found already there is kept: one no writer holds
-  is most likely from a run that died before its copy was complete, and so
-  before it changed anything, but nothing shows the gate made it. It is
-  looked for as early as its copy, before anything can count as already
-  done, and task writing stops with a WARN naming it until someone checks
-  it and deletes it. (Deleting it automatically, on the guess that the gate made
-  it, was dropped in the merge review of 2026-10-09.)
-- Every writer holds `TASKS.md` through one exclusive no-follow handle for
-  its whole read, check and write; that handle is what serializes writers,
-  the gate's own runs and an editor alike. An existing `TASKS.md` must be one
-  ordinary single-link file stored as exactly `TASKS.md` (a link, several
-  links or another letter case write nothing). The recovery copy, at
-  `git rev-parse --git-path crg-tasks-recovery.md` (in the Git directory,
-  which Git never stages), is the guard: it is made before `TASKS.md` is
-  created or rewritten. A copy left by an earlier run is looked for first,
-  before `TASKS.md` is read, so a run whose lines are already present still
-  reports it. The new content, which only
-  adds lines, is written whole to the copy, then to `TASKS.md` (through the
-  held handle, or through a new CREATE_NEW handle when `TASKS.md` was
-  missing), and the copy is deleted through its handle. If writing
-  `TASKS.md` fails, an existing file gets its old text back, a newly created
-  one is deleted, and the copy is deleted; if that restore fails, or the
-  process dies after the copy is complete, the copy stays. A copy that exists
-  and is held by another writer makes this writer retry; one that cannot be
-  opened for another reason (a link, several links, access denied) is
-  reported with that state and reason; one that no writer holds makes every
-  writer refuse with a WARN naming it, until someone
-  compares it with `TASKS.md`, restores `TASKS.md` from it if needed, and
-  deletes it. A writer that finds `TASKS.md` or the copy in use retries for
-  about two seconds, then gives up with a WARN, and one that finds
-  `TASKS.md` created by another writer before its own create starts over.
-- Earlier designs were dropped. The follow-up index's directory lock
-  (`TASKS.md.lock`, which also held the recovery copy) writes and removes its
-  owner marker by path, and a `.gitignore` could leave the copy inside it
-  visible to Git, while the exclusive handle already serializes writers.
-  Replacing the file by rename overwrote an editor's save made between the
-  read and the rename.
-- Tasks record a passing review, not a landed commit. The wrapper writes
-  them at its own pass even when a parent gate stages the follow-up index
-  rows for later promotion: if a later leg blocks, the passing leg's
-  findings still describe code that is being reworked, and the
-  duplicate check stops a retry from adding them twice.
-- A failure never affects the verdict or the exit code; it is a WARN.
+1. `QUALITY:` findings citing product code or configuration: any other
+   path, and a finding without a valid opening citation;
+2. `QUALITY:` findings citing records or documentation: a path ending in
+   `.md`, `.markdown`, `.txt`, `.rst` or `.adoc` in any letter case, which
+   covers `History.md`, `TASKS.md` and `PLAN.md`
+   (`Test-ReviewRecordCitationPath`);
+3. `NOTE:` findings.
+
+The opening citation is looked for after the label and only the white space
+that awk's `[[:space:]]` matches in the C locale (space, tab, line feed,
+vertical tab, form feed, carriage return), so the commit hook's awk copy of
+the rule puts every line in the same group. A finding whose text then opens
+with any other white space, such as a no-break space, has no valid opening
+citation and goes in group 1.
+
+The session fixes the findings worth fixing as part of the current change.
+Nothing records a finding as work for a later session: the gate writes no
+task list, index or other hand-off. A finding the session does not act on
+stays in the verdict file, and no later review is shown it (section 2).
+The notice is console output
+only. The commit hook and the merge gate launch the wrappers with
+`-NoFindingsNotice`, which turns the notice off: a launched wrapper's output
+is the transcript the gate validates under a size limit, and the notice's
+lines and escapes would only grow it. A gate prints only a checked
+projection of a passing review's output (section 4), so the commit hook
+(`prepare_success_projection`, which repeats the grouping rule in awk) and
+the merge gate (`Get-CrgSuccessfulReviewProjection`) take the accepted
+verdict artifacts' non-blocking finding lines into that projection in the
+same groups under the same lead line, each printed as a
+`review result:` line (a legacy
+`NON-BLOCKER:` shown as `QUALITY:`, an empty group omitted; the hook also
+sorts each group):
+
+    [pre-commit] review result: The review passed. The findings below do not block and are not kept as tasks for a later session; fix the ones worth fixing as part of this change.
+    [pre-commit] review result: QUALITY findings citing product code or configuration:
+    [pre-commit] review result:   QUALITY: <finding line>
+    [pre-commit] review result: QUALITY findings citing records or documentation:
+    [pre-commit] review result:   QUALITY: <finding line>
+    [pre-commit] review result: NOTE findings:
+    [pre-commit] review result:   NOTE: <finding line>
+
+The merge gate prints the same lines with `[auto-merge]` in place of
+`[pre-commit]`. The gates' projections keep their own checks and do not
+use the notice's escaping. Each refuses an accepted verdict that is not
+valid UTF-8 without a byte-order mark, or that holds a CR, DEL or a C0
+control character other than the line feed, and a finding line longer than
+4096 bytes (the hook) or 4096 UTF-16 code units (the merge gate) or with
+only white space after its label. The hook and the merge gate count different
+characters as white space there: the hook only those `[[:space:]]` matches in the C
+locale (space, tab, line feed, vertical tab, form feed, carriage return), so
+it accepts a body of only no-break spaces; the merge gate every character
+.NET's `IsNullOrWhiteSpace` counts, so it refuses that body. The lines they
+accept are printed unescaped.
+
+Showing the findings is display only. When the notice fails, the wrapper
+writes a warning to standard error and keeps the verdict's exit code; the
+paired session writes such a warning for that verdict, keeps its result and
+goes on to the next verdict.
+The grouping only orders lines the gate has already accepted, so when it
+fails (the hook's awk exits non-zero; the merge gate's grouping throws, or
+leaves the lead line or a heading empty or a line count other than the
+accepted findings'), the gate prints the accepted finding lines ungrouped,
+without the lead line and headings, and its result is unchanged. The hook
+writes the ungrouped projection first and refuses when that cannot be read
+or written in full. The grouped form is built in a file beside it and
+replaces it by a rename; when the grouped form cannot be built or renamed,
+the ungrouped projection stays, so a failed grouped write does not refuse
+the commit.
+A failed print of the projection is not a gate failure: the hook ignores
+it, and the merge gate reports it on standard error.
+
+When a provider exhausts its allowance (exit 4) and a replacement review
+passes, the findings of passes that completed before the exhaustion stay in
+the exhausted run's verdict and forensics files: that run prints no notice,
+and the gates project only the accepted review's artifacts. The replacement reviewed the same change in full, and
+its findings are the ones shown.
+
+Upgrading from before 2.8.0. By operator decision (2026-11-23), 2.8.0 keeps
+no compatibility code for the follow-up index or review tasks of earlier
+releases. Every gate is upgraded as a whole: a central installation by activating the
+release, a per-project install by installing all of its gate files
+together. A mix of 2.8.0 and earlier gate files is not supported, and no
+gate checks for one. A follow-up index (`<logs>/review-followups.md`) and
+review task lines in `TASKS.md` left by an earlier release are not read,
+protected or cleaned up by 2.8.0: delete them by hand. In a per-project
+install, the commit that lands 2.8.0 is reviewed by the wrappers already in
+HEAD. The fast-forward that brings 2.8.0 into a base that does not have it
+yet is run with that base's own merge gate script
+(`scripts/shared/auto-merge.ps1` in the base's checkout) as well as the
+base's wrappers: the 2.8.0 merge gate launches every wrapper with
+`-NoFindingsNotice`, which earlier wrappers do not have. The earlier
+wrappers in HEAD and the base record follow-ups and review tasks one last
+time. The 2.8.0 wrappers do not read `CROSS_REVIEW_PRUNE_TOOL` and never
+delete review logs; delete old ones by hand.
+Findings files that earlier releases wrote for passing reviews are not
+valid findings files (section 1): while their names are inside the
+blocked-round scan's window, a staged review reports them as skipped
+(section 5). Delete them by hand.
 
 ## 4. PASS line and review-feedback status
 
-Every PASS line states what the review covers. The merge gate's PASS line
-also gives the open review-task counts:
+Every PASS line states what the review covers:
 
     ... PASS - covers this source diff only, not target execution or
-    deployment readiness; open review tasks in TASKS.md: QUALITY=<q> NOTE=<n>
+    deployment readiness
 
 Each ordinary review prints its own PASS line with the coverage wording
-(`Write-ReviewFeedbackRecords`, after its records, both wrappers) and then
-the counts as a review-feedback status line:
+(`Get-ReviewPassCoverageText`, after the notice of section 3).
 
-    review-feedback: open review tasks in TASKS.md: QUALITY=<q> NOTE=<n>
+A passing submission also prints one reminder line, with exactly this text
+(`Get-ReviewTaskReminderText`; the hook keeps a byte-equal copy,
+`CRG_TASK_REMINDER`):
+
+    Reminder: once this change has landed, if it completes a task, delete that task from TASKS.md and every other task list. Task lists hold unfinished work only: a finished task is deleted, not checked off.
+
+The commit hook prints it right after its final PASS line, before the final
+staged-tree identity check, after which the hook prints nothing more for
+a commit it authorizes; like that
+PASS line it does not prove that the commit landed. The merge gate prints it
+after its `OK - '<base>' is now at <sha>` line, once the fast-forward is
+applied, and the paired review session after its PASS, before central
+publication commits the result or recovery finalizes the retained result.
+The commit hook and the paired
+session print it before the change has landed, so the text itself makes
+landing the condition for deleting a task. The review wrappers do not print
+it. A reminder that cannot be printed never fails the run: the merge gate
+and the paired session report that on standard error, and the commit hook
+ignores it.
 
 On success a gate prints only a checked projection of the accepted review's
 output (`validate_success_projection_pair` in `scripts/git-hooks/pre-commit`,
@@ -494,16 +431,12 @@ output (`validate_success_projection_pair` in `scripts/git-hooks/pre-commit`,
 a plain WARN from the feedback path was lost whenever the review passed.
 Every outcome of that path the operator has to act on is therefore also
 printed as a `review-feedback WARN: ` line (`Write-ReviewFeedbackStatus`):
-tasks not added and why, recovery copies or `.partial` files left, a
-findings file not written, findings files skipped by the blocked-round
-scan (counted, not named), QUALITY follow-ups not staged, and a
+findings files skipped by the blocked-round scan (counted, not named), and a
 blocked-retry check or prior blocked findings unavailable (section 5).
 Housekeeping the review skipped or left half done is printed the same way
-as a `housekeeping WARN: ` line (`-Housekeeping`), with fixed text beside the
-plain WARN that carries the detail: the review-log age-prune skipped, off
-for unidentifiable index entries, limited to a partial folder listing, or
-not run because `CROSS_REVIEW_PRUNE_TOOL` cannot be used; prune batches that
-failed; and a follow-up index lock that could not be removed and stays. The
+as a `housekeeping WARN: ` line (`-Housekeeping`), with fixed text: folder
+holds kept until the review process ends because a Git child could not be
+confirmed ended, which can leave a temporary review folder behind. The
 rules below apply to both kinds.
 
 - Each gate collects these lines apart from the strict projection
@@ -511,18 +444,14 @@ rules below apply to both kinds.
   the merge gate) and prints them as `review result:` lines. They are read
   from every launched review invocation, not only the accepted one: an
   exhausted leg, or a passing child of a panel whose provider was replaced,
-  may still have written records or staged follow-ups. The follow-up
-  promotion each gate runs itself (`docs/capture-doctrine-v6.md` section 7)
-  is not a review invocation: its plain WARN and `housekeeping WARN: ` lines
-  print directly on the console, pass or fail, and are not collected.
+  may still have printed them.
 - Neither collecting nor printing them can fail a passed gate: a line that
   cannot be shown (over 4096 bytes without the tag, with a control character,
   or not in the form) becomes a fixed notice, an unreadable or missing
   transcript one notice, and more than 32 distinct warnings are counted on
-  one line. The hook prints them straight to the console after every write
-  the commit depends on (the projection display and the follow-up append),
-  with no file of its own, so they take no space or step a required write
-  needs; the merge gate's collector only reads, inside one guard. (Earlier
+  one line. The hook prints them straight to the console after the
+  projection display, with no file of its own, so they take no space a
+  required write needs; the merge gate's collector only reads, inside one guard. (Earlier
   forms were dropped the same day: checking these lines inside the
   strict projection read only the accepted review and could refuse a passed
   gate; adding them to the projection file tied their bytes to its required
@@ -536,34 +465,17 @@ rules below apply to both kinds.
   line stays under 4096 bytes in any console encoding. It prints at most 12
   warnings of each kind per review, then one line saying more were left out.
 - A successful gate's output must read the same whichever provider
-  reviewed, so these texts name `TASKS.md`, the Git directory, the logs
-  folder, a setting, the shared follow-up index lock or Git's own messages,
+  reviewed, so these texts name the Git directory, the logs
+  folder, a setting or Git's own messages,
   never a findings file, a verdict or a per-provider log folder, whose
   names carry the backend; detail that could (a path, an exception message)
   stays on a plain WARN line, which a failed gate shows. The collectors remove the
   tag naming the wrapper.
-- The commit gate shows the last count line of the last accepted review,
-  read after every leg added its tasks; the merge gate shows no child count
-  line, since its own PASS line counts after all of them.
 
-Counts come from one function, `Get-ReviewTaskCounts`: the main checkout
-folder is held as in "File identity", and must still be the folder
-confirmed when the review started, and `TASKS.md` opened no-follow; lines
-end at CR LF, CR or LF; a UTF-8 byte-order mark at the start of the file is
-ignored; a line counts when it begins with `- [ ] QUALITY ` or `- [ ] NOTE `;
-there is no size or encoding limit, and the count reads through a fixed
-64 KiB buffer, so memory does not grow with the file or any line. Only a
-file positively absent counts
-zero; a replaced checkout, a link, a non-file or a failed read shows
-`could not be counted`. The
-commit gate's own lines (`scripts/git-hooks/pre-commit`: per backend and
+The commit gate's own lines (`scripts/git-hooks/pre-commit`: per backend and
 final), the paired session PASS (`scripts/paired-review-session.psm1`) and
 the Grok adapter PASS (`scripts/grok/auto-review.ps1`) carry the coverage
-wording only; the commit gate's counts are the projected review-feedback
-line above. The hook does not count: a shell cannot hold the no-follow
-handle a count needs, and a second counter there once disagreed with the
-PowerShell one. Paired reviews run from captured inputs rather than the
-working checkout and write no TASKS.md tasks.
+wording only.
 
 ## 5. Blocked retries
 
@@ -609,9 +521,8 @@ the gate hold a retry to them before another review is spent.
   this repository (their `repository` equals this review's, compared
   exactly) with the same working tree and HEAD, written in the last 14 days
   and not after the current time, newest 20, with older ones counted toward
-  the number of rounds only. Passing-review records in the same folders are
-  passed over (section 2), as are other repositories' files sharing the
-  folder. The findings folder is read before a submodule's working-tree
+  the number of rounds only. Other repositories' files sharing the folder
+  are passed over. The findings folder is read before a submodule's working-tree
   folder, and a name is taken only by a valid file of this repository, so
   a damaged or foreign copy takes nothing. The folder is listed one name at
   a time; a name older than the window (its `written` time) is passed over

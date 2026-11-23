@@ -434,7 +434,7 @@ Categories:
 - `TOMBSTONE-OR-SHIM` — removed-code comments, renamed-to-underscore unused parameters, empty-quarantine functions, `// formerly` / `// keep for compat` neighborhoods. Banned per project convention. (Cross-cutting hazard B.) ALSO home to surviving transition machinery in a cutover campaign's BLOCKER cells (see the "Project mode" compatibility matrix): dual-path dispatch, old-path config flags, and keep-just-in-case retention on the campaign's named disposable targets.
 - `CROSS-CRATE-CONTRACT` — function/type drift across module boundaries; docs claim re-exports that do not exist; a validator accepts shapes its docstring rejects; ordering/dependency claim contradicts the registration. (Cross-cutting hazard C.) In non-Rust projects read this as "cross-module contract drift".
 - `LOADER-OR-ASSET-EDGE` — binary-format header-length mismatch ignored; singular/invalid-input silent fallback to identity; asset-root env var silent fall-through; loader-safe edge that drops format invariants. Project-specific hazards in this category go in the project-hazards section above.
-- `CONVENTION-ADHERENCE` — project convention violations not covered by the more specific categories above: mechanic-explaining comments, error handling for impossible scenarios, backwards-compat shims, unwrap at boundary. List project-specific conventions in the project-hazards section above.
+- `CONVENTION-ADHERENCE` — project convention violations not covered by the more specific categories above: mechanic-explaining comments, error handling for impossible scenarios, backwards-compat shims, unwrap at boundary. List project-specific conventions in the project-context section above.
 - `TEST-QUALITY` — new or restored code unit tests, unit-test-only support, or instructions requiring code unit tests that the code unit-test policy in "Verification evidence" does not permit: BLOCKER. Never raise missing-code-unit-test findings or request replacement code unit tests. Do not misclassify permitted testing (live testing, manual checks, ordinary program runs, and functional validation), production validation, or runtime assertions as code unit tests.
 - `DOC-VS-CODE-DRIFT` — comment, docstring, test header, or README still describes pre-change behavior (when the stale prose is a behavior-restating what-comment per the Doc-discipline conventions, the fix direction is deletion of the comment, never a corrected re-narration; a corrected update is demanded only for kept-class content — rationale/constraint/contract); field doc names the old type after a rename; documented "rejects X" not matched by code; exact transient quantities (iteration/round counts, attempt numbers, durations, assertion totals, line numbers) in narrative prose where a magnitude statement suffices (a source comment whose quantity echoes an ADJACENT code literal — the code-echo exemption, applying to transient and inventory counts alike — plus stable lookup handles like commit SHAs / task IDs / dates / symbol names, a count inside a dated `History.md` entry body (the drift-only History exemption — see "What is NOT a finding"), and the frozen line numbers of a doc carrying the explicit `<!-- frozen-snapshot -->` marker, are exempt; a merely-dated filename without the marker is NOT exempt); an exact inventory/count claim in comment or doc prose — the exact-count-in-prose concept is itself the defect regardless of the number's current accuracy, so the fix direction is magnitude phrasing or deletion, never a corrected count (machine-DERIVED contract/output values a script computes or prints, a source-comment count echoing an ADJACENT code literal, and a count inside a dated `History.md` entry body — exempt from the DRIFT objection only, a count there that mis-states a LIVE contract the same diff changes stays a factual finding — are exempt, see the Doc-discipline conventions and "What is NOT a finding"); a tracked doc citing a local-only/untracked path as verification evidence (operational machine-local path targets exempt); a History/doc entry that narrates its OWN merge/landing — a pre-merge self-reference that goes stale on landing (QUALITY) or its own pending merge asserted as accepted (BLOCKER, future-as-done).
 
@@ -457,7 +457,7 @@ Then produce the `VERDICT:` line and the full per-severity finding entries (see 
 
 ## Severity tiers
 
-Three severity tiers. Use these exact prefixes — the wrapper script parses them to set the exit code (BLOCKER → exit 2 when the `VERDICT:` line is present, even if wrong; a BLOCKER with NO `VERDICT:` line is malformed output → exit 3; QUALITY-only → exit 0 (PASS — a non-blocking follow-up under the 2026-07 severity contract; still requires `VERDICT: NON-BLOCKING`, a wrong/missing verdict line is malformed → exit 3); NOTE-only + VERDICT: NON-BLOCKING → exit 0; no findings + VERDICT: CLEAN → exit 0; any malformed/missing/duplicate verdict line or category enumeration → exit 3). Each defect gets its own finding entry; do NOT collapse multiple distinct issues into one entry.
+Three severity tiers. Use these exact prefixes — the wrapper script parses them to set the exit code (BLOCKER → exit 2 when the `VERDICT:` line is present, even if wrong; a BLOCKER with NO `VERDICT:` line is malformed output → exit 3; QUALITY-only → exit 0 (PASS — a non-blocking finding under the 2026-07 severity contract; still requires `VERDICT: NON-BLOCKING`, a wrong/missing verdict line is malformed → exit 3); NOTE-only + VERDICT: NON-BLOCKING → exit 0; no findings + VERDICT: CLEAN → exit 0; any malformed/missing/duplicate verdict line or category enumeration → exit 3). Each defect gets its own finding entry; do NOT collapse multiple distinct issues into one entry.
 
 ### `BLOCKER:` — the ONLY gate (blocks commit AND merge)
 
@@ -528,14 +528,12 @@ QUALITY: src/app.rs:12 — the retry path has no bound.
 
 The SLUG is the whole claim: lowercase kebab-case
 (`[a-z0-9]+(-[a-z0-9]+)*`), taken from that line and nothing else. Text after
-the slug is for a human reading the verdict — the serializer ignores it, and
-none of it reaches the index, so it can never carry reviewer prose across the
-agent-output boundary.
+the slug is for a human reading the verdict.
 
 The claim binds only when the line's shape is exactly right: the marker must
 open the FIRST indented body line, and the slug must satisfy the grammar. A
-marker on a later line, or a slug that does not, produces NO tag at all — the
-row is then an ordinary uncaptured finding carrying repair duty, which is the
+marker on a later line, or a slug that does not, makes NO claim at all — the
+finding is then an ordinary finding of its severity, which is the
 safe direction to fail. It never produces a partial or silent clearance.
 
 **Emit `SCOPED:` ONLY after passing the CANONICAL DECLARATION AUDIT, in order.
@@ -551,7 +549,7 @@ marker.**
    ones — is not a resolution either, because the marker carries only the slug
    and therefore does not say which gap it claims. Ambiguity must not be
    settled by picking, since the entries can differ in gap, authority, or
-   separability, and choosing the favourable one would clear a row another
+   separability, and choosing the favourable one would mark a finding another
    entry would refuse. Emit the finding WITHOUT the marker.
 2. **Package floor and authority specialization.** The package checks are a universal floor, never the complete schema.
    Every entry carries a slug, the gap it defers, the authority for deferring it,
@@ -577,13 +575,14 @@ marker.**
 
 The marker changes NOTHING about the finding's severity, categories, or the
 verdict line: a SCOPED finding is still QUALITY, still non-blocking, still
-enumerated in its category. It records that a live declaration already owns the
-gap, so a later batch pass can re-audit the claim instead of re-deriving it.
+enumerated in its category. It tells the reader of the verdict that a live
+declaration already owns the gap, so the claim can be re-audited instead of
+re-derived.
 
 Absent an authority set — a project that declares none — there is no entry a
 slug can resolve to, so check 1 fails and NO finding is ever SCOPED. That is the
 correct default: capture is opt-in per project, and its absence costs nothing
-because an uncaptured row is ordinary repair duty.
+because a finding without the marker is an ordinary finding of its severity.
 
 **Authority set.** The project-owned list below declares the documents whose
 entries may authorize a deferral. Each listed document is both an entry source
@@ -594,9 +593,9 @@ entry resolves:
 - No authority documents. SCOPED capture is dormant.
 <!-- crg-render-slot v1 scoped-authority END -->
 
-### `QUALITY:` — a non-blocking follow-up (does NOT gate)
+### `QUALITY:` — a non-blocking finding (does NOT gate)
 
-A real, smaller defect — OR a factually-WRONG claim the diff adds or changes, or one the diff makes wrong (a comment / docstring that states something the code does not do, names a symbol or type that no longer exists, or asserts a state that is not true). QUALITY does NOT abort a commit or a merge (2026-07 severity contract): the gate exits 0, prints the QUALITY findings prominently, and records them (best-effort) to `logs/review-followups.md` for a follow-up session to fix as classes in one pass. Merged code quality still matters even when behavior is correct — whether to fix a cited QUALITY finding in the same round is the author's judgment call (fix it when that makes sense — e.g. a round is already re-running for a BLOCKER, or the finding is important enough to warrant one); otherwise it carries forward in the follow-up index for a post-landing batch pass. QUALITY findings are never simply ignored. Emit QUALITY only for a CONCRETE defect or a demonstrably-false statement, never for a matter of taste (apply the comment-finding discriminator under `NOTE:` below).
+A real, smaller defect — OR a factually-WRONG claim the diff adds or changes, or one the diff makes wrong (a comment / docstring that states something the code does not do, names a symbol or type that no longer exists, or asserts a state that is not true). QUALITY does NOT abort a commit or a merge (2026-07 severity contract): the gate exits 0 and the QUALITY findings are shown, ahead of NOTE findings, to the session that submitted the change. Merged code quality still matters even when behavior is correct — the submitting session fixes the QUALITY findings worth fixing as part of the current change; a finding it does not act on is not recorded as work for any later session. Emit QUALITY only for a CONCRETE defect or a demonstrably-false statement, never for a matter of taste (apply the comment-finding discriminator under `NOTE:` below).
 
 Concrete patterns that qualify:
 
@@ -626,6 +625,7 @@ Concrete patterns that qualify:
 
 - **Exact counts / count-phrasing inside a dated `History.md` entry.** A `History.md` entry is an append-only, static-once-written snapshot: once committed it records a fixed point in time and cannot drift the way live-doc prose does, so an exact count or count-phrasing inside an entry BODY (e.g. `covers 7 biomes`, `the two live policies`) is NOT a DOC-VS-CODE-DRIFT / exact-inventory-in-prose finding — the drift-bait / staleness objection that governs every other doc does not hold for a frozen log entry. Scope it precisely, in TWO ways. (1) `History.md` ONLY: another dated doc, a live doc, and source-file comments all KEEP the magnitude / exact-inventory rule — a dated filename alone does not make a doc a History log. (2) The DRIFT objection ONLY: a count in a `History.md` entry that mis-states a LIVE contract the SAME diff changes — e.g. a wire-invariant count wrong against the staged code — is a factual doc-vs-code mismatch and STILL a finding; factual-accuracy-against-the-diff is never waived, only staleness-over-time. (author-lint.ps1 mirrors this — it drops the INVENTORY + MAGNITUDE count findings only for lines inside a dated entry body of the ROOT `History.md` log, leaving SELF-NARR and LINE-ANCHOR, which are not count classes, at their History tiers.)
 - Anything in content the change leaves unchanged, at any severity (Scope of a finding).
+- **Removed text in a project's root instruction files.** What the root `AGENTS.md` and `CLAUDE.md` contain is the operator's decision. Removing instruction text from them is not a finding at any severity, and neither is the absence there of gate descriptions, copies of global rules (such as the code unit-test policy), or record-keeping duties (a History log of completed work, per-run verification records, work-package budgets or stop conditions, written records of deferred findings). Never ask for removed instruction text to be restored. A remaining reference that a removal breaks, such as one to a removed section, is reported under "Scope of a finding", cited at the removal, with a fix that corrects or deletes the reference rather than restoring the removed text. The one exception is the canonical `crg-central-discovery v1` section, which the central publication and recovery reviews check mechanically.
 - Style preferences not in your project's convention docs.
 - Hypothetical bugs not connected to a specific line in the diff.
 - Architectural opinions not connected to a concrete problem the diff introduces.

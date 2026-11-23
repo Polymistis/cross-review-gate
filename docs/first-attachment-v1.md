@@ -186,7 +186,7 @@ Both review wrappers accept `-PreparedOrigin first-attachment-v1` only in the
 existing explicit `PreparedPair` parameter set. Omission retains `paired-v1`;
 the selector never infers origin from model prose or falls back between readers.
 The shared host pins the first descriptor/file reader and artifact constructor,
-keeps the first scope in artifact/exhaustion/follow-up identity, and retains the
+keeps the first scope in artifact/exhaustion identity, and retains the
 same native input and reviewer-descendant lifetime owners.
 
 `New-CrgPairedInputSnapshot` and `New-CrgPairedProviderSnapshot` carry the same

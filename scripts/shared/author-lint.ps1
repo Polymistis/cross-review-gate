@@ -165,7 +165,7 @@
                    it, and why. The ways a file reaches it:
                      * its text falls outside the comment/code splitter's POSITIVELY
                        SUPPORTED grammar -- line comments, non-nested block comments,
-                       plain strings with the one escape the model applies (`\` in
+                       plain strings with the escape the model applies (`\` in
                        rs, a backtick in a DOUBLE-quoted ps1 string -- single-quoted
                        PowerShell has no BACKTICK escape, and its own quote-doubling
                        escape is refused), a Rust string spanning records, a
@@ -722,10 +722,6 @@ $script:MarkupGapClass = "[\s$script:MarkupOpenerClassBody]"
 # The `-` is ESCAPED because the interpolated opener body follows it, and an
 # unescaped `-` between two class members is a RANGE.
 $script:LineLeadMarkupPattern = "(?:\[[ xX]\]|[\s>#+|\-$script:MarkupOpenerClassBody]|\d+[.)])*"
-
-# ---------------------------------------------------------------------------
-# Pure helpers (no I/O).
-# ---------------------------------------------------------------------------
 
 function Get-ContainedRelPath {
   # Canonicalize a caller-supplied path and enforce that it is INSIDE the repo
@@ -1396,14 +1392,14 @@ function Get-SelfNarrationFindings {
   # word "merge"/"landed" -- legitimate RETROSPECTIVE prose about an
   # already-landed merge ("the merge landed at <sha>", "the batch merged
   # cleanly") carries no "this/here" pointer and must stay clean. The phrase set
-  # was CALIBRATED against the current History.md so the ERROR tier fires only on
-  # genuine self-narration:
+  # is kept NARROW so the ERROR tier aims at self-narration; a match is not
+  # proof of it (retrospective prose quoting an earlier report's "this merge"
+  # matches as well):
   #   - "this merge" / "this landing"  -- deictic + landing EVENT (covers
   #     "after this merge", "immediately after this merge", "this landing's").
-  #     These are the highest-precision forms; the current tree's matches are all
-  #     true-positive debt (high-precision -- legitimate prose is not caught).
-  #   - "as of this entry" / "add(s|ing) this entry" -- the two documented
-  #     entry-deixis incidents (a state-as-of-the-entry claim; a commit narrating
+  #     These are the highest-precision forms.
+  #   - "as of this entry" / "add(s|ing) this entry" -- the documented
+  #     entry-deixis forms (a state-as-of-the-entry claim; a commit narrating
   #     that it adds the entry). Deliberately NARROW: a bare "this entry" is NOT
   #     matched, because legitimate timestamping ("at the time of this entry")
   #     uses it and would false-positive at ERROR tier.
@@ -2030,13 +2026,13 @@ function Get-SourceSupportDiagnostic {
   #     assumed to be code -- see the per-language note at that test.
   #   * block comments -- `/* */` (rs), `<# #>` (ps1), NON-NESTED: the model's state
   #     is a boolean, so a nested opener ends the comment early at the inner close.
-  #   * plain strings with the ONE escape the model applies: `\` in rs, and a backtick
+  #   * plain strings with the escape the model applies: `\` in rs, and a backtick
   #     in a DOUBLE-quoted ps1 string only -- single-quoted PowerShell has no BACKTICK
   #     escape, so a backtick is ordinary text there. It does escape a quote by
   #     DOUBLING it, which is a different rule the model does not apply and therefore
   #     refuses rather than mis-reading as close-then-reopen. A string form with any
   #     other escape rule is outside support.
-  #   * a Rust string spanning records -- the one carry the model does implement. A
+  #   * a Rust string spanning records -- a carry the model does implement. A
   #     line CONTINUATION is NOT carried, so a joined pair is admitted only where a
   #     SEPARATOR at the seam proves no token can cross it and no position predicate
   #     changes; every other join is REFUSED rather than guessed at. See the escape
@@ -2047,8 +2043,8 @@ function Get-SourceSupportDiagnostic {
   #
   # THE PREFIX RULE is what closes the set against forms nobody has enumerated: a
   # quote glued to a preceding identifier/`#`/`@`/`$`/quote character is a PREFIXED
-  # string literal of some kind, and the splitter models exactly one string form.
-  # `r"`, `b"`, `c"`, `br#"`, `cr#"`, `@"`, `@'`, `$'`, `"""` all fail by that one
+  # string literal of some kind, and the splitter models only unprefixed strings.
+  # `r"`, `b"`, `c"`, `br#"`, `cr#"`, `@"`, `@'`, `$'`, `"""` all fail by that
   # rule, as would a prefix a future language version adds.
   #
   # This scan reads the RAW record text and keeps its own state, deliberately NOT
@@ -2896,7 +2892,8 @@ function Read-NulTextFile {
 function Get-SpelledCardinalMap {
   # Spelled cardinal -> decimal-string value, DERIVED from
   # $script:SpelledCardinalAlternation's documented ascending-from-two ordering, so
-  # the map itself never needs editing. "both" is the one entry with no position.
+  # the map itself never needs editing. "both" has no position in that ordering,
+  # so it is added by hand.
   $tokens = @($script:SpelledCardinalAlternation -split '\|')
   $map = [System.Collections.Hashtable]::new([System.StringComparer]::Ordinal); $map['both'] = '2'
   for ($k = 0; $k -lt $tokens.Count; $k++) { $map[$tokens[$k]] = [string]($k + 2) }
@@ -3491,13 +3488,11 @@ function Test-IsCardinalityExpression {
   # Comparison and logical operators are in the disqualifier set alongside the
   # arithmetic/bitwise ones: `a == b.len()` ends in the call but its VALUE is a
   # bool, the same inner-node shape as `a + b.len()`. Only the MULTI-char
-  # spellings are listed -- a bare `<`/`>` token cannot be split on soundly
-  # from a token list alone (turbofish and generic angles carry them inside a
-  # type), so text carrying one at depth 0 can still read as a cardinality
-  # here. That is a BOUNDED acceptance local to this predicate: its cost is a
-  # rare over-claimed ADVISORY row on a bool-valued operand, never a hard
-  # stop, and any caller needing sound bare-relational handling must split
-  # with flank guards before calling.
+  # spellings are listed, so text carrying a bare `<`/`>` at depth 0 can still
+  # read as a cardinality here. That is a BOUNDED acceptance local to this
+  # predicate: its cost is a rare over-claimed ADVISORY row on a bool-valued
+  # operand, never a hard stop, and any caller needing sound bare-relational
+  # handling must split with flank guards before calling.
   foreach ($op in @('+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>', '!', '..', '==', '!=', '<=', '>=', '&&', '||')) {
     if ((@(Split-TopLevelOn -Text $core -Token $op)).Count -gt 1) { return $false }
   }

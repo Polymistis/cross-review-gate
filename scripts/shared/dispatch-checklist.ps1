@@ -341,9 +341,12 @@ function ConvertTo-CrgStructureFold {
   return $fold.ToString()
 }
 
-# Classify a single category-count tail the SAME WAY the wrapper's category
-# regex matches it: the wrapper accepts ONLY `none` or a bounded digit run
-# (`(?<v>none|\d+)` with `[int]::TryParse` + `<= 10000`). Returns @{ Kind; Value }
+# Classify a single category-count tail by the wrapper's category VALUE
+# grammar: the wrapper accepts ONLY `none` or a bounded digit run
+# (`(?<v>none|\d+)` with `[int]::TryParse` + `<= 10000`). This classifies the
+# trimmed value, not the row: Trim() also removes carriage returns in positions
+# the wrapper's row regex refuses (before the value, for one), so row shape is
+# decided by the per-category row regex in Test-VerdictBlock. Returns @{ Kind; Value }
 # -- 'none' / 'count' / 'invalid' for any other tail. The log consumers must
 # classify tails identically, or they disagree on which verdict files are
 # trustworthy evidence:
@@ -804,8 +807,6 @@ function Test-VerdictBlock {
   }
   if ($inCatBlock -and $declRemaining -gt 0) { return $false }   # EOF with rows owed (underfill)
 
-  # Coherence (wrapper precedence): BLOCKER present -> valid (any word); else
-  # QUALITY/NON-BLOCKER/NOTE -> word must be NON-BLOCKING; else zero findings -> word CLEAN.
   if ($blockerN -ge 1) { return $true }
   if ($nbLikeN -ge 1) { return [string]::Equals($verdictWord, 'NON-BLOCKING', [System.StringComparison]::Ordinal) }
   return [string]::Equals($verdictWord, 'CLEAN', [System.StringComparison]::Ordinal)

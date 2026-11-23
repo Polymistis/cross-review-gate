@@ -49,6 +49,11 @@ function Get-CrgPairedGitDiffEvidence {
     Initialize-CrgAttributeNeutralNative
     # Ordinal: -ceq/-cne/-cin and string overloads compare by culture and ignore characters such as U+00AD.
     if (-not ([string]::Equals($Domain, 'public', [StringComparison]::Ordinal) -or [string]::Equals($Domain, 'private', [StringComparison]::Ordinal)) -or [string]::IsNullOrWhiteSpace($TempParent)) { throw 'paired diff requires an explicit domain and private scratch parent' }
+    # Tested before normalization: GetFullPath completes a drive-relative
+    # (`C:work`) or current-drive-rooted (`\work`) value from the process's
+    # current folder or drive, which would then pass a drive test.
+    if ($TempParent -cnotmatch '\A[A-Za-z]:[\\/]') { throw 'paired diff scratch parent must be a full local drive path' }
+    $parentPath = [IO.Path]::GetFullPath($TempParent)
     $readers = @(Get-Command -Name Read-CrgCentralTreeBytes -Module central-context -CommandType Function -ListImported -ErrorAction SilentlyContinue)
     if ($readers.Count -ne 1) { throw 'paired diff requires the already imported retained central-context reader' }
     foreach ($tree in $CompareArgs) { $null = & $readers[0] -ProjectContext $ProjectContext -Domain $Domain -TreeOid $tree }
@@ -58,7 +63,7 @@ function Get-CrgPairedGitDiffEvidence {
     $null = Enter-CrgAttributeNeutralDirectoryChain -Path $sourceObjects -Pins $custody.DirectoryPins -DenyLeafRename
     $objectFormat = $ProjectContext.Domains[$Domain].ObjectFormat
     $runs = Invoke-CrgAttributeNeutralDiffRuns -Custody $custody -GitExe $ProjectContext.GitExe -SourceObjects $sourceObjects -ObjectFormat $objectFormat `
-      -TempParent $TempParent -CompareArgs $CompareArgs -State $state
+      -TempParent $parentPath -CompareArgs $CompareArgs -State $state
     $result = @{
       Ok = $true
       Patch = $runs.Patch.Stdout

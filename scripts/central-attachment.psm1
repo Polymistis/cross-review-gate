@@ -37,7 +37,7 @@ function Get-CrgUnactivatedAttachmentHandoff {
   foreach ($leaf in @('crg-attachment', 'crg-pair')) {
     $record = & $Runtime.ReadFile -Path (Join-Path $PublicGitDirectory $leaf) -Maximum 65536 -AllowAbsent
     if ($null -eq $record -or $record.Present -isnot [bool] -or $record.Present) {
-      throw 'attachment correction requires an unactivated worktree without a completed-pair pointer'
+      throw 'Attach and pending-attachment Stage require a worktree without an active attachment or completed-pair pointer'
     }
   }
   $handoff = & $Runtime.ReadFile -Path (Join-Path $PublicGitDirectory 'crg-handoff') -Maximum 16384 -AllowAbsent
@@ -181,7 +181,7 @@ function Read-CrgCentralAttachmentCorrectionAnchor {
       -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $proposal.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AttachmentBytes), [System.StringComparison]::Ordinal)) {
     throw 'attachment correction proposal differs from the held association'
   }
-  $association = & $runtime.ReadFile -Path (Join-Path $owner.PrivateGitDirectory $owner.AssociationLeaf) -Maximum 65536
+  $association = & $runtime.ReadFile -Path (Join-Path $owner.PrivateGitDirectory $owner.AssociationLeaf) -Maximum 65536 -AllowAbsent
   if ($association.Bytes -isnot [byte[]] -or
       -not [string]::Equals((Get-CrgAttachmentDigest -Bytes $association.Bytes), (Get-CrgAttachmentDigest -Bytes $owner.AssociationBytes), [System.StringComparison]::Ordinal)) {
     throw 'attachment correction requires the exact already-published private association'
@@ -626,7 +626,7 @@ function Open-CrgCentralAttachment {
       if ($null -ne $pendingHandoffBytes) {
         foreach ($path in $StagePaths) {
           if (-not ([string]::Equals($path, 'AGENTS.md', [System.StringComparison]::Ordinal) -or [string]::Equals($path, 'CLAUDE.md', [System.StringComparison]::Ordinal))) { throw 'published attachment correction staging accepts only literal AGENTS.md or CLAUDE.md' }
-          $working = & $operation.Runtime.ReadFile -Path (Join-Path $root $path) -Maximum 16777216
+          $working = & $operation.Runtime.ReadFile -Path (Join-Path $root $path) -Maximum 16777216 -AllowAbsent
           if (-not $working.Present -or $working.Bytes -isnot [byte[]]) { throw "attachment correction cannot delete root instruction '$path'" }
         }
         $anchor = Read-CrgCentralAttachmentCorrectionAnchor -Operation $operation -ExpectedHandoffBytes $pendingHandoffBytes

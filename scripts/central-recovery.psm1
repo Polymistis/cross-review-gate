@@ -153,8 +153,6 @@ function Invoke-CrgCentralResume {
     & $helpers['Assert-CrgCentralCapturedState'] -Operation $operation -CapturedInput $input -Origin $origin -ExpectedRefs $expected -ExpectedPointerBytes $pointerBytes -ExpectedHandoffBytes $handoffBytes
     $native = (& $getCommand -Runtime $runtime -Module paired-diff -Name Assert-CrgPairedOperationLock).Module
     $recoveryEvidence = Write-CrgCentralRecoveryEvidence -Operation $operation -State $state -Review $review -NativeModule $native
-    $promote = & $getCommand -Runtime $runtime -Module paired-preparation -Name Publish-CrgPairedFollowups
-    $followups = & $promote -Operation $operation -CapturedInput $input -Review $review -ReceiptSha256 $record.ReceiptSha256 -Origin $origin
     if ($attachmentRegistered) {
       $associate = & $getCommand -Runtime $runtime -Module central-attachment -Name Complete-CrgCentralAttachmentAssociation
       $null = & $associate -Operation $operation
@@ -204,7 +202,7 @@ function Invoke-CrgCentralResume {
       $null = & $cleanup -Operation $operation
     }
     return [pscustomobject]@{ Status = 'completed'; ResumedFrom = $state.State; Origin = $origin; Runtime = $runtime.Id
-      ReceiptSha256 = $record.ReceiptSha256; PublicCommit = $expected.public; PrivateCommit = $expected.private; FreshReviewOutput = $review.OutputRoot; FreshReviewRecord = $recoveryEvidence; Followups = $followups }
+      ReceiptSha256 = $record.ReceiptSha256; PublicCommit = $expected.public; PrivateCommit = $expected.private; FreshReviewOutput = $review.OutputRoot; FreshReviewRecord = $recoveryEvidence }
   } catch {
     $retained = & $helpers['Save-CrgUncertainCentralOperation'] -Operation $operation -GuardCustody $guard -Failure $_.Exception
     throw

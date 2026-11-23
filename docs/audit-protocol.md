@@ -46,8 +46,8 @@ Shared:
 - `scripts/review-liveness.psm1` (the one reviewer heartbeat, stall threshold
   and duration stamp both wrappers and the Grok adapter import; review
   infrastructure, so trusted review copies carry it beside the wrappers)
-- `scripts/review-common.ps1` (the shared follow-up index, capture-locator,
-  review-log prune, legacy-seal, verdict-classifier, consistency-document,
+- `scripts/review-common.ps1` (the shared review-feedback, verdict-locator,
+  verdict-classifier, consistency-document,
   project-mode, prompt-assembly, diff-identity, git, exhaustion-sidecar,
   commit-baseline, tree-path, commit-log evidence, codex-effort,
   argument-quoting, PATH, replacement-suppression, attribute-neutral Git and
@@ -192,12 +192,7 @@ Each audit run consumes:
    admissible), the forced `GIT_NO_REPLACE_OBJECTS=1` boundary, the complete-
    history preflight (`--is-shallow-repository` must resolve to exactly
    `false`; shallow or indeterminate state refuses before merge-base, range,
-   or landing proofs, with fetch/unshallow as the remedy), the
-   staged follow-up promotion
-   (children stage QUALITY follow-ups via `CROSS_REVIEW_FOLLOWUPS_PENDING`;
-   one `Invoke-FollowupPromotion` call, the promoter the pre-commit hook
-   also uses, promotes them to `logs/review-followups.md` only after the
-   ff-merge succeeds), console messages, and the trusted-infra
+   or landing proofs, with fetch/unshallow as the remedy), console messages, and the trusted-infra
    snapshot extracted from base. This is the single merge gate for BOTH
    providers (the required `-Backend` names the preferred initial provider,
    and positively identified exhaustion can substitute the whole panel); there is no separate
@@ -433,12 +428,10 @@ Each audit run consumes:
    any review child launches, the hook pins the exact `git write-tree` identity
    and canonical staged-diff digest; every accepted successful artifact must
    bind both identities. The hook must re-read the same effective-index tree
-   across review completion, private success preparation, the single durable
-   follow-up append, caller-visible semantic projection, successful-path
+   across review completion, private success preparation,
+   caller-visible semantic projection, successful-path
    cleanup, and the displayed candidate PASS. Only an overall hook/process exit
-   0 authorizes Git to continue. A terminal identity refusal may retain an
-   already-appended candidate-review follow-up transaction, but those rows
-   describe reviewed candidate content and never prove that a commit landed.
+   0 authorizes Git to continue.
    **Trust chain for hook edits:** the per-clone dispatcher installed
    by `bootstrap.ps1` at `.git/hooks/pre-commit` captures the exact
    `HEAD:scripts/git-hooks/pre-commit` blob in a shell-owned buffer,
@@ -850,17 +843,16 @@ directions are valid; neither should be set up on a schedule.
 ### 6. Scoped-authority registries are part of the reviewed surface
 
 Each configured scoped-authority registry is prompt-consumed: a reviewer
-resolves a `SCOPED:` slug against its entries, and the wrappers carry a passing
-claim into
-`logs/review-followups.md` as a
-`[scoped: <slug> tree: <oid> diff: <sha256> find: <sha256>]` tag written ALL
-PARTS OR NONE. A weak registry contract is therefore a gate weakening even
-though the only wrapper code involved is the serializer that writes that tag.
+resolves a `SCOPED:`
+slug against its entries, and the marker tells the reader of the verdict that
+a live declaration owns the gap; no wrapper routes it anywhere. A weak registry
+contract therefore weakens review even though no wrapper code reads the
+marker.
 
-The tag's effect here is ADDITIVE. A SCOPED finding keeps its severity, its
+The marker's effect is ADDITIVE. A SCOPED finding keeps its severity, its
 categories, and its place in the verdict enumeration; the marker records that a
-live declaration owns the gap so a later batch pass can re-audit the claim
-first-hand. It clears nothing by itself. An audit finding this package treating
+live declaration owns the gap so the reader of the verdict can re-audit the
+claim first-hand. It clears nothing by itself. An audit finding this package treating
 capture as clearance has found a contract change, not a documentation gap.
 
 **Audit:** the review prompt's numbered CANONICAL DECLARATION AUDIT is the

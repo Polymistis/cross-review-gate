@@ -474,7 +474,7 @@ fi
 # Sanctioned commits require a deliberate, hand-set invocation of their own;
 # a stale caller environment must refuse here, before repository operations.
 if [ -n "${CROSS_REVIEW_SKIP:-}${CROSS_REVIEW_SKIP_AUTHOR_LINT:-}${CROSS_REVIEW_ALLOW_GATE_UNTRACK:-}${CROSS_REVIEW_ALLOW_SEAL:-}" ]; then
-  echo "run-gate: a review skip/sanction variable is set (CROSS_REVIEW_SKIP / CROSS_REVIEW_SKIP_AUTHOR_LINT / CROSS_REVIEW_ALLOW_GATE_UNTRACK / CROSS_REVIEW_ALLOW_SEAL) - this entry point only FIRES the gate; unset it, or make the audited skip an explicit git commit of its own; refusing" >&2
+  echo "run-gate: a review skip/sanction variable is set (CROSS_REVIEW_SKIP / CROSS_REVIEW_SKIP_AUTHOR_LINT / CROSS_REVIEW_ALLOW_GATE_UNTRACK / CROSS_REVIEW_ALLOW_SEAL) - this entry point only FIRES the gate; unset it, or make the skipped or sanctioned commit deliberately through a commit wrapper (scripts/claude/commit.ps1 or scripts/codex/commit.ps1); CROSS_REVIEW_ALLOW_SEAL authorizes bootstrap.ps1 -SealManifest, not a commit; refusing" >&2
   exit 2
 fi
 WT_CANON=$(cd -- "$WT" 2>/dev/null && pwd -P) || WT_CANON=''
@@ -559,8 +559,7 @@ fi
 # would accept sidecars the producer never writes and turn the promised
 # drift refusal into acceptance.
 # CR presence is a BYTE question answered in the byte domain: text-mode
-# grep/awk on this platform strip CR on read (the hook's
-# crg_followup_has_cr documents the same hazard), so a line-mode probe
+# grep/awk on this platform strip CR on read, so a line-mode probe
 # would wave through a CRLF sidecar that bootstrap's clearing refuses.
 # Raw and CR-stripped byte counts are compared instead, each stage
 # checked on its own (piped into wc, tr's status is invisible and a

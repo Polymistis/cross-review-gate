@@ -1653,6 +1653,8 @@ function Invoke-CrgCommitGitUtf8 {
     # confirm is kept in $script:CrgUncertainGitOwner, with the uncertain
     # failure (original failure inside), for the rest of this commit-wrapper
     # process, and raised instead of being released while it may still run.
+    # The slot holds one owner, so a capture failure must end this worker:
+    # a later uncertain capture would overwrite it and drop the earlier child.
     # This process holds nothing else such a capture could be using; the
     # dispatcher attestation hold is taken only after the captures. Data
     # carries only the CrgUncertainGitChild marker: Exception.Data takes only

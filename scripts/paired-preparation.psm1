@@ -263,7 +263,7 @@ function Open-CrgPairedHostInput {
     RuntimeOwners = (New-Object 'System.Collections.Generic.List[object]'); ChildGroup = $null
     ProviderSnapshotFailure = $null
     RuntimeTemplateBytes = $null; ScopeTag = ''; ScopeHuman = ''; DiffText = ''; DiffSha256 = ''
-    ProjectModeBlock = ''; FullPrompt = ''; OutDir = ''; PrivateStateRoot = ''; CaptureContext = $null; Closed = $false
+    ProjectModeBlock = ''; FullPrompt = ''; OutDir = ''; PrivateStateRoot = ''; Closed = $false
   }
   $complete = $false
   try {
@@ -312,7 +312,6 @@ function Open-CrgPairedHostInput {
     }
     $hostInput.RuntimeOwners.Add($outputHold)
     $hostInput.OutDir = $OutDir; $hostInput.PrivateStateRoot = $stateRoot
-    $hostInput.CaptureContext = @{ Ok = $true; Root = $privateDir; LogsDir = (Join-Path $stateRoot 'logs') }
     $hostInput.ScopeTag = 'paired-' + $unit.ReviewUnitSha256.Substring(0, 12)
     $hostInput.ScopeHuman = 'Paired staged review ' + $unit.ReviewUnitSha256
     if ([StringComparer]::Ordinal.Equals($PreparedOrigin, 'first-attachment-v1')) {
@@ -475,165 +474,4 @@ function Write-CrgPairedExhaustionSidecar {
   }
 }
 
-function Get-CrgPairedFollowupFindings {
-  param([string]$VerdictText)
-  $lines = @($VerdictText -split '(?:\r\n|\n|\r)')
-  $findings = New-Object 'System.Collections.Generic.List[object]'
-  $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-  for ($i = 0; $i -lt $lines.Count; $i++) {
-    $match = [regex]::Match($lines[$i], '\A(?<severity>QUALITY|NON-BLOCKER):\s*(?<body>.*)\z')
-    if (-not $match.Success) { continue }
-    # Ended as review-common.ps1's Get-ReviewFindingCitationEnd ends a citation.
-    $citation = [regex]::Match($match.Groups['body'].Value.Trim(), '\A[A-Za-z0-9._/\\-]+:[0-9]+(?::[0-9]+)?(?![0-9A-Za-z_]|:[0-9])')
-    $body = New-Object 'System.Collections.Generic.List[string]'
-    $body.Add(($lines[$i] -replace '[ \t]+$', '')); $slug = ''; $firstBodyLineSeen = $false
-    for ($j = $i + 1; $j -lt $lines.Count; $j++) {
-      if ($lines[$j] -notmatch '\A[ \t]' -and $lines[$j] -notmatch '\A[ \t]*\z') { break }
-      $body.Add(($lines[$j] -replace '[ \t]+$', ''))
-      # Only the first nonblank body line can claim capture. Continue hashing
-      # the complete body even when that first line is untagged or malformed.
-      if (-not $firstBodyLineSeen -and $lines[$j] -notmatch '\A[ \t]*\z') {
-        $firstBodyLineSeen = $true
-        $scoped = [regex]::Match($lines[$j], '\A[ \t]+SCOPED:[ \t]*(?<slug>[a-z0-9]+(?:-[a-z0-9]+)*)(?:[ \t]|$)')
-        if ($scoped.Success) { $slug = $scoped.Groups['slug'].Value }
-      }
-    }
-    while ($body.Count -gt 1 -and $body[$body.Count - 1].Length -eq 0) { $body.RemoveAt($body.Count - 1) }
-    $digest = Get-CrgPairedHostDigest -Bytes ([Text.UTF8Encoding]::new($false, $true).GetBytes(($body -join "`n")))
-    if ($seen.Add($digest)) {
-      $findings.Add([ordered]@{ severity = $match.Groups['severity'].Value; citation = $citation.Value; findingSha256 = $digest; scopedClaim = $slug })
-    }
-  }
-  return ,$findings.ToArray()
-}
-
-function Write-CrgPairedFollowups {
-  [CmdletBinding()]
-  param([Parameter(Mandatory = $true)][object]$HostInput, [Parameter(Mandatory = $true)][string]$VerdictText,
-    [Parameter(Mandatory = $true)][string]$VerdictFile, [Parameter(Mandatory = $true)][ValidatePattern('\A(?:codex|claude|grok)\z', Options = 'None')][string]$Backend)
-  try {
-    $record = Get-CrgPairedHostIdentity -HostInput $HostInput -Backend $Backend
-    if (-not [StringComparer]::Ordinal.Equals([IO.Path]::GetFullPath($VerdictFile), $VerdictFile) -or -not [StringComparer]::Ordinal.Equals([IO.Path]::GetDirectoryName($VerdictFile), $HostInput.OutDir)) { throw 'paired followup artifact is outside the private attempt' }
-    $findings = Get-CrgPairedFollowupFindings -VerdictText $VerdictText
-    if ($findings.Count -eq 0) { return }
-    $record['kind'] = 'paired-followups-v1'; $record['artifact'] = [IO.Path]::GetFileName($VerdictFile)
-    $record['findings'] = $findings
-    # Claims remain data. No legacy public-tree SCOPED key or destructive prune
-    # exemption is minted; the live coordinator promotes this paired-only record.
-    $path = Join-Path $HostInput.OutDir 'followups.pending.json'
-    Write-CrgPairedHostRecord -HostInput $HostInput -Path $path -Record $record
-    Write-Host "[paired-review] staged $($findings.Count) QUALITY follow-ups for private paired promotion -> $path"
-  } catch { Write-Host "[paired-review] WARN: QUALITY capture failed: $($_.Exception.Message)" }
-}
-
-function Publish-CrgPairedFollowups {
-  [CmdletBinding()]
-  param([Parameter(Mandatory = $true)][object]$Operation,
-    [Parameter(Mandatory = $true)][object]$CapturedInput,
-    [Parameter(Mandatory = $true)][object]$Review,
-    [Parameter(Mandatory = $true)][string]$ReceiptSha256,
-    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:paired-v1|first-attachment-v1)\z', Options = 'None')][string]$Origin)
-  $indexRoot = ''
-  try {
-    $bundle = $CapturedInput.Bundle; $fields = $bundle.Metadata.Descriptor.Fields
-    $unit = $bundle.Metadata.ReviewUnit
-    $expectedRoot = Join-Path $Operation.ProjectContext.Domains.private.GitDir ('crg-review-state\runs\' + $unit.Fields['operation-id'])
-    if ($ReceiptSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
-        -not [StringComparer]::Ordinal.Equals($Review.ValidationState, 'current-invocation-reviewed-pair') -or
-        -not [StringComparer]::Ordinal.Equals($Review.OutputRoot, $expectedRoot) -or -not [StringComparer]::Ordinal.Equals($Review.ReviewUnitSha256, $unit.ReviewUnitSha256) -or
-        -not [StringComparer]::Ordinal.Equals($Review.DescriptorSha256, $bundle.DescriptorSha256) -or
-        $Review.ReviewAttempts.Count -lt 1 -or $Review.ReviewAttempts.Count -gt 6) { throw 'paired followup promotion requires the complete current review and retained receipt identity' }
-    $readName = if ([StringComparer]::Ordinal.Equals($Origin, 'paired-v1')) { 'Read-CrgSuccessfulPairArtifactBytes' } else { 'Read-CrgSuccessfulFirstAttachmentArtifactBytes' }
-    $readArtifact = Get-CrgPairedPreparationCommand -Module paired-governance -Name $readName
-    $pins = @{ ReviewUnitBytes = $bundle.Buffers['review-unit.txt']; PublicObjectFormat = $fields['public-object-format']
-      PrivateObjectFormat = $fields['private-object-format']; DescriptorSha256 = $bundle.DescriptorSha256
-      DisplayDiffSha256 = $fields['display-diff-sha256'] }
-    $attempts = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($attempt in $Review.ReviewAttempts) {
-      if ($attempt.ObservedExit -eq 4) { continue }
-      if ($attempt.ObservedExit -ne 0 -or $attempt.VerdictBytes -isnot [byte[]] -or
-          $attempt.Leg -notin @(1, 2) -or $attempt.Attempt -notin @(1, 2, 3) -or
-          -not ([StringComparer]::Ordinal.Equals($attempt.ActualProvider, 'codex') -or [StringComparer]::Ordinal.Equals($attempt.ActualProvider, 'claude') -or
-            [StringComparer]::Ordinal.Equals($attempt.ActualProvider, 'grok'))) { throw 'paired followup attempt is not a current successful artifact' }
-      $artifact = & $readArtifact -Bytes $attempt.VerdictBytes @pins -ExpectedBackend $attempt.ActualProvider -ScheduledPassCount $attempt.ScheduledPassCount
-      if (-not [StringComparer]::Ordinal.Equals($artifact.ArtifactSha256, $attempt.VerdictSha256)) { throw 'paired followup verdict differs from current acquired bytes' }
-      if ([StringComparer]::Ordinal.Equals($attempt.ActualProvider, 'grok') -and
-          (-not [StringComparer]::Ordinal.Equals($artifact.RequestedModel, $bundle.Metadata.Descriptor.GoverningConfig.Grok.Model) -or
-           -not [StringComparer]::Ordinal.Equals($artifact.Effort, $bundle.Metadata.Descriptor.GoverningConfig.Grok.Effort))) { throw 'paired followup Grok requested model or effort differs from the governing profile' }
-      $leaf = [IO.Path]::GetFileName($attempt.Directory)
-      $scope = if ([StringComparer]::Ordinal.Equals($Origin, 'paired-v1')) { 'paired-' } else { 'first-attachment-' }
-      if (-not [StringComparer]::Ordinal.Equals([IO.Path]::GetDirectoryName($attempt.Directory), $expectedRoot) -or
-          $leaf -cnotmatch ('\Aleg-' + $attempt.Leg + '-attempt-' + $attempt.Attempt + '-[0-9a-f]{32}\z') -or
-          $attempt.VerdictFileName -cnotmatch ('\Areview-[0-9]{8}-[0-9]{6}-' + $scope + $unit.ReviewUnitSha256.Substring(0, 12) + '\.md\z')) { throw 'paired followup artifact location is not current owned evidence' }
-      # Re-derive from the validated complete verdict, not the optional pending
-      # sidecar. A failed host-side capture must not silently lose these rows.
-      $findings = Get-CrgPairedFollowupFindings -VerdictText $artifact.VerdictText
-      if ($findings.Count -gt 0) {
-        $attempts.Add([ordered]@{ leg = $attempt.Leg; attempt = $attempt.Attempt; backend = $attempt.ActualProvider
-          artifact = ('runs/' + $unit.Fields['operation-id'] + '/' + $leaf + '/' + $attempt.VerdictFileName)
-          artifactSha256 = $artifact.ArtifactSha256; findings = $findings })
-      }
-    }
-    if ($attempts.Count -eq 0) { return [pscustomobject]@{ Status = 'no-findings'; IndexRecord = $null } }
-    $record = [ordered]@{ kind = 'paired-followups-index-v1'; origin = $Origin; receiptSha256 = $ReceiptSha256
-      reviewUnitSha256 = $unit.ReviewUnitSha256; preparedPairSha256 = $bundle.DescriptorSha256
-      runtimeManifestSha256 = $Operation.Runtime.Id; publicationEvidence = $false; attempts = $attempts.ToArray() }
-    $text = (ConvertTo-Json -InputObject $record -Depth 12) + "`n"
-    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($text)
-    if ($bytes.Length -gt 16777216) { throw 'paired followup index transaction exceeds the private record bound' }
-    $digest = Get-CrgPairedHostDigest -Bytes $bytes
-    $indexRoot = Join-Path $Operation.ProjectContext.Domains.private.GitDir 'crg-review-state\followups'
-    $native = (Get-CrgPairedPreparationCommand -Module paired-diff -Name Assert-CrgPairedOperationLock).Module
-    $path = & $native {
-      param($Root, $Text, $Bytes, $Digest, $Lock)
-      $custody = @{ DirectoryPins = [System.Collections.Generic.List[object]]::new()
-        OwnedDirectories = [System.Collections.Generic.List[object]]::new(); ControlFiles = [System.Collections.Generic.List[object]]::new() }
-      $handle = $null; $existing = $null
-      $stageLeaf = '.crg-followups-' + [guid]::NewGuid().ToString('N')
-      try {
-        Assert-CrgPairedOperationLock -Lock $Lock
-        $parent = Enter-CrgAttributeNeutralDirectoryChain -Path ([IO.Path]::GetDirectoryName($Root)) -Pins $custody.DirectoryPins -DenyLeafRename
-        if ([IO.Directory]::Exists($Root)) {
-          $parent = Enter-CrgAttributeNeutralDirectoryChain -Path $Root -Pins $custody.DirectoryPins -DenyLeafRename
-        } else {
-          $parent = New-CrgAttributeNeutralOwnedDirectory -Custody $custody -Parent $parent -Leaf 'followups' -Path $Root -Label 'private paired followup index'
-        }
-        Assert-CrgAttributeNeutralContextStable -Context @{ Custody = $custody } -Boundary 'private paired followup promotion'
-        $leaf = $Digest + '.json'; $errorCode = 0
-        $handle = [CrgAttributeNeutral.NativeV1]::CreatePublicationFileRelative($parent.Handle, $stageLeaf, [ref]$errorCode)
-        if ($null -eq $handle -or $handle.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($handle)) { throw 'private followup index record is not an owned ordinary file' }
-        if (-not [CrgAttributeNeutral.NativeV1]::WriteUtf8Exact($handle, $Text, [ref]$errorCode)) { throw "private followup write failed (Win32 error $errorCode)" }
-        $actual = Get-CrgOwnedBinaryFileDigest -Record @{ Handle = $handle }
-        if ($actual.Length -ne $Bytes.Length -or -not [StringComparer]::Ordinal.Equals($actual.Sha256, $Digest)) { throw 'private followup candidate differs from the complete transaction' }
-        if (-not [CrgAttributeNeutral.NativeV1]::RenamePublicationFileRelative($handle, $parent.Handle, $leaf, [ref]$errorCode)) {
-          if ($errorCode -notin @(80, 183)) { throw "private followup publication failed (Win32 error $errorCode)" }
-          $existing = [CrgAttributeNeutral.NativeV1]::OpenReadFileRelative($parent.Handle, $leaf, [ref]$errorCode)
-          if ($null -eq $existing -or $existing.IsInvalid -or -not [CrgAttributeNeutral.NativeV1]::IsOrdinarySingleLinkFile($existing)) { throw 'existing private followup record cannot be retained' }
-          $actual = Get-CrgOwnedBinaryFileDigest -Record @{ Handle = $existing }
-          if ($actual.Length -ne $Bytes.Length -or -not [StringComparer]::Ordinal.Equals($actual.Sha256, $Digest)) { throw 'existing private followup record conflicts with the complete transaction' }
-          if (-not [CrgAttributeNeutral.NativeV1]::DeleteHeldExact($handle, $false, [ref]$errorCode)) { throw "duplicate followup candidate cleanup failed (Win32 error $errorCode)" }
-        } elseif (-not [CrgAttributeNeutral.NativeV1]::PathNamesExactHandle((Join-Path $Root $leaf), $handle, $false, [ref]$errorCode)) {
-          throw 'published private followup record lost exact identity'
-        }
-        Assert-CrgPairedOperationLock -Lock $Lock
-        return Join-Path $Root $leaf
-      } catch {
-        throw "private followup promotion failed: $($_.Exception.Message); preserve '$Root\$stageLeaf' and any published record"
-      } finally {
-        # Append-only index records and partial failure evidence are preserved.
-        # The JSON payload hash defines a complete record; filenames alone do not.
-        if ($null -ne $handle) { $handle.Dispose() }
-        if ($null -ne $existing) { $existing.Dispose() }
-        foreach ($owner in $custody.OwnedDirectories) { $owner.Handle.Dispose() }
-        foreach ($owner in $custody.DirectoryPins) { $owner.Handle.Dispose() }
-      }
-    } $indexRoot $text $bytes $digest $Operation.OperationLock
-    Write-Host "[paired-review] QUALITY follow-ups promoted privately -> $path"
-    return [pscustomobject]@{ Status = 'promoted'; IndexRecord = $path }
-  } catch {
-    Write-Warning "paired QUALITY promotion failed: $($_.Exception.Message); complete verdicts remain under '$($Review.OutputRoot)'; index '$indexRoot' is preserved"
-    return [pscustomobject]@{ Status = 'warning'; IndexRecord = $null; Diagnostic = $_.Exception.Message }
-  }
-}
-
-Export-ModuleMember -Function Assert-CrgPairedMessageBytes, Get-CrgCentralStagedReviewInput, Open-CrgPairedHostInput, Complete-CrgPairedHostInput, Write-CrgPairedExhaustionSidecar, Write-CrgPairedFollowups, Publish-CrgPairedFollowups
+Export-ModuleMember -Function Assert-CrgPairedMessageBytes, Get-CrgCentralStagedReviewInput, Open-CrgPairedHostInput, Complete-CrgPairedHostInput, Write-CrgPairedExhaustionSidecar

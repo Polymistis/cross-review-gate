@@ -2861,7 +2861,7 @@ function New-CrgGitAttributeSourceTree {
 
 # `git check-attr` renders both a special state and a colliding literal string
 # as the same word (`set`, `unset`, or `unspecified`). Attribute pathspec
-# predicates retain that type distinction. The eight pathspecs per path below
+# predicates retain that type distinction. The pathspecs per path below
 # enumerate the only accepted state combinations without invoking conversion
 # or any target-configured clean/smudge driver.
 function Assert-CrgPrivateInstallValuesAttributeStates {
@@ -5496,7 +5496,7 @@ function Publish-CrgInstallManifest {
 # authorization cannot be replayed against a new baseline. Observation
 # is PER-COMPONENT and TRI-STATE: each gate path is confirmed local
 # (untracked AND ignored), confirmed non-local, or ERROR -- and any
-# probe error refuses the whole decision (returns $false; callers
+# probe error refuses the whole decision (returns Ok=$false; callers
 # abort), because a transient git failure must never strip a valid
 # local install of its authorization behind a success banner. The
 # marker records the AUTHORIZED PATH SET, so a hybrid layout (section
@@ -8287,8 +8287,9 @@ function Invoke-CrgCentralRuntimeOperation {
   }
 }
 
-# Earliest production Git trust boundary. Git repository selectors can redirect
-# every proof (`-C` included) while filesystem writes still target -TargetRepo;
+# Earliest production Git trust boundary, for every parameter set. Git repository
+# selectors can redirect every proof (`-C` included) while filesystem writes
+# still target the operation's own destination (-TargetRepo or -RuntimeStore);
 # attribute-source overrides can change the clean/eol/filter domain used by
 # `check-attr` and filter-aware `hash-object --path`; graft/shallow/replace-base
 # overrides can rewrite ancestry and object reads while Git still exits zero;
@@ -8306,13 +8307,13 @@ foreach ($crgRawEnvEntry in [Environment]::GetEnvironmentVariables([EnvironmentV
 }
 $maskingGitOverrideEnv = @($maskingGitOverrideEnv | Sort-Object)
 if ($maskingGitOverrideEnv.Count -gt 0) {
-  Write-Error "bootstrap.ps1: refusing to run with git-config override env var(s), repository-selector override(s), attribute-resolution override(s), or history-resolution override(s) set: $($maskingGitOverrideEnv -join ', '). These can redirect Git proofs away from -TargetRepo or alter the config, attribute, object, or ancestry domain used for trusted identity checks. Unset every named variable and re-run -- PowerShell: Remove-Item Env:<NAME>; bash: unset <NAME>. Nothing has been modified in the target repository."
+  Write-Error "bootstrap.ps1: refusing to run with git-config override env var(s), repository-selector override(s), attribute-resolution override(s), or history-resolution override(s) set: $($maskingGitOverrideEnv -join ', '). These can redirect Git proofs away from the repository being inspected or alter the config, attribute, object, or ancestry domain used for trusted identity checks. Unset every named variable and re-run -- PowerShell: Remove-Item Env:<NAME>; bash: unset <NAME>. Nothing has been modified: no repository, source, or runtime store was touched."
   exit 1
 }
 try {
   Set-CrgNoReplaceObjectsProcessSingleton
 } catch {
-  Write-Error "bootstrap.ps1: could not establish exactly one canonical GIT_NO_REPLACE_OBJECTS=1 entry before the first Git proof ($($_.Exception.Message)). Nothing has been modified in the target repository."
+  Write-Error "bootstrap.ps1: could not establish exactly one canonical GIT_NO_REPLACE_OBJECTS=1 entry before the first Git proof ($($_.Exception.Message)). Nothing has been modified: no repository, source, or runtime store was touched."
   exit 1
 }
 
@@ -12055,7 +12056,7 @@ crg_skip_refuses_driver_edit() {
     _crg_sd_ignore_rc=$?
     case "$_crg_sd_ignore_rc" in
       0) ;;
-      1) crg_local_diagnostic IGNORE-STATE scripts/run-gate.sh 'Local routing driver is not ignored. Restore the intended LOCAL exclude rule before retrying.'; return 0 ;;
+      1) crg_local_diagnostic IGNORE-STATE scripts/run-gate.sh 'Local routing driver is not ignored. Restore the intended LOCAL exclude rule or use the TRACKED installation workflow before retrying.'; return 0 ;;
       *) crg_local_diagnostic IGNORE-STATE scripts/run-gate.sh 'Cannot inspect the local routing driver ignore state. Check Git configuration and repository access before retrying.'; return 0 ;;
     esac
     crg_local_install_buffer "scripts/run-gate.sh" || return 0
@@ -12412,7 +12413,7 @@ if [ "$HEAD_HAS_GATE" -ne 1 ]; then
     else
       crg_local_ignore_rc=$?
       if [ "$crg_local_ignore_rc" -eq 1 ]; then
-        crg_local_diagnostic IGNORE-STATE scripts/git-hooks/pre-commit 'Local hook is not ignored. Restore the intended LOCAL exclude rule before retrying.'
+        crg_local_diagnostic IGNORE-STATE scripts/git-hooks/pre-commit 'Local hook is not ignored. Restore the intended LOCAL exclude rule or use the TRACKED installation workflow before retrying.'
       else
         crg_local_diagnostic IGNORE-STATE scripts/git-hooks/pre-commit 'Cannot inspect the local hook ignore state. Check Git configuration and repository access before retrying.'
       fi
@@ -12440,7 +12441,7 @@ if [ "$HEAD_HAS_GATE" -ne 1 ]; then
   echo "[pre-commit:dispatcher]   powershell -NoProfile -ExecutionPolicy Bypass -File \"<path-to>\\cross-review-gate\\bootstrap.ps1\" -TargetRepo \"<repo>\" -Force" >&2
   echo "[pre-commit:dispatcher]   powershell -NoProfile -ExecutionPolicy Bypass -File \"<repo>\\scripts\\render-project-values.ps1\" -TargetRepo \"<repo>\" -Check" >&2
   echo "[pre-commit:dispatcher] If exact LOCAL recovery is required, first complete the bounded sanctioned" >&2
-  echo "[pre-commit:dispatcher] -SealManifest step in docs/install-values-v1.md, then run both commands above" >&2
+  echo "[pre-commit:dispatcher] -SealManifest step in the package's docs/install-values-v1.md, then run both commands above" >&2
   echo "[pre-commit:dispatcher] in order. Never retry this commit on sealed drift." >&2
   exit 1
 fi
@@ -13113,8 +13114,9 @@ Write-Host ""
 Write-Host "1. REVIEW the fixed project-values source retained at:"
 Write-Host "   $targetRepoAbs\CROSS-REVIEW-VALUES.md"
 Write-Host ""
-Write-Host "   Bootstrap rendered the three validated value blocks into every installed"
-Write-Host "   review surface. Future value changes are made only in this fixed source,"
+Write-Host "   Bootstrap rendered the three validated value blocks into the installed"
+Write-Host "   review prompt and the SCOPED authority block into the AGENTS merge"
+Write-Host "   template. Future value changes are made only in this fixed source,"
 Write-Host "   staged first for TRACKED authority, then applied with a full -Force run."
 Write-Host "   Installed templates are generated outputs, not customization sources."
 Write-Host ""

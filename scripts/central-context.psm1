@@ -1027,7 +1027,7 @@ function Get-CrgCentralIndexTree {
   $closeCopy = @(Get-Command -Name Close-CrgPairedIndexCopy -Module paired-diff -CommandType Function -ListImported -ErrorAction SilentlyContinue)
   if ($newCopy.Count -ne 1 -or $closeCopy.Count -ne 1) { throw 'index capture requires the retained paired-diff copy owner' }
   $copy = & $newCopy[0] -Bytes $index.Bytes -TempParent $ProjectContext.Domains.private.GitDir
-  $keepCopy = $false
+  $keepCopy = $false; $failure = $null
   try {
     # write-tree takes an unconditional index lock and may run post-index-change;
     # GIT_OPTIONAL_LOCKS does not prevent either (2026-09-06 review finding).
@@ -1041,6 +1041,7 @@ function Get-CrgCentralIndexTree {
     if (-not [string]::Equals($copySharedText, $sharedPath, [StringComparison]::Ordinal)) { throw 'copied index resolves a different split-index backing path' }
     $tree = Get-CrgStatusGitLine -Arguments ($copyArguments + @('write-tree')) -GitExe $ProjectContext.GitExe -IndexPath $copy.IndexPath
   } catch {
+    $failure = $_.Exception
     # A Git child whose exit could not be confirmed can still hold the copied
     # index, so the copy stays open on the failure (CrgCentralIndexCopy)
     # instead of being removed under it.
@@ -1049,7 +1050,12 @@ function Get-CrgCentralIndexTree {
   } finally {
     if (-not $keepCopy) {
       $closed = & $closeCopy[0] -Copy $copy
-      if (-not $closed.Ok) { throw "index-copy cleanup is unconfirmed; preserved '$($closed.Root)': $($closed.Reason)" }
+      # This throw replaces a capture failure in flight, so it carries that
+      # failure's reason as well.
+      if (-not $closed.Ok) {
+        $cause = if ($null -ne $failure) { "; capture had failed: $($failure.Message)" } else { '' }
+        throw "index-copy cleanup is unconfirmed for '$($closed.Root)': $($closed.Reason)$cause"
+      }
     }
   }
   $treeBytes = Read-CrgCentralTreeBytes -ProjectContext $ProjectContext -Domain $Domain -TreeOid $tree
@@ -1085,7 +1091,7 @@ function Read-CrgCentralCommitLogBytes {
   # absence probes race creation. Reuse byte-copy custody, never an index input.
   $control = & $newControl[0] -Bytes ([byte[]]@()) -TempParent $ProjectContext.Domains.private.GitDir
   $output = New-Object IO.MemoryStream
-  $keepControl = $false
+  $keepControl = $false; $failure = $null
   try {
     $ids = Invoke-CrgStatusGit -Arguments ($prefix + @('rev-list', ('--max-count=' + $bounds.DomainCommitCount), $parent, '--')) -Maximum 1024 -GitExe $ProjectContext.GitExe -HistoryControlPath $control.IndexPath
     $width = if ([string]::Equals($ProjectContext.Domains[$Domain].ObjectFormat, 'sha1', [StringComparison]::Ordinal)) { 40 } else { 64 }
@@ -1114,8 +1120,11 @@ function Read-CrgCentralCommitLogBytes {
       $output.Write($bytes, 0, $bytes.Length)
       $output.WriteByte(10)
     }
-    return ,$output.ToArray()
+    # Returned after the finally confirms cleanup: a return here would emit
+    # the history to the pipeline before that confirmation.
+    $history = $output.ToArray()
   } catch {
+    $failure = $_.Exception
     # As for the index copy: an unconfirmed Git child can still read the
     # graft/shallow control file, which stays open on the failure
     # (CrgCentralHistoryControl).
@@ -1125,9 +1134,13 @@ function Read-CrgCentralCommitLogBytes {
     $output.Dispose()
     if (-not $keepControl) {
       $closed = & $closeControl[0] -Copy $control
-      if (-not $closed.Ok) { throw "history-control cleanup is unconfirmed; preserved '$($closed.Root)': $($closed.Reason)" }
+      if (-not $closed.Ok) {
+        $cause = if ($null -ne $failure) { "; capture had failed: $($failure.Message)" } else { '' }
+        throw "history-control cleanup is unconfirmed for '$($closed.Root)': $($closed.Reason)$cause"
+      }
     }
   }
+  return ,$history
 }
 
 function Write-CrgCentralPrivateMessageBlob {

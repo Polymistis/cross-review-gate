@@ -197,8 +197,6 @@ function Invoke-CrgCentralCapturedPublication {
     $retentionArguments = @{ ProjectContext = $project; OperationLock = $Operation.OperationLock; ReceiptBytes = $receiptBytes; CapturedInput = $CapturedInput; ReviewAttempts = $review.ReviewAttempts }
     if ([string]::Equals($Origin, 'first-attachment-v1', [System.StringComparison]::Ordinal)) { $retentionArguments.AttachmentBytes = $Operation.AttachmentBytes }
     $record = & $retain @retentionArguments
-    $promote = Get-CrgPublicationCommand -Runtime $runtime -Module paired-preparation -Name Publish-CrgPairedFollowups
-    $followups = & $promote -Operation $Operation -CapturedInput $CapturedInput -Review $review -ReceiptSha256 $record.ReceiptSha256 -Origin $Origin
     $handoffName = if ([string]::Equals($Origin, 'paired-v1', [System.StringComparison]::Ordinal)) { 'New-CrgPairHandoffBytes' } else { 'New-CrgFirstAttachmentHandoffBytes' }
     $newHandoff = Get-CrgPublicationCommand -Runtime $runtime -Module paired-governance -Name $handoffName
     $handoff = & $newHandoff -ReceiptBytes $receiptBytes -PublicObjectFormat $project.Domains.public.ObjectFormat -PrivateObjectFormat $project.Domains.private.ObjectFormat
@@ -248,7 +246,7 @@ function Invoke-CrgCentralCapturedPublication {
     & $removeHandoff -ProjectContext $project -OperationLock $Operation.OperationLock -ExpectedBytes $handoff
     Assert-CrgCentralCapturedState -Operation $Operation -CapturedInput $CapturedInput -Origin 'paired-v1' -ExpectedRefs $expected -ExpectedPointerBytes $completed
     return [pscustomobject]@{ Status = 'completed'; Origin = $Origin; Runtime = $runtime.Id; ReceiptSha256 = $record.ReceiptSha256
-      PublicCommit = $results.public; PrivateCommit = $results.private; ReviewOutput = $review.OutputRoot; Followups = $followups }
+      PublicCommit = $results.public; PrivateCommit = $results.private; ReviewOutput = $review.OutputRoot }
   } catch {
     $retained = Save-CrgUncertainCentralOperation -Operation $Operation -GuardCustody $guard -Failure $_.Exception
     throw

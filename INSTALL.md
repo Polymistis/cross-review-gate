@@ -100,13 +100,14 @@ The bootstrap does the following:
 - Copies `scripts/codex/`, `scripts/claude/`, `scripts/shared/`,
   `scripts/git-hooks/`, `scripts/run-gate.sh`, the backend-neutral
   `scripts/render-project-values.ps1`, the shared reviewer-liveness module
-  `scripts/review-liveness.psm1` and the shared follow-up functions
+  `scripts/review-liveness.psm1` and the shared review functions
   `scripts/review-common.ps1` into the target repo's `scripts/` directory
 - Copies `docs/audit-protocol.md` and the rendered
   `docs/AGENTS.md.template` into the target repo's `docs/` directory
   (creating `docs/` if missing)
 - Retains and validates the selected values source and raw package templates,
-  renders all project-context slots in memory, and validates every complete
+  renders in memory all three value blocks into the review prompt and only
+  the SCOPED authority block into the AGENTS merge template, and validates every complete
   output before entering destination mutation. Installed prompt and AGENTS
   template bytes contain final inline text; review and hook paths perform no
   runtime values lookup. A package self-install performs the same check but
@@ -322,7 +323,7 @@ for every changed path among:
 - `scripts/claude/auto-review.ps1`;
 - `scripts/codex/review-prompt-template.md`;
 - `scripts/review-liveness.psm1`, the shared module those wrappers import; and
-- `scripts/review-common.ps1`, the shared follow-up, verdict, project-mode,
+- `scripts/review-common.ps1`, the shared review-feedback, verdict, project-mode,
   prompt-assembly, git, tree-path, commit-log evidence, codex-effort,
   argument-quoting, PATH, replacement-suppression, attribute-neutral Git and
   name-status path functions those wrappers dot-source.
@@ -501,7 +502,8 @@ Interruption recovery is state-based:
 ## Step 3 — verify and maintain project values
 
 Bootstrap has already rendered the three blocks from
-`CROSS-REVIEW-VALUES.md` into the installed prompt and AGENTS merge template.
+`CROSS-REVIEW-VALUES.md` into the installed prompt, and the SCOPED authority
+block into the AGENTS merge template.
 Verify exact agreement without writing:
 
 ```powershell
@@ -768,6 +770,10 @@ Use `scripts/shared/auto-merge.ps1` for new merge commands. The legacy
 `scripts/codex/auto-merge.ps1` entrypoint remains a forwarding wrapper because
 installed launcher ABIs require that path. The forwarding entrypoint does not
 select a reviewer or change the shared implementation's review requirements.
+The merge gate's fast-forward refuses, rather than overwrites, an ignored
+local file when the incoming tree tracks the same path
+(`git merge --no-overwrite-ignore`); move the local file aside and merge
+again.
 
 Confirm the ordinary commit's final process exit and the gate's own PASS
 outcome before reporting a successful landing. A review finding or tooling
@@ -862,36 +868,6 @@ The wrappers respect these env vars:
   run and remove the value afterward. This remains an operator act by design —
   an agent must never set the sanction.
 
-- `CROSS_REVIEW_PRUNE_TOOL` — path (absolute, or relative to the wrapper's
-  current location) to a custom delete-tool script file used for
-  auto-pruning old review log files, with surrounding whitespace trimmed.
-  When PowerShell resolves the value to an existing file (relative, drive
-  letter, FileSystem PowerShell drive, or `~`), bash receives that file's
-  path converted by its own converter (`cygpath` in Git bash, `wslpath` in
-  WSL); a bash with neither converter fails the check and skips the prune.
-  Otherwise bash receives the value as written, for paths in bash's own
-  namespace; a relative value is read as `./value`, so a name such as `-` is
-  always a file. bash then requires a regular file and runs it as a bash
-  script with the log file paths as positional arguments. The log paths are
-  always Windows-form absolute paths (for example `E:\repo\logs\...`); a tool
-  running under WSL bash must convert them itself. A value containing a
-  double quote that PowerShell cannot resolve is refused, because Windows
-  PowerShell 5.1 cannot pass it to bash intact. If unset, auto-prune is OFF
-  and nothing is deleted. The wrappers never delete review logs directly (no
-  `Remove-Item` or built-in Recycle Bin fallback). The variable is evaluated
-  only on runs where old log files are eligible: an unset variable then
-  prints one line naming the eligible file count; a whitespace-only value, a
-  refused double-quote value, a value bash cannot find as a regular file, or
-  a missing `bash` SKIPS the prune with a WARN line. Runs with no eligible files print neither. A batch
-  counts as pruned only when the tool exits 0; a nonzero exit or launch
-  failure is reported in a WARN line (files in that batch may be partially
-  deleted) and never stops the review. Set this
-  to a safe-delete script that routes through the Recycle Bin to enable
-  pruning:
-  ```powershell
-  $env:CROSS_REVIEW_PRUNE_TOOL = 'C:\path\to\safe-delete.sh'
-  ```
-
 - `CROSS_REVIEW_CONSISTENCY_DOC` — OPT-IN. Repo-relative path of a
   planning/spec doc (e.g. `PLAN.md`) to enable the consistency precheck
   (milestone cross-reference / range-vs-item-set / missing-field) on that
@@ -905,8 +881,8 @@ The wrappers respect these env vars:
   `PLAN-CONSISTENCY-END: v1`. In a well-formed `produced` envelope,
   `PLAN-CONSISTENCY-FINDING:` rows are documentary evidence: a row is a
   `QUALITY:` finding under `PLAN-DRIFT` only when the change adds or causes
-  the drift it names, and otherwise context; both valid skip states are
-  non-findings. When the configured
+  the drift it names, and otherwise context; each valid `skipped-*` state is
+  a non-finding. When the configured
   document is in the reviewed diff, indeterminate, absent, unreadable,
   malformed, or unterminated report evidence is a fail-closed
   `BLOCKER:` under `SILENT-FAILURE`. Independent planning blockers retain
@@ -1002,57 +978,61 @@ The wrappers respect these env vars:
   provider-neutral, no environment state persists, and no provider-skip
   switch is part of the interface.
 
-## Review tasks and findings files
+## Non-blocking findings and findings files
 
-A passing Codex or Claude review (not a paired review) records its QUALITY
-and NOTE findings (`docs/review-feedback-v1.md`):
+A passing Codex or Claude review (not a paired review) shows its QUALITY
+and NOTE findings to the session that submitted the change (a review
+wrapper run on its own prints them; the commit and merge gates launch the
+wrappers with `-NoFindingsNotice`, which keeps the notice out of the
+transcript they validate, and show the findings in their success output
+from the verdict artifact), grouped by what each cites: QUALITY findings citing product code or configuration first,
+then QUALITY findings citing records or documentation (`History.md`,
+`TASKS.md`, `PLAN.md`, or a `.md`, `.markdown`, `.txt`, `.rst` or `.adoc`
+path), then NOTE findings. A passed commit or merge prints them as
+`review result:` lines: a lead line (`The review passed. The findings below
+do not block and are not kept as tasks for a later session; fix the ones
+worth fixing as part of this change.`), then each non-empty group's heading
+(`QUALITY findings citing product code or configuration:`, `QUALITY
+findings citing records or documentation:`, `NOTE findings:`) followed by
+its finding lines, indented; when that grouping fails, the gate prints the
+accepted finding lines ungrouped instead, and its result is unchanged
+(section 3 of `docs/review-feedback-v1.md`). That session fixes the ones
+worth fixing as part of the current change; the gate records no finding as
+work for a later session. When upgrading from before 2.8.0: upgrade every gate as a whole; a mix
+of versions is not supported, and no gate checks for one. In a per-project
+install, run the fast-forward that brings 2.8.0 into a base that does not
+have it yet with that base's own merge gate script
+(`scripts/shared/auto-merge.ps1` in the base's checkout) as well as the
+base's wrappers: the 2.8.0 merge gate launches every wrapper with
+`-NoFindingsNotice`, which earlier wrappers do not have. A follow-up index
+(`review-followups.md` in the review logs folder, the one holding
+`codex/reviews` and `claude/reviews`) and review task lines in `TASKS.md`
+left by an earlier release are not read, protected or cleaned up: delete
+them by hand (section 3 of `docs/review-feedback-v1.md`). The wrappers
+do not read `CROSS_REVIEW_PRUNE_TOOL` and never delete review logs; delete
+old ones by hand. A passing review
+writes no findings file, and its findings are not shown to any later
+review. Findings files an earlier release wrote for passing reviews are
+not valid findings files: while their names are inside the blocked-round
+scan's window, a staged review reports them as skipped (below); delete
+them by hand.
+
+A staged review (the commit gate's) that blocks records its BLOCKER
+findings, as best effort (a failed write is a WARN), as a blocked round
+keyed to the working tree and its HEAD:
 
 - `logs/review-findings/<backend>-review-<UTC time written>-<12 hex>.findings`:
-  the repository, severity, citations (the opening one and every other
+  the repository, the working tree's Git directory and HEAD, and the
+  severity, citations (the opening one and every other
   `path:line` naming a file of the reviewed tree or of the change), digest
   and escaped, quoted text of each finding (a submodule writes them to
   `crg-review-findings` inside its common Git directory instead, one place
   for all of its checkouts, and still reads its working tree's own
-  `logs/review-findings`). No later review is shown that text. The gate
-  never deletes these files (the review-log prune tool does not cover them);
-  old ones can be sent
-  to the Recycle Bin by hand (a task line naming a removed file then leads
-  nowhere).
-- `TASKS.md` at the main checkout's root: one task line per severity and
-  citation, naming the findings file that holds the finding's text (no
-  finding prose in `TASKS.md`), under a QUALITY and a NOTE heading (created as the first and the last section
-  when missing; existing sections stay where they are). `TASKS.md` is
-  per-user work tracking and is never committed: the gate adds `/TASKS.md`
-  to the repository's `info/exclude`, writes only once Git confirms it is
-  ignored, and leaves a tracked `TASKS.md` untouched (with a warning), as it
-  does a `TASKS.md` that is a link, has several links, or is stored under
-  another letter case such as `tasks.md` (rename it to `TASKS.md`). The gate
-  only adds lines; check tasks off or delete them by hand.
-  The final tracking check and the write run under the main checkout's
-  Git index lock, which the gate takes for that moment (a Git command run
-  there meanwhile fails with `index.lock: File exists`; run it again). A
-  review that finds the lock already held (for example under
-  `git commit -a` or a partial `git commit <paths>` in the main checkout)
-  adds no tasks, with a warning; its findings file is still written.
-  If a write to `TASKS.md` (including its creation) is interrupted, its
-  recovery copy stays in the Git directory as `crg-tasks-recovery.md` (for
-  example `.git/crg-tasks-recovery.md`) and the gate adds no tasks, and
-  creates no `TASKS.md`, until it is gone: compare it with `TASKS.md`,
-  restore `TASKS.md` from it if needed, then delete it. An interrupted
-  append to `info/exclude` leaves `crg-exclude-recovery` (the exclude
-  file's original content) in the Git directory the same way; restore the
-  exclude file from it if needed, then delete it. A `.partial` file beside
-  either copy is most likely an incomplete copy from a run that stopped
-  before changing anything; the gate keeps it and adds no tasks, with a
-  warning, until it is checked and deleted (when no review is running).
-  The merge gate's fast-forward refuses, rather than overwrites, an ignored
-  local file such as `TASKS.md` when the incoming tree tracks the same path
-  (`git merge --no-overwrite-ignore`); move the local file aside and merge
-  again.
+  `logs/review-findings`). The gate
+  never deletes these files; files older than 14 days are no longer read, and old ones can be sent
+  to the Recycle Bin by hand.
 
-A staged review (the commit gate's) that blocks records its BLOCKER findings
-as a blocked round in the same folder, keyed to the working tree and its
-HEAD. Before the next review of that change runs, the gate requires a
+Before the next review of that change runs, the gate requires a
 remediation record, `crg-remediation.txt` in the working tree's own Git
 directory (for example `.git/crg-remediation.txt`, or
 `.git/worktrees/<name>/crg-remediation.txt` in a linked worktree), with one
@@ -1079,77 +1059,15 @@ change's prior findings is ignored. Rules: section 5 of
 `docs/review-feedback-v1.md`.
 
 Every PASS line states what the review covers (the source diff only, not
-target execution or deployment readiness); the merge gate's PASS line also
-gives the open task counts in `TASKS.md` (and goes on with its ff-merge
-note). A passed commit or merge also prints `review result: review-feedback`
-lines: the commit gate's task counts (`review-feedback: open review tasks in
-TASKS.md: QUALITY=<q> NOTE=<n>`) and a `review-feedback WARN:` line for each
-feedback step left undone (tasks not added and why, a recovery copy or
-`.partial` file left, a findings file not written, findings files skipped,
-QUALITY follow-ups unavailable), plus a `review result:
-housekeeping WARN:` line for each piece of upkeep skipped or left half done
-(the review-log age-prune skipped or limited, `CROSS_REVIEW_PRUNE_TOOL`
-unusable, prune batches failed, a follow-up index lock left behind), so a
-passing review never hides them. The warnings are gathered from every review invocation
-the gate launched, at most 32 shown and the rest counted, and gathering them
-never fails a passed gate. The follow-up promotion that the commit and merge
-gates run themselves is not a review invocation: its warnings, plain and
-`housekeeping WARN:` alike, print directly, without the `review result:`
-prefix.
-
-## Legacy-index seal (capture doctrine v6) — REQUIRED before pruning resumes
-
-Under capture doctrine v6 the follow-up index (`logs/review-followups.md`)
-records every append as a bracketed, digest-vouched transaction. Content
-written BEFORE v6 — the "legacy region" at the top of an existing index —
-cannot be verified retroactively, so on an install whose index carries such
-a region the review-log auto-prune is QUARANTINED: nothing is deleted until
-an operator inspects that region and seals it. A fresh install (index
-created under v6) has no legacy region and needs no seal.
-
-To seal, inspect the legacy region by hand — everything above the REGION
-START: the first `<!-- review-followups: transaction v1 OPEN -->` line or,
-when it comes earlier, the first
-`<!-- review-followups: capture-doctrine v6 BEGIN -->` line of a
-byte-valid current frame; the ENTIRE file when neither exists yet (a
-not-yet-migrated index, the primary upgrade path) — then capture its byte
-length and SHA-256 and run the seal mode with those values:
-
-```powershell
-# from the repo root; derive <len> (the region start's byte offset), e.g.
-# in git bash — grep -b prints each marker line's byte offset; take the
-# SMALLER of the two, and a file printing neither uses its full length:
-#   grep -a -b -m 1 -x -F '<!-- review-followups: transaction v1 OPEN -->' logs/review-followups.md | cut -d: -f1
-#   grep -a -b -m 1 -x -F '<!-- review-followups: capture-doctrine v6 BEGIN -->' logs/review-followups.md | cut -d: -f1
-#   wc -c < logs/review-followups.md          # when neither grep printed
-# then hash exactly those bytes:
-#   head -c <len> logs/review-followups.md | sha256sum
-# (A BEGIN line whose frame is not byte-valid does not start the region;
-# if the operation refuses with a mismatch, re-inspect against the
-# refusal's measured values.)
-scripts/codex/auto-review.ps1 -Scope SealLegacy `
-  -SealExpectedBytes '<len>' -SealExpectedSha '<sha256>'
-```
-
-The operation recomputes both under the writer lock and REFUSES on any
-mismatch (a write landed after the inspection — re-inspect and re-run), on
-a damaged tail (repair it by hand first), and when there is nothing to
-seal. On success it appends a seal transaction, writes a `seal-*`
-provenance record beside the verdict logs, and the legacy QUARANTINE lifts
-for as long as the legacy bytes keep matching the seal — the prune's other
-guards (unresolved capture claims, doctrine-state checks) still apply, and
-a later edit to the legacy region makes the seal inert and the quarantine
-returns.
-
-Every writer of the index — the review wrappers, the merge gate and the
-pre-commit hook's promotion — is PowerShell (`Invoke-FollowupPromotion` in
-`scripts/review-common.ps1`) and reaches the index, its lock and the seal
-records only through the held logs folder Git names
-(`docs/capture-doctrine-v6.md` section 7). When Git cannot name that folder,
-or it cannot be held, the follow-up records are dropped with a warning and
-the prune stays off; nothing is written under the current folder. A lock
-left by a crashed writer (`logs/review-followups.md.lock`) keeps appends and
-the prune off, reported on every run, until it is removed by hand.
+target execution or deployment readiness). A passed commit or merge also
+prints a `review result: review-feedback WARN:` line for each feedback step
+left undone (such as findings files the blocked-round scan skipped, or the
+blocked-retry check or the prior blocked findings unavailable), plus a
+`review result: housekeeping WARN:` line for each piece of upkeep skipped
+or left half done (such as folder holds kept until the review process
+ends, which can leave a temporary review folder behind). The warnings are gathered
+from every review invocation the gate launched, at most 32 shown and the
+rest counted, and gathering them never fails a passed gate.
 
 ## Step 11 — generate a trend report (after some review history exists)
 

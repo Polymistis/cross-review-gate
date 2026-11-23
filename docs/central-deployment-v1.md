@@ -236,7 +236,7 @@ approved runtime manifest is not a central package.
 
 Outside `release/` the archive carries exactly `bootstrap.ps1`, `INSTALL.md`
 and these operator documents from the source commit's `docs/`:
-`AGENTS.md.template`, `audit-protocol.md`, `capture-doctrine-v6.md`,
+`AGENTS.md.template`, `audit-protocol.md`,
 `central-deployment-v1.md`, `central-guards-v1.md`,
 `central-instructions-v1.md`, `central-launcher-v1.md`,
 `central-publication-v1.md`, `central-runtime-v1.md`,
@@ -400,10 +400,9 @@ agent editing workflow. Existing project content must be preserved and reviewed:
 - `.crg-project/project.conf`: strict UTF-8 without BOM, LF-only, final LF.
 - `CROSS-REVIEW-VALUES.md`: actual project context, hazards and SCOPED authority
   using the existing three-block [values contract](install-values-v1.md).
-- `AGENTS.md` and `CLAUDE.md`: existing project instructions, the same canonical
-  central discovery section below, and the persistent code-unit-tests-banned
-  directive that keeps live testing, manual checks, ordinary program runs, and
-  functional validation permitted.
+- `AGENTS.md` and `CLAUDE.md`: existing project instructions and the same
+  canonical central discovery section below. What else these files contain is
+  the operator's decision.
 - Private `PLAN.md` and, optionally, `History.md`: actual project
   requirements/work history, with roles in configuration. A project without a
   history document omits its role and discovery record instead of adding a

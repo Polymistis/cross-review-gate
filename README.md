@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.7.4** (Windows / PowerShell) — the authoritative value is the
+**Version 2.8.0** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.7 supplies a read-only central launcher and an installation-managed
@@ -36,9 +36,9 @@ below 2.5 is unsupported (see `docs/private-governance-v1.md`).
 
 Version 2.6 keeps review findings. These features belong to the ordinary
 (not paired) Codex and Claude reviews: a passing review adds its QUALITY
-and NOTE findings as tasks in the per-user `TASKS.md`, and the retry of a
-blocked staged review needs a remediation record first (both described
-below and in `docs/review-feedback-v1.md`). A passing review's findings
+and NOTE findings as tasks in the per-user `TASKS.md` (removed in 2.8.0),
+and the retry of a blocked staged review needs a remediation record first
+(described below and in `docs/review-feedback-v1.md`). A passing review's findings
 are not shown to any later review; blocked rounds are shown to a later
 staged review of the same working tree and HEAD, as section 5 there
 defines. Identity decisions and comparisons of outside field values (verdict
@@ -155,8 +155,9 @@ names the sandbox remedy. The bootstrap did not change.
 Version 2.3 made `grok-4.7` the Grok provider record for new and updated
 project configuration (in 2.3, unmigrated `grok-4.6` records kept running
 `grok-4.6`; from 2.4 they run the central `recommended` profile on their own
-transport), and the legacy review-log prune never deletes files without an
-operator-configured safe-delete tool.
+transport), and the review-log age-prune of that release, which 2.8.0
+removed, never deleted files without an operator-configured safe-delete
+tool.
 
 Version 2.2 adds a shared machine-local runtime with project configuration and
 separate private governance history. One central activation upgrades all attached
@@ -173,13 +174,17 @@ it. Every commit and every merge gates on the review's verdict;
 findings are categorized into BLOCKER / QUALITY / NOTE tiers with
 strict fail-closed semantics. Only BLOCKER findings block (2026-07
 severity contract): QUALITY findings pass the gate as non-blocking
-follow-ups, printed prominently and recorded (best-effort) to an
-append-only `logs/review-followups.md` index for batch triage; NOTE
-is informational. A passing ordinary (not paired) Codex or Claude review also adds tasks for its QUALITY and
-NOTE findings (one per severity and citation) to the main checkout's
-per-user `TASKS.md` (QUALITY first,
-never committed); PASS lines state that a review covers the source diff only, not
-target execution or deployment readiness. In an ordinary staged review, a
+findings; NOTE is informational. A passing ordinary (not paired) Codex
+or Claude review shows its non-blocking findings to the session that
+submitted the change, QUALITY first, for that session to fix as part of
+the current change or drop; no finding is recorded as work for a later
+session, and a passing review's findings are not shown to any later
+review. PASS lines state that a review covers the source diff only, not
+target execution or deployment readiness, and a passing commit or merge
+review also prints a reminder to delete any task the change completes from
+`TASKS.md` and every other task list once the change has landed, since task
+lists hold unfinished work only. In an
+ordinary staged review, a
 retry of a blocked commit is
 refused before review until a remediation record names, for each earlier
 BLOCKER it is asked to cover (from the blocked rounds of the last 14 days,
@@ -253,7 +258,8 @@ can be slotted in as a backend.
   fail-closed or unknown child exit aborts on its own arm), and a
   codex-to-claude substitute is additionally refused when the branch
   touches the configured consistency doc or the base's claude
-  wrapper predates `-ArtifactTag` (the refusal names the remedy).
+  wrapper is not confirmed to declare `-ArtifactTag` (the refusal names
+  the remedy).
   Cross-review is preferred; a fallback landing on the author's own
   provider is an internally recorded self-review accepted over a stalled
   gate. Routing is automatic, per invocation, and never changes caller
@@ -268,8 +274,7 @@ can be slotted in as a backend.
   TEST-QUALITY, DOC-VS-CODE-DRIFT) + a `VERDICT:` line
   (CLEAN / NON-BLOCKING / BLOCKED) + per-severity entries. Wrapper
   parses this and exits 0 (clean / NOTE-only / QUALITY-only — QUALITY
-  is a non-blocking follow-up under the 2026-07 severity contract,
-  recorded best-effort to `logs/review-followups.md`; exit 1 is
+  is a non-blocking finding under the 2026-07 severity contract; exit 1 is
   RETIRED and treated as fail-closed by the gates), 2 (BLOCKER),
   3 (malformed / fail-closed), or 4 (positively-identified token
   exhaustion — fallback-eligible, see the token-exhaustion fallback
@@ -465,8 +470,9 @@ setup differs.
 1. **Project values in root `CROSS-REVIEW-VALUES.md`** — create the v1
    source before bootstrap and supply actual `project-context`,
    `project-hazards`, and `scoped-authority` bodies. Bootstrap validates the
-   retained source and renders those bodies inline into the installed prompt
-   and AGENTS merge template before any destination mutation. No review process
+   retained source and renders all three bodies inline into the installed
+   prompt, and the `scoped-authority` body into the AGENTS merge template,
+   before any destination mutation. No review process
    reads the values file at runtime. Hazard examples use SYMBOL ANCHORS (the
    function / type / system name), not bare `file.ext:NNN` line numbers. Use
    the exact no-authority sentinel when SCOPED capture is intentionally
@@ -507,16 +513,6 @@ setup differs.
   non-blob object) — FAILS CLOSED
   (the wrappers exit 3 / the merge aborts) rather than silently disabling the
   gate — only an UNSET variable means "off". See INSTALL.md for details.
-- **Prune tool** — set `$env:CROSS_REVIEW_PRUNE_TOOL` to a delete tool
-  (e.g. a Recycle-Bin script) to enable log housekeeping; unset means
-  review logs are never deleted. See INSTALL.md.
-- **Legacy-index seal (capture doctrine v6)** — on an install whose
-  follow-up index carries pre-v6 content (content no reader can verify),
-  the review-log auto-prune stays QUARANTINED until the operator
-  inspects that legacy region and runs the seal mode
-  (`auto-review.ps1 -Scope SealLegacy`). Fresh v6 installs — and installs
-  whose index is absent or empty — have no legacy region and need no
-  seal. See INSTALL.md's "Legacy-index seal" section.
 
 ## Layout
 

@@ -274,14 +274,11 @@ if ! crg_clear_env_case_variants CROSS_REVIEW_ALLOW_MODE_CHANGE; then
   exit 1
 fi
 
-# The follow-up index is written only by the PowerShell promoter
-# (promote_followups; docs/capture-doctrine-v6.md section 7).
-
 # The platform SHA-256 utility, discovered in a FIXED order (sha256sum, then
 # shasum -a 256). Every caller refuses when no utility answers, rather than
 # trusting bytes it could not hash. Prints lowercase hex; rc 2 when no tool
 # answers with a plausible digest.
-crg_followup_hash_file() {
+crg_sha256_file() {
   for _crg_hf_tool in sha256sum 'shasum -a 256'; do
     _crg_hf_out=$($_crg_hf_tool < "$1" 2>/dev/null) || continue
     _crg_hf_hex=${_crg_hf_out%% *}
@@ -298,13 +295,13 @@ crg_followup_hash_file() {
 # Strict UTF-8 check over a file's bytes, as strict as the .NET strict
 # decoder: overlongs, surrogates and truncated sequences all refuse. rc 0
 # valid, 1 invalid, 2 tooling failure, which callers refuse as well.
-crg_followup_utf8_check() {
+crg_utf8_check() {
   # A byte-level DFA over an od hex dump, not iconv: iconv folds every
   # operational failure into the same nonzero status as invalid input. Here
   # each stage is status-checked and the verdict rides as an explicit token,
   # so BAD means VERIFIED-invalid.
   [ -r "$1" ] || return 2
-  _crg_u8=$(crg_followup_v6_tmp) || return 2
+  _crg_u8=$(crg_mktemp_file) || return 2
   if ! od -An -v -tx1 "$1" > "$_crg_u8" 2>/dev/null; then rm -f "$_crg_u8"; return 2; fi
   _crg_u8v=$(LC_ALL=C awk '
     BEGIN { k = 0; c1lo = 128; c1hi = 191; bad = 0; tool = 0 }
@@ -346,7 +343,7 @@ crg_followup_utf8_check() {
   esac
 }
 
-crg_followup_v6_tmp() {
+crg_mktemp_file() {
   _crg_vt=$(mktemp 2>/dev/null) || return 1
   if [ -L "$_crg_vt" ] || [ ! -f "$_crg_vt" ]; then rm -f "$_crg_vt"; return 1; fi
   printf '%s' "$_crg_vt"
@@ -357,8 +354,7 @@ crg_followup_v6_tmp() {
 # branch in the tracked hook.
 # crg-project-mode-capability-v1
 
-# Is HEAD BORN? -- born | unborn | error, the repository-level answer every
-# HEAD decision in this hook is built on. `unborn` is only ever POSITIVE proof:
+# Is HEAD BORN? -- born | unborn | error. `unborn` is only ever POSITIVE proof:
 # HEAD is symbolic and the branch ref is absent. A broken ref/object must never
 # be reclassified as an empty history.
 crg_head_born() {
@@ -837,7 +833,7 @@ crg_head_state() {
 # per-clone dispatcher), not HEAD. Fail-closed at every step -- no
 # manifest, an unknown manifest version, a missing entry, a hash-tool
 # absence, and a digest mismatch each answer "not verified". The digest
-# reuses crg_followup_hash_file's platform SHA-256 discovery.
+# reuses crg_sha256_file's platform SHA-256 discovery.
 crg_local_diagnostic() {
   printf '[CRG-LOCAL:%s] %s: %s\n' "$1" "$2" "$3" >&2
   return 1
@@ -915,7 +911,7 @@ crg_local_manifest_want_inner() {
   # an indeterminate read.
   _crg_lw_last=$(tail -c 1 "$_crg_lw_auth" 2>/dev/null) || { crg_local_diagnostic AUTH-READ "$_crg_lw_p" 'Cannot read the authorization terminator; restore snapshot access and shell utilities and retry.'; return 1; }
   [ -z "$_crg_lw_last" ] || { crg_local_diagnostic AUTH-GRAMMAR "$_crg_lw_p" 'The authorization marker lacks the required final LF; restore LOCAL metadata through the full package bootstrap.'; return 1; }
-  _crg_lw_mh=$(crg_followup_hash_file "$_crg_lw_m") || { crg_local_diagnostic AUTH-HASH "$_crg_lw_p" 'Cannot compute the manifest digest for authorization; restore snapshot access and a supported SHA-256 utility and retry.'; return 1; }
+  _crg_lw_mh=$(crg_sha256_file "$_crg_lw_m") || { crg_local_diagnostic AUTH-HASH "$_crg_lw_p" 'Cannot compute the manifest digest for authorization; restore snapshot access and a supported SHA-256 utility and retry.'; return 1; }
   _crg_lw_arc=0
   LC_ALL=C awk -v BINMODE=3 -v p="$_crg_lw_p" -v mh="manifest-sha256: $_crg_lw_mh" '
     $0 ~ /[^ -~]/ { bad = 1; next }
@@ -1021,7 +1017,7 @@ crg_local_install_snapshot() {
   esac
   _crg_ls_want=$(crg_local_manifest_want "$1") || return 1
   cp "$REPO_ROOT/$1" "$2" 2>/dev/null || { crg_local_diagnostic SNAPSHOT-CREATE "$1" 'Cannot copy the installed component into a snapshot; restore component-read and temporary-file access and retry.'; return 1; }
-  _crg_ls_got=$(crg_followup_hash_file "$2") || { crg_local_diagnostic SNAPSHOT-HASH "$1" 'Cannot compute the component snapshot digest; restore snapshot access and a supported SHA-256 utility and retry.'; return 1; }
+  _crg_ls_got=$(crg_sha256_file "$2") || { crg_local_diagnostic SNAPSHOT-HASH "$1" 'Cannot compute the component snapshot digest; restore snapshot access and a supported SHA-256 utility and retry.'; return 1; }
   [ "$_crg_ls_got" = "$_crg_ls_want" ] || { crg_local_diagnostic SNAPSHOT-HASH "$1" 'The component snapshot differs from the installed manifest digest; preserve local edits and restore the component through the full package bootstrap.'; return 1; }
 }
 # Detective form for surfaces with nothing left to consume (the commit
@@ -1665,7 +1661,7 @@ if [ -n "$UNTRACKED_WRAPPERS" ]; then
   echo "[pre-commit]   powershell -NoProfile -ExecutionPolicy Bypass -File \"<path-to>\\cross-review-gate\\bootstrap.ps1\" -TargetRepo \"<repo>\" -Force" >&2
   echo "[pre-commit]   powershell -NoProfile -ExecutionPolicy Bypass -File \"<repo>\\scripts\\render-project-values.ps1\" -TargetRepo \"<repo>\" -Check" >&2
   echo "[pre-commit] If exact LOCAL recovery is required, first complete the bounded sanctioned" >&2
-  echo "[pre-commit] -SealManifest step in docs/install-values-v1.md, then run both commands above" >&2
+  echo "[pre-commit] -SealManifest step in the package's docs/install-values-v1.md, then run both commands above" >&2
   echo "[pre-commit] in order. Never retry this commit on sealed drift. Aborting." >&2
   exit 1
 fi
@@ -1990,7 +1986,7 @@ run_backend() {
         echo "[pre-commit:$BACKEND_NAME]   powershell -NoProfile -ExecutionPolicy Bypass -File \"<path-to>\\cross-review-gate\\bootstrap.ps1\" -TargetRepo \"<repo>\" -Force" >&2
         echo "[pre-commit:$BACKEND_NAME]   powershell -NoProfile -ExecutionPolicy Bypass -File \"<repo>\\scripts\\render-project-values.ps1\" -TargetRepo \"<repo>\" -Check" >&2
         echo "[pre-commit:$BACKEND_NAME] If exact LOCAL recovery is required, first complete the bounded sanctioned" >&2
-        echo "[pre-commit:$BACKEND_NAME] -SealManifest step in docs/install-values-v1.md, then run both commands above" >&2
+        echo "[pre-commit:$BACKEND_NAME] -SealManifest step in the package's docs/install-values-v1.md, then run both commands above" >&2
         echo "[pre-commit:$BACKEND_NAME] in order. Never retry this commit on sealed drift." >&2
       elif [ -n "$CRG_SHAPE_IGNORED" ]; then
         echo "[pre-commit:$BACKEND_NAME] MIXED install shape -- UNIFY BEFORE COMMITTING. The gate components" >&2
@@ -2067,18 +2063,6 @@ run_backend() {
     echo "[pre-commit:$BACKEND_NAME] ERROR: auto-review.ps1 not found at $WRAPPER_PATH" >&2
     return 1
   fi
-  # promote_followups runs the review-common.ps1 copy this wrapper imports,
-  # so the promotion comes from the same trusted source as the review. It
-  # runs after every review, long after this capture, so the copy's SHA-256
-  # is pinned here and the promoter executes the bytes only if they still
-  # match; a copy that cannot be hashed leaves no promoter.
-  if [ -f "$TRUSTED_DIR/scripts/review-common.ps1" ]; then
-    if crg_pc_sha=$(crg_followup_hash_file "$TRUSTED_DIR/scripts/review-common.ps1"); then
-      PROMOTER_COMMON="$TRUSTED_DIR/scripts/review-common.ps1"
-      PROMOTER_COMMON_SHA256="$crg_pc_sha"
-    fi
-    unset crg_pc_sha
-  fi
 
   echo "[pre-commit:$BACKEND_NAME] Running $BACKEND_NAME adversarial review on staged changes..."
 
@@ -2145,52 +2129,16 @@ run_backend() {
       echo "[pre-commit:$BACKEND_NAME] NOTE: the selected wrapper ($WRAPPER_PATH) does not declare -ReasoningEffort; running at its default effort (CROSS_REVIEW_COMMIT_EFFORT=$CROSS_REVIEW_COMMIT_EFFORT ignored for this invocation)." >&2
     fi
   fi
-  # Parent-directed follow-up staging: the wrapper must NOT append QUALITY
-  # follow-ups to the durable index on its own pass -- in both-mode a later
-  # logical leg can still BLOCK this commit, which would leave the index holding
-  # follow-ups for content that never reached the parent's completed-review
-  # boundary (merge-gate BLOCKER 2026-07-10 on the child-append design). Hand the
-  # child a pending path via CROSS_REVIEW_FOLLOWUPS_PENDING; promotion to
-  # logs/review-followups.md happens once, after the case dispatch, only when
-  # every selected logical leg has an effective passing verdict. This forbids
-  # premature child publication; a later terminal identity refusal intentionally
-  # retains the published candidate-review record, which is not proof that a
-  # commit landed. Merge-side promotion remains after the ff-merge succeeds.
-  # The path is pre-created empty; an empty file after the run means "no QUALITY
-  # follow-ups" (promote_followups skips only a file it read as empty). If even the pre-create fails the env
-  # var still points the wrapper at the path (its own write attempt then warns
-  # and degrades) -- losing one follow-up record beats the alternative failure
-  # mode of the wrapper falling back to a premature direct append.
-  # Fixed PER-INVOCATION slot variables, not a whitespace-split list: a
-  # space-bearing ${TMPDIR} would fragment a list on `for pf in $LIST` and
-  # silently skip promotion (dropping the follow-ups the recording contract
-  # promises). The invocation count is bounded by construction -- each LEG
-  # invokes at most two backends (its primary plus one token-exhaustion
-  # fallback), and both-mode's two legs are the widest dispatch arm -- so
-  # the four fixed slots cover every dispatch and every expansion stays
-  # quoted. The slot is keyed on the INVOCATION rather than the backend so a
-  # dispatch that runs one backend more than once cannot have the second run's
-  # pre-create truncate the first run's staged follow-ups; RUN_SEQ also puts the
-  # sequence in the pending filename, so two invocations never share a path.
-  RUN_SEQ=$((RUN_SEQ + 1))
-  PENDING_FILE="${TMPDIR:-/tmp}/crg-followups-$$-$RUN_SEQ.md"
-  : > "$PENDING_FILE" 2>/dev/null || true
-  case "$RUN_SEQ" in
-    1) FOLLOWUPS_PENDING_1="$PENDING_FILE" ;;
-    2) FOLLOWUPS_PENDING_2="$PENDING_FILE" ;;
-    3) FOLLOWUPS_PENDING_3="$PENDING_FILE" ;;
-    4) FOLLOWUPS_PENDING_4="$PENDING_FILE" ;;
-  esac
-  CROSS_REVIEW_FOLLOWUPS_PENDING=$(to_win_path "$PENDING_FILE")
-  export CROSS_REVIEW_FOLLOWUPS_PENDING
+  # -NoFindingsNotice: this hook shows the findings from the verdict file
+  # (prepare_success_projection), and the wrapper's output is the transcript
+  # validated under a size limit, which the wrapper's own notice would grow.
   if [ "$FORWARD_EFFORT" -eq 1 ]; then
     echo "[pre-commit:$BACKEND_NAME] CROSS_REVIEW_COMMIT_EFFORT=$CROSS_REVIEW_COMMIT_EFFORT (normalized: $EFFORT_NORM) -> -ReasoningEffort"
-    powershell.exe -ExecutionPolicy Bypass -File "$WRAPPER_WIN" -Scope Staged -PromptPath "$PROMPT_WIN" -ReasoningEffort "$EFFORT_NORM"
+    powershell.exe -ExecutionPolicy Bypass -File "$WRAPPER_WIN" -Scope Staged -PromptPath "$PROMPT_WIN" -NoFindingsNotice -ReasoningEffort "$EFFORT_NORM"
   else
-    powershell.exe -ExecutionPolicy Bypass -File "$WRAPPER_WIN" -Scope Staged -PromptPath "$PROMPT_WIN"
+    powershell.exe -ExecutionPolicy Bypass -File "$WRAPPER_WIN" -Scope Staged -PromptPath "$PROMPT_WIN" -NoFindingsNotice
   fi
   REVIEW_EXIT=$?
-  unset CROSS_REVIEW_FOLLOWUPS_PENDING
 
   # Latest verdict file. The wrappers default their output to the MAIN repo's
   # logs/<backend>/reviews (resolved via the git common dir) so a linked-worktree
@@ -2215,9 +2163,7 @@ run_backend() {
 
   # Wrapper exit-code contract (2026-07 severity change: only BLOCKER aborts).
   # 0 = PASS (CLEAN, NOTE-only, OR QUALITY-only -- QUALITY findings remain in
-  #     the verdict artifact and are staged via CROSS_REVIEW_FOLLOWUPS_PENDING
-  #     for this hook's post-pass promotion to logs/review-followups.md for
-  #     batch triage; they do NOT block the commit).
+  #     the verdict artifact; they do NOT block the commit).
   # 2 = BLOCKER -> abort. 3/other -> invocation failure -> abort (fail closed).
   # 1 = RETIRED (was QUALITY). QUALITY now passes as 0, so a wrapper returning 1
   #     means a PowerShell param-bind/startup failure (exits 1 before any verdict)
@@ -2270,12 +2216,10 @@ run_backend_for() {
 }
 
 # Run one backend in THIS shell while capturing every byte it emits. A function
-# call with redirection does not create a subshell, so run_backend's trusted-dir,
-# pending-follow-up, and sequence state remains authoritative in the caller.
+# call with redirection does not create a subshell, so run_backend's trusted-dir
+# state remains authoritative in the caller.
 # Four fixed transcript slots cover the maximum dispatch shape: both-mode has
 # two legs, and each leg can invoke one primary plus one exhaustion fallback.
-# Provider-neutral filenames prevent a successful follow-up-promotion warning
-# from disclosing which backend supplied a substitute review.
 run_backend_captured() {
   CAPTURE_BACKEND="$1"
   TRANSCRIPT_SEQ=$((TRANSCRIPT_SEQ + 1))
@@ -2337,8 +2281,8 @@ crg_success_evidence_file_ok() {
   [ "$#" -eq 1 ] || return 1
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   [ "$1" -le "$_crg_se_max" ] || return 1
-  crg_followup_utf8_check "$_crg_se_file" || return 1
-  _crg_se_hex=$(crg_followup_v6_tmp) || return 1
+  crg_utf8_check "$_crg_se_file" || return 1
+  _crg_se_hex=$(crg_mktemp_file) || return 1
   if ! LC_ALL=C od -An -v -tx1 "$_crg_se_file" > "$_crg_se_hex" 2>/dev/null; then rm -f "$_crg_se_hex"; return 1; fi
   LC_ALL=C awk -v crlf="$_crg_se_crlf" '
     {
@@ -2522,7 +2466,7 @@ pin_success_review_identity() {
   [ "$_crg_pi_probe" = 'nested/crg-success-projection-probe.txt: diff: unspecified' ] || return 1
   _crg_pi_patch="$REVIEW_IDENTITY_DIR/DIFF.patch"
   env -i SYSTEMROOT="${SYSTEMROOT:-}" WINDIR="${WINDIR:-}" COMSPEC="${COMSPEC:-}" PATHEXT="${PATHEXT:-}" PATH="$PATH" TEMP="$REVIEW_IDENTITY_DIR" TMP="$REVIEW_IDENTITY_DIR" HOME="$REVIEW_IDENTITY_DIR/no-home" XDG_CONFIG_HOME="$REVIEW_IDENTITY_DIR/no-xdg" GIT_DIR="$_crg_pi_git" GIT_COMMON_DIR="$_crg_pi_git" GIT_OBJECT_DIRECTORY="$_crg_pi_git/objects" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$REVIEW_IDENTITY_DIR/no-global-config" GIT_ATTR_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0 LC_ALL=C LANG=C git -c core.bare=true -c "core.attributesFile=$REVIEW_IDENTITY_DIR/hostile-global-attributes" -c core.quotePath=false diff --no-color --no-ext-diff --no-textconv --no-relative --ignore-submodules=none --src-prefix=a/ --dst-prefix=b/ "$_crg_pi_base" "$PINNED_REVIEW_TREE" > "$_crg_pi_patch" 2>/dev/null || return 1
-  PINNED_REVIEW_DIFF_SHA=$(crg_followup_hash_file "$_crg_pi_patch") || return 1
+  PINNED_REVIEW_DIFF_SHA=$(crg_sha256_file "$_crg_pi_patch") || return 1
   [ ${#PINNED_REVIEW_DIFF_SHA} -eq 64 ] || return 1
   CROSS_REVIEW_SUCCESS_TREE_OID="$PINNED_REVIEW_TREE"
   CROSS_REVIEW_SUCCESS_DIFF_SHA="$PINNED_REVIEW_DIFF_SHA"
@@ -2612,16 +2556,16 @@ crg_success_projection_cleanup() {
 }
 
 # Review-feedback status (Write-ReviewFeedbackStatus in scripts/review-common.ps1)
-# for a passed commit: without it a passed gate hid task counts, feedback
-# work left undone (merge review, 2026-10-09) and skipped housekeeping. Kept apart from the strict
-# projection above on purpose, and run only after every write a commit
-# depends on (the projection display and the follow-up append), straight to
+# for a passed commit: without it a passed gate hid feedback work left undone
+# (merge review, 2026-10-09) and skipped housekeeping. Kept apart from the
+# strict projection above on purpose, and run after the projection display,
+# straight to
 # the console with no file of its own: no step of it can fail the gate or
 # take space or time a required step needs, and the identity check after it
 # still covers its console writes. It reads EVERY launched invocation's raw
 # transcript, not only the accepted ones, because an exhausted leg or one
-# whose provider was replaced may still have written records or staged
-# follow-ups; those raw transcripts are Windows PowerShell output, so a
+# whose provider was replaced may still have left feedback work undone or
+# skipped housekeeping; those raw transcripts are Windows PowerShell output, so a
 # line's CR is removed before its form is checked. A line it cannot show
 # becomes a fixed notice instead of a refusal. (Earlier forms were
 # dropped the same day: checking these lines inside the strict projection
@@ -2629,11 +2573,8 @@ crg_success_projection_cleanup() {
 # to the projection file tied their bytes to its required write.) The
 # writer's messages name no provider and stay well under 4096 bytes in any
 # output encoding; the tag naming the wrapper is removed. At most 32
-# distinct warnings are shown, the rest counted. The task count is the last
-# count line of the last accepted transcript, read after every leg added its
-# tasks.
+# distinct warnings are shown, the rest counted.
 crg_feedback_status() {
-  _crg_fs_counts="$1"
   _crg_fs_tag='[pre-commit] review result: '
   _crg_fs_bad=0
   set --
@@ -2658,17 +2599,6 @@ crg_feedback_status() {
       END { if (n > 32) print tag "review-feedback WARN: " (n - 32) " further review-feedback warnings are not shown" }
     ' "$@" 2>/dev/null ||
       printf '%s\n' "${_crg_fs_tag}review-feedback WARN: the review-feedback warnings could not be collected" 2>/dev/null
-  fi
-  _crg_fs_none='review-feedback: open review tasks in TASKS.md: could not be counted'
-  if [ -n "$_crg_fs_counts" ] && [ -f "$_crg_fs_counts" ] && [ -r "$_crg_fs_counts" ]; then
-    LC_ALL=C awk -v tag="$_crg_fs_tag" -v none="$_crg_fs_none" '
-      { sub(/\r$/, "") }
-      /^\[auto-review(:claude)?\] review-feedback: open review tasks in TASKS\.md: (QUALITY=[0-9]+ NOTE=[0-9]+|could not be counted)$/ { last = $0; sub(/^\[auto-review(:claude)?\] /, "", last) }
-      END { print tag (last != "" ? last : none) }
-    ' "$_crg_fs_counts" 2>/dev/null ||
-      printf '%s\n' "$_crg_fs_tag$_crg_fs_none" 2>/dev/null
-  else
-    printf '%s\n' "$_crg_fs_tag$_crg_fs_none" 2>/dev/null
   fi
   return 0
 }
@@ -2700,15 +2630,62 @@ prepare_success_projection() {
   done
   _crg_pp_sorted="$_crg_pp_root/findings.sorted"
   LC_ALL=C sort -u "$_crg_pp_all" > "$_crg_pp_sorted" || { crg_success_projection_cleanup "$_crg_pp_root"; return 1; }
-  _crg_pp_rendered="$_crg_pp_root/rendered"
-  : > "$_crg_pp_rendered" || { crg_success_projection_cleanup "$_crg_pp_root"; return 1; }
-  while IFS= read -r _crg_pp_line || [ -n "$_crg_pp_line" ]; do
-    printf '%s\n' "[pre-commit] review result: $_crg_pp_line" >> "$_crg_pp_rendered" || { crg_success_projection_cleanup "$_crg_pp_root"; return 1; }
-  done < "$_crg_pp_root/mode-1"
-  while IFS= read -r _crg_pp_line || [ -n "$_crg_pp_line" ]; do
-    printf '%s\n' "[pre-commit] review result: $_crg_pp_line" >> "$_crg_pp_rendered" || { crg_success_projection_cleanup "$_crg_pp_root"; return 1; }
-  done < "$_crg_pp_sorted"
-  cat "$_crg_pp_rendered" > "$_crg_pp_destination" 2>/dev/null || { crg_success_projection_cleanup "$_crg_pp_root"; rm -f "$_crg_pp_destination"; return 1; }
+  # The ungrouped rendering, mode lines then findings, is the required
+  # projection. One awk reads both files and writes the destination, and its
+  # exit status, which covers an input it cannot open and the read and write
+  # errors it reports, refuses. Do not go back to shell read loops here: a
+  # loop whose input could not be opened only returned a status, which
+  # nothing checked, and a projection missing its findings was published
+  # (review, 2026-11-23).
+  LC_ALL=C awk -v tag='[pre-commit] review result: ' '{ print tag $0 }' "$_crg_pp_root/mode-1" "$_crg_pp_sorted" > "$_crg_pp_destination" 2>/dev/null ||
+    { crg_success_projection_cleanup "$_crg_pp_root"; rm -f "$_crg_pp_destination"; return 1; }
+  # The findings are grouped by what they cite, as Get-NonBlockingFindingGroups
+  # in scripts/review-common.ps1 groups them for the merge gate; a shell cannot
+  # call it, so its rule is repeated here and must stay in step with it. A
+  # QUALITY line belongs to the records-or-documentation group when its
+  # opening citation (the shared `path:line[:col]` grammar of
+  # Get-ReviewFindingCitation: awk has no lookahead, so what may not follow a
+  # citation is tested on the text after the longest match) names a path with
+  # a documentation extension; every other QUALITY line, cited or not, belongs
+  # to the first group. Only the white space `[[:space:]]` matches in the C
+  # locale (space, tab, LF, VT, FF, CR) may precede the citation, so a line
+  # whose text opens with other white space, such as a no-break space, has no
+  # valid opening citation in either gate. A NON-BLOCKER line arrives here
+  # already rewritten to QUALITY by validate_success_projection_pair, as the
+  # merge gate rewrites it. Grouping happens here, in the prepared file, because
+  # the bytes displayed after the equality boundary are exactly these. The
+  # sorted file is read once per group so each group keeps the sorted order
+  # without holding the findings in memory. The grouping only orders lines
+  # already validated, so it is display only, and the destination already
+  # holds the complete ungrouped rendering when it starts: no failure of the
+  # grouped form, or of deleting its partial file, can cost the projection.
+  # The grouped form is built whole in a file beside the destination, its
+  # mode lines and its groups each by an awk whose exit status covers its
+  # reads and writes, and takes the destination's place by a rename within
+  # that folder, which needs no further space; on any failure the
+  # destination stays as written above.
+  _crg_pp_grouped="$_crg_pp_destination.grouped"
+  if LC_ALL=C awk -v tag='[pre-commit] review result: ' '{ print tag $0 }' "$_crg_pp_root/mode-1" > "$_crg_pp_grouped" 2>/dev/null &&
+     LC_ALL=C awk -v tag='[pre-commit] review result: ' -v lead="$CRG_FINDINGS_LEAD" \
+    -v h1="$CRG_FINDINGS_HEADING_CODE" -v h2="$CRG_FINDINGS_HEADING_DOCS" -v h3="$CRG_FINDINGS_HEADING_NOTE" '
+    function group(line,   rest, path) {
+      if (line ~ /^NOTE:/) return 3
+      rest = line; sub(/^QUALITY:[[:space:]]*/, "", rest)
+      if (!match(rest, /^[A-Za-z0-9._\/\\-]+:[0-9]+(:[0-9]+)?/)) return 1
+      if (substr(rest, RLENGTH + 1) ~ /^([0-9A-Za-z_]|:[0-9])/) return 1
+      path = tolower(substr(rest, 1, index(rest, ":") - 1))
+      return (path ~ /\.(md|markdown|txt|rst|adoc)$/) ? 2 : 1
+    }
+    BEGIN { h[1] = h1; h[2] = h2; h[3] = h3 }
+    NR == 1 { print tag lead }
+    FNR == 1 { pass++; shown = 0 }
+    group($0) == pass { if (!shown) { print tag h[pass]; shown = 1 } print tag "  " $0 }
+  ' "$_crg_pp_sorted" "$_crg_pp_sorted" "$_crg_pp_sorted" >> "$_crg_pp_grouped" 2>/dev/null &&
+     mv -f "$_crg_pp_grouped" "$_crg_pp_destination" 2>/dev/null; then
+    :
+  else
+    rm -f "$_crg_pp_grouped" 2>/dev/null
+  fi
   crg_success_projection_cleanup "$_crg_pp_root"
   return 0
 }
@@ -2805,127 +2782,25 @@ run_leg() {
   return 1
 }
 
-# What a PASS covers (docs/review-feedback-v1.md section 4). The open
-# TASKS.md task counts come from the review wrapper's review-feedback line,
-# which crg_feedback_status carries to the passed gate's output,
-# not from a count here: a count must read TASKS.md through
-# a held no-follow handle, which a shell cannot do, and a second counter in
-# this hook once disagreed with the PowerShell one (review, 2026-10-09).
+# What a PASS covers (docs/review-feedback-v1.md section 4).
 CRG_PASS_COVERAGE='covers this source diff only, not target execution or deployment readiness'
 
-# Promotes the staged QUALITY follow-ups with the one PowerShell promoter the
-# merge gate also uses (Invoke-FollowupPromotion; docs/capture-doctrine-v6.md
-# section 7), loaded from the trusted review-common.ps1 the review wrappers ran
-# from. The index is opened only relative to its held, confirmed logs folder,
-# which a shell cannot do, so this hook no longer writes the index itself. The
-# promoter takes and releases the index lock inside its own process, so the
-# state read and the append happen in this one call, after the pre-append
-# tree check; a tree change during the call is caught by the post-append
-# check, and the rows stay indexed (they record a completed review, not a
-# landing).
-# The copy is executed from the bytes the child reads once and checks against
-# the SHA-256 pinned when the review snapshot was captured (run_backend).
-# Dot-sourcing the path was dropped (staged review, 2026-10-10): the reviews
-# run for minutes between that capture and this load, and whatever stood at
-# the path then would have run. The bytes are decoded as Windows PowerShell
-# decodes a script file (its byte-order mark, else the ANSI code page), so
-# they mean what they meant to the wrappers that dot-sourced the same copy.
-# The promoter sets UTF-8 native-output decoding first: Windows PowerShell
-# otherwise decodes Git's UTF-8 paths with its cached
-# [Console]::OutputEncoding, which a fresh process takes from the console's
-# code page, and a non-ASCII repository path would bind the wrong logs
-# folder. Setting that encoding also sets the code page of the console the
-# process runs in, so the launched PowerShell only starts the promoter in a
-# child with a hidden console of its own and relays its output.
-# CreateNoWindow starts a console program with CREATE_NO_WINDOW, under which
-# Windows gives it a new console without a window rather than none; the
-# no-console flag is DETACHED_PROCESS, which is not used. The console of
-# whoever ran the commit (the commit wrapper, run-gate.sh or a plain git
-# commit) is never changed, even when either process is killed. The child
-# writes UTF-8. A redirected stream gets those bytes unchanged; a console
-# would read them in its own code page, so console output is decoded as
-# UTF-8 and written through the PowerShell host, which writes Unicode to the
-# console (stdout as it arrives, stderr by line). Both pipes are read on
-# this thread, since the host cannot be called from a copy task. A relay
-# that fails stops the child, whose exit is then reported as unknown. The
-# child's own console means a Ctrl+C in the committer's console does not
-# reach it, and a launcher killed partway leaves it to finish or fail its
-# append alone, with no status reported; its writes stay under the follow-up
-# index lock, which a later promoter retries and then warns and drops its
-# records on (Enter-FollowupIndexLock). The promoter text reaches the child
-# through -Command with its double quotes escaped; it holds no backslash, which that
-# escaping does not cover, and the launch refuses one. Tried and dropped
-# (2026-10-10): switching the shared console's code pages in this process
-# and putting them back in a finally, which a killed process never reaches;
-# passing the text with -EncodedCommand, which makes the child write its
-# host and progress records to the redirected stderr as CLIXML.
-# Exit statuses: 10 appended, 0 nothing appended (each drop already warned),
-# 11 an append failed and may be partial, 12 the promoter could not be
-# started or could not set the decoding, or the copy could not be read or
-# loaded or has no promoter (a trusted copy older than this hook), 13 the
-# copy no longer matches the pinned bytes. Any other status (PowerShell did
-# not start, or stopped partway) leaves the index state unknown, so it is
-# reported as a possibly partial append.
-CRG_PROMOTER_ENV_NAMES='CRG_FOLLOWUP_PROMOTER_COMMON CRG_FOLLOWUP_PROMOTER_SHA256 CRG_FOLLOWUP_PENDING_1 CRG_FOLLOWUP_PENDING_2 CRG_FOLLOWUP_PENDING_3 CRG_FOLLOWUP_PENDING_4'
-promote_followups() {
-  PROMO_PUBLISHED=0
-  PROMO_APPEND_UNCERTAIN=0
-  _crg_pr_any=0
-  # A pending file is skipped only when it was read and held zero bytes;
-  # `[ ! -s ]` was not used, since it is also true when the size query fails.
-  # Everything else reaches the promoter, which tells a missing record from
-  # one it could not read.
-  for _crg_pf in "$FOLLOWUPS_PENDING_1" "$FOLLOWUPS_PENDING_2" "$FOLLOWUPS_PENDING_3" "$FOLLOWUPS_PENDING_4"; do
-    [ -n "$_crg_pf" ] || continue
-    if [ -f "$_crg_pf" ] && _crg_pn=$(wc -c < "$_crg_pf" 2>/dev/null) && [ "$_crg_pn" -eq 0 ] 2>/dev/null; then continue; fi
-    _crg_pr_any=1
-  done
-  unset _crg_pn
-  [ "$_crg_pr_any" -eq 1 ] || return 0
-  if [ -z "$PROMOTER_COMMON" ] || [ -z "$PROMOTER_COMMON_SHA256" ] || [ ! -f "$PROMOTER_COMMON" ]; then
-    echo "[pre-commit] WARN: the review wrappers ran without a trusted review-common.ps1, so no follow-up promoter is available - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
-    return 0
-  fi
-  # The paths reach PowerShell only under these names, so no inherited case
-  # variant may survive to compete with them.
-  if ! crg_clear_env_case_variants $CRG_PROMOTER_ENV_NAMES; then
-    echo "[pre-commit] WARN: could not clear every case variant of the follow-up promoter's environment names, so the promoter is not launched - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2
-    return 0
-  fi
-  CRG_FOLLOWUP_PROMOTER_COMMON=$(to_win_path "$PROMOTER_COMMON")
-  CRG_FOLLOWUP_PROMOTER_SHA256="$PROMOTER_COMMON_SHA256"
-  CRG_FOLLOWUP_PENDING_1=''; CRG_FOLLOWUP_PENDING_2=''; CRG_FOLLOWUP_PENDING_3=''; CRG_FOLLOWUP_PENDING_4=''
-  [ -n "$FOLLOWUPS_PENDING_1" ] && CRG_FOLLOWUP_PENDING_1=$(to_win_path "$FOLLOWUPS_PENDING_1")
-  [ -n "$FOLLOWUPS_PENDING_2" ] && CRG_FOLLOWUP_PENDING_2=$(to_win_path "$FOLLOWUPS_PENDING_2")
-  [ -n "$FOLLOWUPS_PENDING_3" ] && CRG_FOLLOWUP_PENDING_3=$(to_win_path "$FOLLOWUPS_PENDING_3")
-  [ -n "$FOLLOWUPS_PENDING_4" ] && CRG_FOLLOWUP_PENDING_4=$(to_win_path "$FOLLOWUPS_PENDING_4")
-  export $CRG_PROMOTER_ENV_NAMES
-  # The script text is fixed and single-quoted; every path reaches it through
-  # the environment, never through the command line.
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '$ErrorActionPreference = "Stop"; $promoter = { $ErrorActionPreference = "Stop"; $ProgressPreference = "SilentlyContinue"; try { $OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { exit 12 }; try { $b =[System.IO.File]::ReadAllBytes($env:CRG_FOLLOWUP_PROMOTER_COMMON); $h = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($b) | ForEach-Object { $_.ToString("x2") }); if (-not [string]::Equals($h, $env:CRG_FOLLOWUP_PROMOTER_SHA256, [System.StringComparison]::Ordinal)) { exit 13 }; $text = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($b), [System.Text.Encoding]::Default, $true).ReadToEnd(); . ([scriptblock]::Create($text)) } catch { exit 12 }; if (-not (Get-Command -Name Invoke-FollowupPromotion -CommandType Function -ErrorAction SilentlyContinue)) { exit 12 }; exit ([int](Invoke-FollowupPromotion -PendingPaths @($env:CRG_FOLLOWUP_PENDING_1, $env:CRG_FOLLOWUP_PENDING_2, $env:CRG_FOLLOWUP_PENDING_3, $env:CRG_FOLLOWUP_PENDING_4) -LogTag "pre-commit")) }; try { $text = $promoter.ToString(); if ($text.Contains([string][char]92)) { exit 12 }; $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = Join-Path $PSHOME "powershell.exe"; $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command " + [char]34 + $text.Replace([string][char]34, [string][char]92 + [char]34) + [char]34; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $p = [System.Diagnostics.Process]::Start($psi) } catch { exit 12 }; try { $p.StandardInput.Close(); $u = [System.Text.UTF8Encoding]::new($false); $relays = New-Object System.Collections.ArrayList; foreach ($r in @(@{ S = $p.StandardOutput.BaseStream; E = $false; R = [Console]::IsOutputRedirected }, @{ S = $p.StandardError.BaseStream; E = $true; R = [Console]::IsErrorRedirected })) { $r.B = New-Object byte[] 8192; $r.D = $u.GetDecoder(); $r.L = New-Object System.Text.StringBuilder; if ($r.R) { if ($r.E) { $r.O = [Console]::OpenStandardError() } else { $r.O = [Console]::OpenStandardOutput() } }; $r.T = $r.S.ReadAsync($r.B, 0, 8192); $null = $relays.Add($r) }; while ($relays.Count -gt 0) { $i = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($relays | ForEach-Object { $_.T })); $r = $relays[$i]; $n = $r.T.Result; $end = $n -le 0; if ($end) { $n = 0 }; if ($r.R) { if ($n -gt 0) { $r.O.Write($r.B, 0, $n); $r.O.Flush() } } else { $c = New-Object char[] ($u.GetMaxCharCount($n) + 2); $t = [string]::new($c, 0, $r.D.GetChars($r.B, 0, $n, $c, 0, $end)); if (-not $r.E) { if ($t.Length -gt 0) { $Host.UI.Write($t) } } else { $null = $r.L.Append($t); $parts = $r.L.ToString().Split([char]10); for ($q = 0; $q -lt $parts.Length - 1; $q++) { $Host.UI.WriteErrorLine($parts[$q].TrimEnd([char]13)) }; $null = $r.L.Clear().Append($parts[$parts.Length - 1]); if (($end -and $r.L.Length -gt 0) -or $r.L.Length -gt 8192) { $Host.UI.WriteErrorLine($r.L.ToString()); $null = $r.L.Clear() } } }; if ($end) { $relays.RemoveAt($i) } else { $r.T = $r.S.ReadAsync($r.B, 0, 8192) } } } catch { try { $p.Kill() } catch { }; $p.WaitForExit(); exit 1 }; $p.WaitForExit(); exit $p.ExitCode'
-  _crg_pr_rc=$?
-  # The canonical names are unset before enumeration, and the pre-launch clear
-  # already removed every variant, so a failed enumeration here leaves nothing.
-  crg_clear_env_case_variants $CRG_PROMOTER_ENV_NAMES || :
-  case "$_crg_pr_rc" in
-    0) ;;
-    10) PROMO_PUBLISHED=1 ;;
-    11) PROMO_APPEND_UNCERTAIN=1 ;;
-    12) echo "[pre-commit] WARN: the follow-up promoter could not be started or could not set UTF-8 decoding, or the trusted review-common.ps1 could not be read or loaded or has no follow-up promoter (it is older than this hook) - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
-    13) echo "[pre-commit] WARN: the trusted review-common.ps1 copy no longer matches the bytes captured for the review, so it was not executed - QUALITY follow-up records dropped; the findings stay in the verdict artifacts and the gate continues to its terminal identity check" >&2 ;;
-    *)
-      PROMO_APPEND_UNCERTAIN=1
-      echo "[pre-commit] WARN: the follow-up promoter exited $_crg_pr_rc, so whether it appended to the follow-up index is unknown. The rows do not prove that a commit landed. Inspect the index tail against the capture-doctrine frame and repair any incomplete transaction before later promotion. A promoter stopped while appending can leave the review-followups.md.lock folder beside the index, which blocks later appends until it is removed by hand once no writer is alive; the findings remain in the verdict artifacts and the gate continues to its terminal identity check." >&2
-      ;;
-  esac
-  return 0
-}
+# Shown once on a passed gate. Must stay byte-equal to
+# Get-ReviewTaskReminderText in scripts/review-common.ps1, which the merge gate
+# prints: a shell cannot call that function, so the text is kept here as well.
+CRG_TASK_REMINDER='Reminder: once this change has landed, if it completes a task, delete that task from TASKS.md and every other task list. Task lists hold unfinished work only: a finished task is deleted, not checked off.'
 
-# One cleanup routine removes all per-backend trusted-base tempdirs,
-# staged-but-unpromoted follow-up pending files, and provider-private review
-# transcripts. The EXIT trap covers every early failure; the success path calls
-# the same routine before its last identity check and then disarms the trap.
-# Both path sets live in fixed per-invocation scalars (quoted expansion) so a
+# The lead line and group headings of a passed gate's non-blocking findings.
+# Must stay byte-equal to Get-NonBlockingFindingsLeadText and to the headings
+# Get-NonBlockingFindingGroups returns in scripts/review-common.ps1, for the
+# same reason as the reminder.
+CRG_FINDINGS_LEAD='The review passed. The findings below do not block and are not kept as tasks for a later session; fix the ones worth fixing as part of this change.'
+CRG_FINDINGS_HEADING_CODE='QUALITY findings citing product code or configuration:'
+CRG_FINDINGS_HEADING_DOCS='QUALITY findings citing records or documentation:'
+CRG_FINDINGS_HEADING_NOTE='NOTE findings:'
+
+# The trusted-base tempdir paths and the review transcript paths live in
+# fixed per-invocation scalars (quoted expansion) so a
 # space-bearing ${TMPDIR} cannot fragment them.
 # Package cleanup policy: avoid the recursive force-delete (`rm -rf`) even for
 # the gate's own mktemp scratch -- delete files first, then the now-empty dirs
@@ -2941,9 +2816,6 @@ cleanup_trusted_dirs() {
     [ -d "$d" ] || continue
     find "$d" -type f -exec rm -f {} + 2>/dev/null
     find "$d" -depth -type d -exec rmdir {} + 2>/dev/null
-  done
-  for f in "$FOLLOWUPS_PENDING_1" "$FOLLOWUPS_PENDING_2" "$FOLLOWUPS_PENDING_3" "$FOLLOWUPS_PENDING_4"; do
-    [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
   done
   for f in "$REVIEW_TRANSCRIPT_1" "$REVIEW_TRANSCRIPT_2" "$REVIEW_TRANSCRIPT_3" "$REVIEW_TRANSCRIPT_4"; do
     [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
@@ -2963,12 +2835,7 @@ TRUSTED_DIR_2=""
 TRUSTED_DIR_3=""
 TRUSTED_DIR_4=""
 TRUSTED_DIR_5=""
-RUN_SEQ=0
 TRANSCRIPT_SEQ=0
-FOLLOWUPS_PENDING_1=""
-FOLLOWUPS_PENDING_2=""
-FOLLOWUPS_PENDING_3=""
-FOLLOWUPS_PENDING_4=""
 REVIEW_TRANSCRIPT_1=""
 REVIEW_TRANSCRIPT_2=""
 REVIEW_TRANSCRIPT_3=""
@@ -2984,10 +2851,6 @@ PINNED_REVIEW_TREE=""
 PINNED_REVIEW_DIFF_SHA=""
 SUCCESS_PROJECTION_FILE=""
 SUCCESS_PROJECTION_FD_OPEN=0
-PROMOTER_COMMON=""
-PROMOTER_COMMON_SHA256=""
-PROMO_PUBLISHED=0
-PROMO_APPEND_UNCERTAIN=0
 trap cleanup_trusted_dirs EXIT
 
 # ---- author-lint fail-fast pre-pass (mechanical, runs BEFORE the AI review) ----
@@ -3163,18 +3026,18 @@ if [ "$OVERALL_EXIT" -eq 0 ] && ! recheck_pinned_review_tree; then
 fi
 
 # Successful semantic output remains private while it is parsed, normalized
-# and sorted. No success-shaped output or durable follow-up is published
-# before the second equality boundary.
+# and sorted. No success-shaped output is published before the second
+# equality boundary.
 if [ "$OVERALL_EXIT" -eq 0 ]; then
   if [ "$ACCEPTED_REVIEW_COUNT" -lt 1 ] || ! prepare_success_projection "$ACCEPTED_REVIEW_COUNT" "$SUCCESS_PROJECTION_FILE"; then
     echo "[pre-commit] successful-review semantic evidence was missing, malformed, conflicting, or identity-mismatched - commit ABORTED (fail closed)." >&2
     OVERALL_EXIT=1
   fi
 fi
-# Open the complete private rendering before any durable append. The dedicated
-# descriptor retains the checked bytes without shell-variable size limits or
-# newline rewriting, and the terminal tail has no new path-open failure that
-# can abort after a follow-up became durable.
+# Open the complete private rendering before the second equality boundary. The
+# dedicated descriptor retains the checked bytes without shell-variable size
+# limits or newline rewriting, and the terminal tail has no new path-open
+# failure.
 if [ "$OVERALL_EXIT" -eq 0 ]; then
   # Keep stderr suppression scoped to the open attempt. `exec` without a
   # command makes its redirections persistent, so attaching `2>/dev/null`
@@ -3187,32 +3050,10 @@ if [ "$OVERALL_EXIT" -eq 0 ]; then
   fi
 fi
 
-# Pre-append equality boundary: a mutation during private preparation refuses
-# before the append-only follow-up index or success output receives a byte.
+# Second equality boundary: a mutation during private preparation refuses
+# before success output receives a byte.
 if [ "$OVERALL_EXIT" -eq 0 ] && ! recheck_pinned_review_tree; then
-  echo "[pre-commit] ERROR: the staged tree changed while successful review output was being prepared, or could not be re-read exactly - no follow-up was published; commit ABORTED (fail closed)." >&2
-  OVERALL_EXIT=1
-fi
-
-if [ "$OVERALL_EXIT" -eq 0 ]; then
-  promote_followups
-fi
-
-# Post-append equality boundary: the single append above is non-authoritative,
-# but it still creates an interval in which the effective index can move. A
-# completed-review follow-up is intentionally retained if that happens: rows in
-# the follow-up index describe reviewed candidate findings, not proof that a
-# commit landed. Authorization still fails and no semantic projection or PASS
-# is emitted. A fourth equality check below closes the separate interval created
-# while the bounded provider-neutral projection and review-feedback status are
-# written to a possibly slow console sink.
-if [ "$OVERALL_EXIT" -eq 0 ] && ! recheck_pinned_review_tree; then
-  echo "[pre-commit] ERROR: the staged tree changed at the terminal success boundary, or could not be re-read exactly - commit ABORTED (fail closed)." >&2
-  if [ "$PROMO_PUBLISHED" -eq 1 ]; then
-    echo "[pre-commit] NOTE: the completed-review follow-up transaction remains indexed; follow-up rows record reviewed candidate findings and do not prove that a commit landed." >&2
-  elif [ "$PROMO_APPEND_UNCERTAIN" -eq 1 ]; then
-    echo "[pre-commit] NOTE: a failed follow-up append may have left candidate-bound bytes in the index; the rows do not prove that a commit landed. Inspect the tail and repair any incomplete transaction before later promotion." >&2
-  fi
+  echo "[pre-commit] ERROR: the staged tree changed while successful review output was being prepared, or could not be re-read exactly - commit ABORTED (fail closed)." >&2
   OVERALL_EXIT=1
 fi
 
@@ -3230,15 +3071,9 @@ else
   cat <&9 2>/dev/null || :
   exec 9<&-
   SUCCESS_PROJECTION_FD_OPEN=0
-  eval "_crg_fs_last=\${ACCEPTED_TRANSCRIPT_$ACCEPTED_REVIEW_COUNT}"
-  crg_feedback_status "$_crg_fs_last" || :
+  crg_feedback_status || :
   if ! recheck_pinned_review_tree; then
     echo "[pre-commit] ERROR: the staged tree changed while successful review evidence was being displayed, or could not be re-read exactly - commit ABORTED at the terminal identity boundary (fail closed)." >&2
-    if [ "$PROMO_PUBLISHED" -eq 1 ]; then
-      echo "[pre-commit] NOTE: the completed-review follow-up transaction remains indexed; follow-up rows record reviewed candidate findings and do not prove that a commit landed." >&2
-    elif [ "$PROMO_APPEND_UNCERTAIN" -eq 1 ]; then
-      echo "[pre-commit] NOTE: a failed follow-up append may have left candidate-bound bytes in the index; the rows do not prove that a commit landed. Inspect the tail and repair any incomplete transaction before later promotion." >&2
-    fi
     OVERALL_EXIT=1
     replay_all_review_transcripts
   else
@@ -3252,18 +3087,16 @@ else
       OVERALL_EXIT=1
     else
       # PASS describes the completed adversarial review of the pinned candidate;
-      # only the equality check after this potentially blocking write authorizes
-      # Git to continue with that candidate.
+      # only the equality check after these potentially blocking writes
+      # authorizes Git to continue with that candidate. The task reminder is
+      # written here, not after that check, because no success output may
+      # follow the final equality check.
       echo "[pre-commit] adversarial review PASS - $CRG_PASS_COVERAGE" || :
+      echo "[pre-commit] $CRG_TASK_REMINDER" || :
       if ! recheck_pinned_review_tree; then
         echo "[pre-commit] ERROR: the staged tree no longer matched the pinned review identity after the pinned-candidate review PASS was displayed, or could not be re-read exactly - commit authorization REFUSED at the final identity boundary (fail closed)." >&2
         echo "[pre-commit] NOTE: the displayed PASS described the adversarial-review verdict for the pinned candidate; it did not authorize or prove that a commit landed." >&2
         echo "[pre-commit] NOTE: transient invocation replay snapshots were removed by successful-path cleanup before final authorization; durable provider verdict artifacts remain under logs/*/reviews." >&2
-        if [ "$PROMO_PUBLISHED" -eq 1 ]; then
-          echo "[pre-commit] NOTE: the completed-review follow-up transaction remains indexed; follow-up rows record reviewed candidate findings and do not prove that a commit landed." >&2
-        elif [ "$PROMO_APPEND_UNCERTAIN" -eq 1 ]; then
-          echo "[pre-commit] NOTE: a failed follow-up append may have left candidate-bound bytes in the index; the rows do not prove that a commit landed. Inspect the tail and repair any incomplete transaction before later promotion." >&2
-        fi
         OVERALL_EXIT=1
       fi
     fi

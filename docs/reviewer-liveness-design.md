@@ -81,7 +81,7 @@ invocation/config error, like the other env knobs.
 Samples and escalation TRANSITIONS are also appended, with an ISO-8601
 local arrival timestamp, to a run-owned LIVENESS LOG preserved alongside
 the run's forensics (`review-<ts>-<tag>-r<pid>.liveness.jsonl` -- the
-`.jsonl` suffix keeps it inside the consolidation and prune regexes, and
+`.jsonl` suffix keeps it inside the consolidation regex, and
 the pid component keeps same-second runs' artifacts disjoint). Appends and
 preservation are best-effort with LOUD failure reporting: a denied
 append retries briefly then warns, never silently thinning the record.
@@ -123,8 +123,7 @@ the flag to satisfy the combined print/stream/verbose contract. Stdout is redire
   contract: the merge gate centralizes only the closed
   `review-<ts>-<tag>...` artifact shape and deletes consolidated child
   run dirs, so a nonmatching name would be excluded as transient
-  scaffolding and LOST at cleanup -- the `.jsonl` tail also places the
-  file in the wrappers' forensics prune class. This closes the
+  scaffolding and LOST at cleanup. This closes the
   "transcripts are invisible" gap without touching machine-global session
   storage (the wrapper keeps `--no-session-persistence`).
 - The RESULT ENVELOPE the failure classification depends on is the

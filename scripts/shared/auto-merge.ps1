@@ -17,11 +17,10 @@
 # version decide whether the branch may merge.
 #
 # Exit codes (2026-07 severity contract: only BLOCKER aborts a merge; QUALITY is
-# a non-blocking follow-up):
+# non-blocking):
 #   0 = review passed (CLEAN, NOTE-only, OR QUALITY-only; the wrappers exit 0 for
-#       all three -- QUALITY findings are staged by each child wrapper and promoted
-#       to logs/review-followups.md by THIS gate after the ff-merge
-#       succeeds, for batch triage, not blocked), merge applied
+#       all three -- QUALITY findings remain in the verdict artifacts and do not
+#       block), merge applied
 #   1 = RETIRED (was: QUALITY findings blocked the merge). QUALITY no longer blocks
 #       a merge, so this gate never returns 1; a stray exit 1 from a backend is an
 #       unexpected code and fails the merge closed (exit 3).
@@ -63,8 +62,8 @@
 #   PREFERRED provider's initial panel reports exhaustion, the gate substitutes a FULL
 #   panel on the OTHER provider: codex exhausted -> a tagged single-pass
 #   claude panel (refused when the branch touches the configured
-#   consistency doc, and when the base's claude wrapper does not declare
-#   -ArtifactTag); claude exhausted -> a codex substitute carrying the
+#   consistency doc, and when the base's claude wrapper is not confirmed to
+#   declare -ArtifactTag); claude exhausted -> a codex substitute carrying the
 #   whole pass count.
 #   No substitute runs when a surviving child of the chosen panel already
 #   decided the merge (a BLOCKER exit 2 aborts the union no matter what a
@@ -312,16 +311,14 @@ function Resolve-BackendSelection {
 # reason; code-side literals could still diverge silently).
 $script:PanelPassCount = 3
 
-# The per-slot launch identity every panel and fallback child derives its
-# display name, run dir, staged-follow-up path, and tag forwarding from.
-# Centralized so distinct dirs, pending paths, and claude -ArtifactTag forwarding
-# derive from the same slot identity.
+# Centralized so distinct dirs and claude -ArtifactTag forwarding derive from
+# the same slot identity.
 function Resolve-PanelSlotSpec {
   param([string]$Backend, [string]$Slot, [string]$RunDir)
   $name = if ([string]::IsNullOrEmpty($Slot)) { $Backend } else { "$Backend-$Slot" }
   $dir = Join-Path $RunDir $name
   $extra = if ([string]::Equals($Backend, 'claude', [System.StringComparison]::Ordinal) -and -not [string]::IsNullOrEmpty($Slot)) { @('-ArtifactTag', $Slot) } else { @() }
-  return @{ Name = $name; Dir = $dir; Pending = (Join-Path $dir 'followups.pending.md'); ExtraArgs = $extra }
+  return @{ Name = $name; Dir = $dir; ExtraArgs = $extra }
 }
 
 # Resolve the full initial panel launch plan for the PREFERRED backend
@@ -340,8 +337,9 @@ function Resolve-PanelSlotSpec {
 #                         names is -Backend codex (a known-ineligible initial
 #                         route is refused rather than launched)
 #   refuse-tag         -- -Backend claude but the BASE's claude wrapper
-#                         does not declare -ArtifactTag: concurrent tagged
-#                         children would param-bind-fail on it (the exact
+#                         is not confirmed to declare -ArtifactTag (probe
+#                         absent or unknown): concurrent tagged children
+#                         could param-bind-fail on it (the exact
 #                         hazard Get-WrapperParameterDeclaration exists to
 #                         prevent)
 function Resolve-MergePanelPlan {
@@ -420,7 +418,8 @@ function Resolve-PanelOutcome {
 #                         claude wrapper fails closed on any diff touching
 #                         it; the attempt would be burned)
 #   refuse-tag         -- the substitute would be claude but the BASE's
-#                         claude wrapper does not declare -ArtifactTag
+#                         claude wrapper is not confirmed to declare
+#                         -ArtifactTag (probe absent or unknown)
 # Precedence: consistency before tag -- the more fundamental
 # cannot-review-this-branch reason first, so the diagnostic names the real
 # cause. (Both-exhausted is discovered at runtime when the substitute
@@ -957,8 +956,8 @@ function Test-ChildExitConsistency {
 }
 
 # ---------------------------------------------------------------------------
-# Non-pure runtime helpers: Git-backed log-directory resolution, artifact
-# centralization with preservation on failure, and follow-up promotion.
+# Non-pure runtime helpers: Git-backed log-directory resolution and artifact
+# centralization with preservation on failure.
 # ---------------------------------------------------------------------------
 
 # Local-install shape verification (docs/local-install-v1.md): a gate
@@ -1173,7 +1172,7 @@ function Get-AuditSummaryLines {
   $lines = @(([string]$AuditText) -split "`n")
   # ANCHORED to the producer's line grammar, never a phrase search. worker-audit
   # embeds UNTRUSTED artifact filenames in its warning payloads, and a verdict
-  # name is free to contain "wrote report to" or "AUTHORITATIVE:" -- an
+  # name is free to contain protocol phrases such as "wrote report to" -- an
   # unanchored match let such a payload stand in for the real report path or
   # summary, so the consumer read diagnostic DATA as a protocol record
   # (merge-panel BLOCKER 2026-08-30). Every matcher below starts at the tag.
@@ -1769,7 +1768,35 @@ function Get-CrgSuccessfulReviewProjection {
   $lines = New-Object 'System.Collections.Generic.List[string]'
   [void]$lines.Add($visibility)
   foreach ($warning in $warnings) { [void]$lines.Add($warning) }
-  foreach ($finding in $findings) { [void]$lines.Add($finding) }
+  if ($findings.Count -gt 0) {
+    # Grouped by what each finding cites (Get-NonBlockingFindingGroups in
+    # scripts/review-common.ps1; the commit hook repeats its rule in awk).
+    # The grouping only orders lines already validated above, so it is
+    # display only and never decides Ok: when it fails, or leaves a lead or
+    # heading empty or a line count other than the findings', the validated
+    # lines are shown ungrouped instead, so no finding goes unseen.
+    $groupedLines = $null
+    try {
+      $candidate = New-Object 'System.Collections.Generic.List[string]'
+      $lead = [string](Get-NonBlockingFindingsLeadText)
+      $complete = -not [string]::IsNullOrWhiteSpace($lead)
+      $candidate.Add($lead)
+      $grouped = 0
+      # Copied out, never @($findings): array-wrapping a generic set can throw
+      # under Windows PowerShell 5.1.
+      $findingArray = New-Object string[] $findings.Count
+      $findings.CopyTo($findingArray)
+      foreach ($group in @(Get-NonBlockingFindingGroups -Lines $findingArray)) {
+        $heading = [string]$group.Heading
+        if ([string]::IsNullOrWhiteSpace($heading)) { $complete = $false }
+        $candidate.Add($heading)
+        foreach ($finding in @($group.Lines)) { $candidate.Add('  ' + [string]$finding); $grouped++ }
+      }
+      if ($complete -and $grouped -eq $findings.Count) { $groupedLines = $candidate.ToArray() }
+    } catch { $groupedLines = $null }
+    if ($null -ne $groupedLines) { foreach ($line in $groupedLines) { [void]$lines.Add($line) } }
+    else { foreach ($finding in $findings) { [void]$lines.Add($finding) } }
+  }
   return @{ Ok = $true; Code = ''; Lines = $lines.ToArray() }
 }
 
@@ -1779,8 +1806,9 @@ function Get-CrgSuccessfulReviewProjection {
 # housekeeping. Kept apart from
 # Get-CrgSuccessfulReviewProjection on purpose. It reads EVERY launched
 # child, not only the panel that supplied the verdict, because a passing
-# child of a replaced panel may still have written records. It never fails
-# the merge: a line it cannot show becomes a fixed notice instead of a
+# child of a replaced panel may still have left feedback work undone or
+# skipped housekeeping. It never fails the merge: a line it cannot show
+# becomes a fixed notice instead of a
 # refusal. (Folding these lines into the strict projection was tried and
 # dropped the same day: it read only the accepting panel and could refuse a
 # passed merge.) A child log is whatever the wrapper and its provider tools
@@ -1789,8 +1817,7 @@ function Get-CrgSuccessfulReviewProjection {
 # Read-CrgSuccessfulReviewEvidence would drop a whole child's warnings for
 # one stray control character elsewhere in its log. The text is only shown,
 # never acted on, so no handle identity check is needed. The writer's
-# messages name no provider; the tag naming the wrapper is removed. Count
-# lines are not shown: the merge PASS line counts after every child. At most
+# messages name no provider; the tag naming the wrapper is removed. At most
 # 32 warnings, the rest counted.
 function Get-CrgReviewFeedbackStatusLines {
   param([string[]]$ChildDirs)
@@ -2149,24 +2176,6 @@ function Get-WrapperParameterDeclaration {
   }
 }
 
-# The argv a branch-review child is launched with. One element is a CORRECTNESS
-# contract rather than a convenience:
-# -CentralDestinationExpected tells the child that THIS gate will consolidate its
-# run-owned -OutDir into the backend's central review logs after the run, so the
-# child's QUALITY follow-up rows must name the CENTRAL artifact path. Dropping the
-# flag would leave those rows naming this gate's scratch dir -- a path the cleanup
-# below then deletes -- so the surviving central verdict would earn no prune
-# exemption and a later provenance check would find nothing at the locator.
-#
-# FORWARDED ONLY WHEN THE WRAPPER DECLARES IT. The wrappers this gate launches are
-# extracted from the BASE, not from the candidate diff, so a base predating the
-# parameter would reject it at binding time and fail the merge closed before any
-# review ran. The two degrades are told apart on purpose. ABSENT is evidence: a
-# wrapper that old predates locators too, so its capture rows carry a bare
-# BASENAME, which the doctrine grandfathers with global stem retention. UNKNOWN is
-# evidence of nothing -- the probe could not read or parse the wrapper -- so the
-# switch is withheld (never pass an argument a wrapper may not bind) and the
-# uncertainty is named rather than dressed up as legacy.
 # -ReviewPasses 0 means "this wrapper has no pass-count parameter" (the claude
 # child runs a single pass by construction).
 function Get-ReviewChildArgs {
@@ -2179,8 +2188,7 @@ function Get-ReviewChildArgs {
     [string]$Title,
     [int]$ReviewPasses
   )
-  # -Base must be the PINNED base OID (40-hex SHA-1 or 64-hex SHA-256, the
-  # same alternative the capture-row tree-OID validators accept), never a
+  # -Base must be the PINNED base OID (40-hex SHA-1 or 64-hex SHA-256), never a
   # symbolic ref. A symbolic ref would be re-resolved independently by every
   # concurrently launched child (`rev-parse "$Target^{commit}"` at child
   # start), so a base branch moving mid-run would split the reviewed range
@@ -2190,28 +2198,17 @@ function Get-ReviewChildArgs {
   if ($Base -cnotmatch '\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z') {
     throw "Get-ReviewChildArgs: -Base must be the pinned base OID (40- or 64-hex; got '$Base') - a symbolic ref would let each review child re-resolve a moving base and split the reviewed range and project-mode governing resolution across the panel."
   }
+  # -NoFindingsNotice: this gate shows the findings from the verdict artifact
+  # (Get-CrgSuccessfulReviewProjection), and the child's output is the
+  # transcript read under a size limit, which the wrapper's own notice would
+  # grow.
   $childArgs = @(
     '-ExecutionPolicy', 'Bypass', '-File', $WrapperPath,
     '-Scope', 'Branch', '-Target', $Base, '-Tip', $BranchSha,
-    '-PromptPath', $PromptPath
+    '-PromptPath', $PromptPath, '-NoFindingsNotice'
   )
   if ($ReviewPasses -gt 0) { $childArgs += @('-ReviewPasses', "$ReviewPasses") }
   $childArgs += @('-OutDir', $RunDir)
-  $centralDeclState = Get-WrapperParameterDeclaration -WrapperPath $WrapperPath -ParamName 'CentralDestinationExpected'
-  if ($centralDeclState -eq 'declared') {
-    $childArgs += @('-CentralDestinationExpected')
-  } elseif ($centralDeclState -eq 'absent') {
-    # P4 revisit of this P2-era inference: for CLAUDE wrappers the window is
-    # now CLOSED -- every claude panel and fallback path requires a declared
-    # -ArtifactTag (a later capability than this one) and refuses before
-    # reaching this launch, so a claude wrapper old enough to trip this arm
-    # never gets a child. The inference therefore remains reachable only for
-    # a pre-locator CODEX base wrapper, where it stays an inference from the
-    # declaration probe, not a proof.
-    Write-Host "[auto-merge] WARN: the trusted wrapper at $WrapperPath does not declare -CentralDestinationExpected (the base predates it) - a wrapper that old LIKELY predates locators too (an inference from the declaration probe, not a proof), so its capture rows are expected to carry a bare BASENAME."
-  } else {
-    Write-Host "[auto-merge] WARN: could not determine whether the trusted wrapper at $WrapperPath declares -CentralDestinationExpected (unreadable or unparsable) - the switch is WITHHELD, so a capture row from this child names its RUN-DIR path, which consolidation then moves into the central review logs: such a row goes stale at its locator and is resolved there instead (absent-at-locator, ordinary duty, per the capture doctrine)."
-  }
   $childArgs += @('-Title', $Title)
   return $childArgs
 }
@@ -2253,6 +2250,40 @@ function Resolve-CentralLogDir {
     $topLevel = ($topOut | Select-Object -First 1)
   }
   return Get-ReviewLogDir -CommonDir $commonDir -TopLevel $topLevel -Backend $Backend
+}
+
+# Atomic rename-with-replace for the centralization copy below: a direct
+# Copy-Item into the central logs exposes a partially-written verdict at
+# its final name for the whole copy duration -- the trend analyzer or any
+# other reader scanning mid-copy would read a truncated artifact with no way to
+# tell. Staging beside the destination and swapping with MoveFileEx
+# (REPLACE_EXISTING | WRITE_THROUGH) makes every centralized artifact
+# appear complete-or-absent -- PROVIDED the source is quiescent: atomicity
+# covers publication only, so the finally's consolidation loop skips any
+# dir whose child was not confirmed exited (a live writer's partial
+# snapshot would otherwise verify and publish). The type name is VERSIONED (a loaded type can
+# never be redefined in-process, so an older definition must never shadow
+# a newer method set), and initialization is LAZY and FALLIBLE: under the
+# script's EAP=Stop a compiler/policy failure from a load-time Add-Type
+# would terminate the gate before usage validation or the
+# exit-code mapping, so failure is routed through the centralization path's
+# ordinary warning-and-preserve arm rather than a raw termination.
+$script:crgMergeNativeState = $null
+function Initialize-CrgMergeNative {
+  if ($null -ne $script:crgMergeNativeState) { return $script:crgMergeNativeState }
+  try {
+    if (-not ('CrgMerge.NativeV1' -as [type])) {
+      Add-Type -Namespace 'CrgMerge' -Name 'NativeV1' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);
+'@ -ErrorAction Stop
+    }
+    $script:crgMergeNativeState = $true
+  } catch {
+    Write-Host "[auto-merge] WARN: the native rename-with-replace helper could not initialize ($($_.Exception.Message)) - atomic centralization is unavailable this run."
+    $script:crgMergeNativeState = $false
+  }
+  return $script:crgMergeNativeState
 }
 
 # Copy a run-owned backend artifact dir into the centralized shared logs for
@@ -2303,40 +2334,6 @@ function Resolve-CentralLogDir {
 # every VERDICT file copied successfully (centralized duplicates exist). On
 # uncertainty it returns $true (preserve) -- a conservative default that never
 # loses data.
-# Atomic rename-with-replace for the centralization copy below: a direct
-# Copy-Item into the central logs exposes a partially-written verdict at
-# its final name for the whole copy duration -- the trend analyzer or a
-# prune scanning mid-copy would read a truncated artifact with no way to
-# tell. Staging beside the destination and swapping with MoveFileEx
-# (REPLACE_EXISTING | WRITE_THROUGH) makes every centralized artifact
-# appear complete-or-absent -- PROVIDED the source is quiescent: atomicity
-# covers publication only, so the finally's consolidation loop skips any
-# dir whose child was not confirmed exited (a live writer's partial
-# snapshot would otherwise verify and publish). The type name is VERSIONED (a loaded type can
-# never be redefined in-process, so an older definition must never shadow
-# a newer method set), and initialization is LAZY and FALLIBLE: under the
-# script's EAP=Stop a compiler/policy failure from a load-time Add-Type
-# would terminate the gate before usage validation or the
-# exit-code mapping, so failure is routed through the centralization path's
-# ordinary warning-and-preserve arm rather than a raw termination.
-$script:crgMergeNativeState = $null
-function Initialize-CrgMergeNative {
-  if ($null -ne $script:crgMergeNativeState) { return $script:crgMergeNativeState }
-  try {
-    if (-not ('CrgMerge.NativeV1' -as [type])) {
-      Add-Type -Namespace 'CrgMerge' -Name 'NativeV1' -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);
-'@ -ErrorAction Stop
-    }
-    $script:crgMergeNativeState = $true
-  } catch {
-    Write-Host "[auto-merge] WARN: the native rename-with-replace helper could not initialize ($($_.Exception.Message)) - atomic centralization is unavailable this run."
-    $script:crgMergeNativeState = $false
-  }
-  return $script:crgMergeNativeState
-}
-
 function Copy-RunArtifactsToCentralLogs {
   param(
     [string]$RunBackendDir,
@@ -2388,19 +2385,12 @@ function Copy-RunArtifactsToCentralLogs {
     Write-Host "[auto-merge] forensics WARNING: could not enumerate $backendDisplay run dir $runDirDisplay ($enumerationError) - cannot centralize; PRESERVING the run dir so artifacts are not lost."
     return $true
   }
-  # Copy ONLY verdict artifacts -- the exact `review-<YYYYMMDD>-<HHMMSS>-...`
-  # {.md,.jsonl,.stderr.log,.exhaustion.json,.errored.txt} shape the
-  # auto-review prune recognizes (the exhaustion sidecar and preserved
-  # errored-pass bodies are DURABLE evidence -- the sidecar is what justified
-  # a fallback, and deleting it with the run dir would destroy the record the
-  # wrappers declare mandatory). Start-ReviewChild
-  # leaves scaffolding (child-args.txt, child-exit.txt, child-runner.ps1, and the
-  # child-stdout.log / child-stderr.log captures) in the run
-  # dir; copying it into the gitignored central logs would orphan it -- the prune's
-  # name regex never matches it, so it would never age out (slow unbounded growth).
-  # The scaffolding is transient run-dir state that goes away with the run dir, so it
-  # is intentionally NOT preserved. (Mirrors the prune-class name shapes in the
-  # wrappers' Get-ReviewLogPruneClass.)
+  # The exhaustion sidecar and preserved errored-pass bodies are DURABLE
+  # evidence: the sidecar is what justified a fallback, and deleting it with
+  # the run dir would destroy the record the wrappers declare mandatory.
+  # Start-ReviewChild leaves scaffolding in the run dir; it is transient
+  # run-dir state, not review evidence, so it goes away with the run dir and
+  # is intentionally NOT preserved.
   $verdictNameRe = [regex]'^review-[0-9]{8}-[0-9]{6}-.+\.(md|jsonl|stderr\.log|exhaustion\.json|errored\.txt)$'
   $files = @($allFiles | Where-Object { $verdictNameRe.IsMatch($_.Name) })
   if ($files.Count -gt 0 -and -not (Initialize-CrgMergeNative)) {
@@ -2732,11 +2722,8 @@ Write-Host (Get-MergePanelPlanStatusLine -PassCount $script:PanelPassCount)
 # A SEPARATE fresh per-run scratch dir owned by THIS auto-merge invocation.
 # Every launched panel/fallback child runs with an explicit -OutDir into its
 # own per-slot subdir here. The gate-owned writers are the review process (its verdict
-# `review-*-branch-*.md` and its staged `followups.pending.md`, promoted
-# post-merge by Invoke-FollowupPromotion or discarded with the run dir on abort)
-# and Start-ReviewChild (the runner scaffolding --
-# child-args.txt, child-exit.txt, child-runner.ps1, child-stdout.log, and
-# child-stderr.log). NOTE this dir is under
+# `review-*-branch-*.md`) and Start-ReviewChild (the runner scaffolding).
+# NOTE this dir is under
 # $env:TEMP with default ACLs -- that is NOT an OS-enforced no-other-writer
 # boundary (a same-user process could write here). The dir is auto-merge-CREATED
 # fresh for THIS run, so no pre-existing planted file can be inside it. Child
@@ -2744,13 +2731,10 @@ Write-Host (Get-MergePanelPlanStatusLine -PassCount $script:PanelPassCount)
 # authorize merge by itself: the current run-owned captures and exact unique
 # `review-*-branch-*.md` artifacts must also pass the held-file, provider,
 # review-identity, verdict, and semantic projection checks. After the review,
-# the run's VERDICT artifacts (the
-# `review-*` {.md,.jsonl,.stderr.log,.exhaustion.json,.errored.txt} shape)
-# are COPIED into the centralized
+# the run's VERDICT artifacts are COPIED into the centralized
 # shared logs for forensics and the top-level trend analyzer (which scans BOTH
 # backend log dirs by default); the Start-ReviewChild scaffolding
-# (child-args.txt / child-exit.txt / child-runner.ps1 / child-stdout.log /
-# child-stderr.log) is TRANSIENT and is NOT
+# is TRANSIENT and is NOT
 # centralized -- it is discarded with the run dir (the wrappers do NOT
 # auto-centralize when an explicit -OutDir is given). The
 # finally block then deletes BOTH the trusted-infra dir AND the run dir
@@ -2858,7 +2842,7 @@ try {
       Write-Host "[auto-merge] ERROR: no trusted source for $f. Either the base '$Base' ($baseSha) probe failed or holds a non-regular entry there, or the path is positively absent from base and no manifest-verified local copy was admitted (the package's docs/local-install-v1.md). Diagnose the base tree first. For the LOCAL shape, run the retained package installer, immediately followed by the installed renderer check:"
       Write-Host '  powershell -NoProfile -ExecutionPolicy Bypass -File "<path-to>\cross-review-gate\bootstrap.ps1" -TargetRepo "<repo>" -Force'
       Write-Host '  powershell -NoProfile -ExecutionPolicy Bypass -File "<repo>\scripts\render-project-values.ps1" -TargetRepo "<repo>" -Check'
-      Write-Host '[auto-merge] If exact LOCAL recovery is required, first complete the bounded sanctioned -SealManifest step in docs/install-values-v1.md, then run both commands above in order. Never retry this merge on sealed drift.'
+      Write-Host '[auto-merge] If exact LOCAL recovery is required, first complete the bounded sanctioned -SealManifest step in the package''s docs/install-values-v1.md, then run both commands above in order. Never retry this merge on sealed drift.'
       Remove-TreeNoRecurse -Path $trustedDir
       Remove-TreeNoRecurse -Path $runDir
       exit 3
@@ -2926,13 +2910,11 @@ Write-Host '[auto-merge] Running adversarial review on the pinned branch diff...
 
 # Panel bookkeeping, initialized OUTSIDE the try so the finally block always
 # sees them: every launched child (panel and fallback alike) joins the
-# defensive join, every child run dir joins the consolidation, and every
-# staged follow-up path joins the post-merge promotion -- even when an
-# exception lands mid-run.
+# defensive join and every child run dir joins the consolidation -- even when
+# an exception lands mid-run.
 $panelChildren = @()
 $fbJoinList = @()
 $consolidateDirs = @()
-$allPendingPaths = @()
 $panelExits = @()
 # Every launched review child is also registered for caller-output handling.
 # Successful runs never publish these captures. Review-derived BLOCKER/fail-
@@ -2964,26 +2946,14 @@ try {
     exit 3
   }
   if ($panelPlan.Action -eq 'refuse-tag') {
-    Write-Host "[auto-merge] -Backend claude was chosen but the base's claude wrapper does not declare -ArtifactTag (probe: $claudeTagDecl) - concurrent tagged panel children would param-bind-fail on it. Merge ABORTED (fail closed); land the updated claude wrapper on the base first, or re-run with -Backend codex."
+    Write-Host "[auto-merge] -Backend claude was chosen but the base's claude wrapper is not confirmed to declare -ArtifactTag (probe: $claudeTagDecl) - concurrent tagged panel children could param-bind-fail on it. Merge ABORTED (fail closed); land the updated claude wrapper on the base first, or re-run with -Backend codex."
     exit 3
   }
 
   # Launch the chosen provider's panel. -Tip is the pinned SHA so review and
   # merge target the same content even if $Branch moves. Each child gets an
   # explicit -OutDir into its run-owned slot subdir (its verdict artifacts
-  # feed the post-merge forensics copy) together with the
-  # -CentralDestinationExpected declaration this gate owes it whenever the
-  # base-extracted wrapper can bind it (see Get-ReviewChildArgs).
-  #
-  # Parent-directed follow-up staging (merge-gate BLOCKER 2026-07-10): each
-  # child wrapper STAGES its QUALITY follow-ups at the
-  # CROSS_REVIEW_FOLLOWUPS_PENDING path instead of appending them to the
-  # durable index -- this gate can still abort on the panel verdict, the
-  # branch-pin verification, or the ff-merge itself AFTER a child passes, and
-  # follow-ups for an unmerged branch must never reach the index. Promotion
-  # happens below, only after the ff-merge succeeds. A child's env is
-  # captured at process creation, so the per-child path is set immediately
-  # before each launch and the variable is restored right after the launches.
+  # feed the post-merge forensics copy).
   #
   # Launch via Start-ReviewChild: the wrapper runs in a thin runner that
   # records its $LASTEXITCODE to a run-owned exit FILE (the deterministic
@@ -2993,7 +2963,6 @@ try {
   # the PS 5.1 `Start-Process -PassThru` null-ExitCode quirk that, observed
   # live, printed an empty exit code and forced the gate to fail closed on
   # EVERY merge.
-  $savedFollowupsPending = $env:CROSS_REVIEW_FOLLOWUPS_PENDING
   Write-Host (Get-MergePanelLaunchStatusLine -PassCount $script:PanelPassCount)
   foreach ($slot in $panelPlan.Slots) {
     $slotSpec = Resolve-PanelSlotSpec -Backend $Backend -Slot $slot -RunDir $runDir
@@ -3012,17 +2981,11 @@ try {
         -Title "Pre-merge review (claude ${slot}): $Branch ($branchSha) -> $Base" -ReviewPasses 0
     }
     $slotArgs += $slotSpec.ExtraArgs
-    $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $slotSpec.Pending
     $slotChild = Start-ReviewChild -RunDir $slotSpec.Dir -WrapperArgs $slotArgs -Utf8NoBom $utf8NoBom
     $script:panelChildren += ,@{ Name = $slotSpec.Name; Dir = $slotSpec.Dir; Child = $slotChild; Proc = $slotChild.Proc }
     $script:reviewTranscriptChildren += ,$slotChild
     $script:consolidateDirs += ,@{ Dir = $slotSpec.Dir; Backend = $Backend; Owner = $slotSpec.Name }
-    $script:allPendingPaths += ,@{ Path = $slotSpec.Pending; Backend = $Backend }
   }
-  # Every child captured its pending path at launch; restore the caller's
-  # value so THIS process's later git/PS activity never runs with a stale one.
-  if ($null -eq $savedFollowupsPending) { Remove-Item Env:CROSS_REVIEW_FOLLOWUPS_PENDING -ErrorAction SilentlyContinue }
-  else { $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $savedFollowupsPending }
 
   # WAIT FOR EVERY LAUNCHED CHILD BEFORE branching on any result: an early
   # `exit 3` taken between the waits would leave a sibling still running --
@@ -3085,7 +3048,6 @@ try {
 
   $fallbackHappened = $false
   $fallbackProvider = ''
-  $fallbackPendingPaths = @()
   $fallbackReviewDirs = @()
   # LOWER-BOUND check before classification: every launched child must have
   # resolved a validated exit (the loop above exits 3 on any unresolvable
@@ -3150,7 +3112,7 @@ try {
     }
     'refuse-tag' {
       Publish-ReviewFailureTranscripts -FinalExitCode 3 -Children $reviewTranscriptChildren -State $reviewReplayState
-      Write-Host "[auto-merge] automatic review routing requires the current tagged-child wrapper contract, but the trusted base does not provide it (probe: $claudeTagDecl). Merge ABORTED (fail closed); land the current wrapper on the base first."
+      Write-Host "[auto-merge] automatic review routing requires the current tagged-child wrapper contract, but the trusted base is not confirmed to provide it (probe: $claudeTagDecl). Merge ABORTED (fail closed); land the current wrapper on the base first."
       exit 3
     }
   }
@@ -3163,17 +3125,13 @@ try {
         -Base $baseSha -BranchSha $branchSha -RunDir $fbSpec.Dir `
         -Title "Pre-merge review (claude fallback ${fbTag}): $Branch ($branchSha) -> $Base" -ReviewPasses 0
       $fbArgs += $fbSpec.ExtraArgs
-      $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $fbSpec.Pending
       $fbChild = Start-ReviewChild -RunDir $fbSpec.Dir -WrapperArgs $fbArgs -Utf8NoBom $utf8NoBom
       $fbLaunched += ,@{ Child = $fbChild; Tag = $fbTag }
       $script:reviewTranscriptChildren += ,$fbChild
       $script:fbJoinList += ,@{ N = $fbSpec.Name; P = $fbChild.Proc }
       $script:consolidateDirs += ,@{ Dir = $fbSpec.Dir; Backend = 'claude'; Owner = $fbSpec.Name }
-      $fallbackPendingPaths += $fbSpec.Pending
       $fallbackReviewDirs += $fbSpec.Dir
     }
-    if ($null -eq $savedFollowupsPending) { Remove-Item Env:CROSS_REVIEW_FOLLOWUPS_PENDING -ErrorAction SilentlyContinue }
-    else { $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $savedFollowupsPending }
     foreach ($fb in $fbLaunched) { if ($null -ne $fb.Child.Proc) { $fb.Child.Proc.WaitForExit() } }
     # Classification collects EVERY child's exit first: a sibling BLOCKER
     # outranks a later-met exhaustion (the union is 2 regardless of what
@@ -3238,15 +3196,11 @@ try {
       -Title "Pre-merge review (codex fallback fb1): $Branch ($branchSha) -> $Base" -ReviewPasses $script:PanelPassCount
     if (-not [string]::Equals($mergeEffort, 'unknown', [System.StringComparison]::Ordinal)) { $fbArgs += @('-ReasoningEffort', $mergeEffort) }
     $fbArgs += $fbSpec.ExtraArgs
-    $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $fbSpec.Pending
     $fbChild = Start-ReviewChild -RunDir $fbSpec.Dir -WrapperArgs $fbArgs -Utf8NoBom $utf8NoBom
     $script:reviewTranscriptChildren += ,$fbChild
     $script:fbJoinList += ,@{ N = $fbSpec.Name; P = $fbChild.Proc }
     $script:consolidateDirs += ,@{ Dir = $fbSpec.Dir; Backend = 'codex'; Owner = $fbSpec.Name }
-    $fallbackPendingPaths += $fbSpec.Pending
     $fallbackReviewDirs += $fbSpec.Dir
-    if ($null -eq $savedFollowupsPending) { Remove-Item Env:CROSS_REVIEW_FOLLOWUPS_PENDING -ErrorAction SilentlyContinue }
-    else { $env:CROSS_REVIEW_FOLLOWUPS_PENDING = $savedFollowupsPending }
     if ($null -ne $fbChild.Proc) { $fbChild.Proc.WaitForExit() }
     $fbExit = Resolve-ReviewChildExit -ExitFile $fbChild.ExitFile -BackendName 'codex-fb1'
     if (-not (Test-ChildExitConsistency -BackendName 'codex-fb1' -FileExit $fbExit -Proc $fbChild.Proc)) {
@@ -3280,10 +3234,7 @@ try {
   # so $unionExit here is 0 or 2 by construction -- the defensive default
   # arm below still fails closed on anything else. Under the 2026-07
   # severity contract QUALITY is NON-BLOCKING: the wrappers exit 0 for a
-  # QUALITY-only verdict -- only a BLOCKER (exit 2) aborts the merge. Each
-  # child wrapper STAGED its QUALITY-bearing PASS's follow-ups
-  # (CROSS_REVIEW_FOLLOWUPS_PENDING); they are promoted to
-  # logs/review-followups.md only after the ff-merge succeeds.
+  # QUALITY-only verdict -- only a BLOCKER (exit 2) aborts the merge.
   if ($null -eq $unionExit) {
     Publish-ReviewFailureTranscripts -FinalExitCode 3 -Children $reviewTranscriptChildren -State $reviewReplayState
     Write-Host "[auto-merge] no panel verdict was produced (internal state error) - merge ABORTED (fail closed)."
@@ -3310,7 +3261,11 @@ try {
       Write-Host '[auto-merge] successful-review semantic evidence was missing, malformed, conflicting, or identity-mismatched - merge ABORTED (fail closed).'
       exit 3
     }
-    Publish-CrgSuccessfulReviewProjection -Lines $successProjection.Lines
+    # Display only: the evidence was validated above, so a print failure is
+    # reported on stderr and is not a merge failure, as for the status lines
+    # below and the commit hook's projection print.
+    try { Publish-CrgSuccessfulReviewProjection -Lines $successProjection.Lines }
+    catch { try { [Console]::Error.WriteLine("[auto-merge] WARN: the review result could not be printed ($($_.Exception.Message)); the verdict files hold the findings") } catch { } }
     # Status lines must not fail the merge (Get-CrgReviewFeedbackStatusLines),
     # so neither collecting nor printing them may throw past here.
     try {
@@ -3325,7 +3280,7 @@ try {
 
   switch ($unionExit) {
     0 {
-      Write-Host "[auto-merge] PASS - $(Get-ReviewPassCoverageText -GitContext (Resolve-FollowupGitContext)) - proceeding with ff-merge (verdicts may contain informational NOTE and/or non-blocking QUALITY findings; the wrappers exit 0 for CLEAN, NOTE-only, and QUALITY-only, and each QUALITY-bearing PASS's staged follow-ups are promoted to logs/review-followups.md after the ff-merge succeeds)."
+      Write-Host "[auto-merge] PASS - $(Get-ReviewPassCoverageText) - proceeding with ff-merge (verdicts may contain informational NOTE and/or non-blocking QUALITY findings; the wrappers exit 0 for CLEAN, NOTE-only, and QUALITY-only)."
       $reviewPhaseActive = $false
     }
     2 {
@@ -3376,9 +3331,8 @@ try {
   }
 
   Write-Host "[auto-merge] ff-merge $branchSha (=$Branch) -> '$Base'"
-  # --no-overwrite-ignore: an ignored local file (the per-user TASKS.md the
-  # review wrappers exclude, among others) is refused, not silently replaced,
-  # when the incoming tree tracks the same path.
+  # --no-overwrite-ignore: an ignored local file is refused, not silently
+  # replaced, when the incoming tree tracks the same path.
   & git merge --ff-only --no-overwrite-ignore $branchSha
   if ($LASTEXITCODE -ne 0) {
     Write-Host "[auto-merge] ERROR: ff-merge failed"
@@ -3387,24 +3341,13 @@ try {
 
   $newHead = (& git rev-parse --short=12 HEAD).Trim()
   Write-Host "[auto-merge] OK - '$Base' is now at $newHead"
+  # Printed only here, once the ff-merge is applied: at the PASS line above the
+  # merge can still fail. The merge already stands, so a reminder that cannot
+  # be printed is a warning, never a failed run, and that warning has a guard
+  # of its own.
+  try { Write-Host "[auto-merge] $(Get-ReviewTaskReminderText)" }
+  catch { try { [Console]::Error.WriteLine("[auto-merge] WARN: the task-list reminder could not be printed ($($_.Exception.Message))") } catch { } }
 
-  # The merge is applied -- NOW the children's staged QUALITY follow-ups may
-  # reach the durable index (they describe content that actually landed).
-  # Every launched child's staging is promoted, the superseded exhausted
-  # panel's included (its completed passes' findings still describe landed
-  # content) and every fallback child's. One call appends them all under one
-  # lock (Invoke-FollowupPromotion, the promoter the commit gate also runs);
-  # its result only words its own warnings, since the merge already stands.
-  $promotionPaths = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($pp in @($allPendingPaths)) {
-    if (-not [string]::IsNullOrWhiteSpace($pp.Path)) { $promotionPaths.Add($pp.Path) }
-  }
-  if ($fallbackHappened) {
-    foreach ($fp in @($fallbackPendingPaths)) {
-      if (-not [string]::IsNullOrWhiteSpace($fp)) { $promotionPaths.Add($fp) }
-    }
-  }
-  [void](Invoke-FollowupPromotion -PendingPaths $promotionPaths.ToArray() -LogTag 'auto-merge' -ProviderNeutralOutput)
   # --- Non-gating post-merge process audit (REPORT-ONLY) -------------------
   # The merge has ALREADY completed and the base is updated above; nothing in
   # this block can change the merge outcome or this script's exit code (control

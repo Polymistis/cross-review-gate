@@ -215,7 +215,7 @@ function Invoke-CrgPairedReviewSessionCore {
   foreach ($item in @(
     @{ Module = 'paired-diff'; Names = @('New-CrgPairedInputSnapshot', 'Assert-CrgPairedInputSnapshot', 'Close-CrgPairedInputSnapshot') },
     @{ Module = 'paired-process'; Names = @('Start-CrgPairedReviewProcess', 'Wait-CrgPairedReviewProcess', 'Complete-CrgPairedReviewProcess', 'Stop-CrgPairedReviewProcess', 'Close-CrgPairedReviewProcess') },
-    @{ Module = 'paired-governance'; Names = @('Read-CrgReviewUnitBytes', 'Read-CrgSuccessfulPairArtifactBytes', 'Read-CrgPairArtifactBytes', 'Read-CrgPairExhaustionBytes') },
+    @{ Module = 'paired-governance'; Names = @('Read-CrgReviewUnitBytes', 'Read-CrgSuccessfulPairArtifactBytes', 'Read-CrgPairArtifactBytes', 'Read-CrgPairExhaustionBytes', 'Get-CrgPairNonBlockingFindingLines', 'Write-CrgPairNonBlockingFindings', 'Get-CrgPairTaskReminderText') },
     @{ Module = 'paired-review-input'; Names = @('Read-CrgPreparedPairDescriptorBytes') }
   )) {
     foreach ($name in $item.Names) {
@@ -235,6 +235,7 @@ function Invoke-CrgPairedReviewSessionCore {
   $readers = New-Object 'System.Collections.Generic.List[object]'
   $transcripts = New-Object 'System.Collections.Generic.List[object]'
   $attemptRecords = New-Object 'System.Collections.Generic.List[object]'
+  $passedVerdicts = New-Object 'System.Collections.Generic.List[object]'
   try {
     # Full materialization validation precedes policy classification or launch;
     # ignore mutable caller metadata when deriving the live artifact pins.
@@ -336,6 +337,13 @@ function Invoke-CrgPairedReviewSessionCore {
           if ([string]::Equals($backend, 'codex', [StringComparison]::Ordinal) -and -not [string]::Equals($successful.Effort, $policy.CodexEffort, [StringComparison]::Ordinal)) { throw 'paired successful effort differs from the scheduled effort' }
           if ([string]::Equals($backend, 'grok', [StringComparison]::Ordinal) -and -not [string]::Equals($successful.Effort, $policy.Grok.Effort, [StringComparison]::Ordinal)) { throw 'paired Grok request effort differs from the governing profile' }
           if ([string]::Equals($backend, 'grok', [StringComparison]::Ordinal) -and -not [string]::Equals($successful.RequestedModel, $policy.Grok.Model, [StringComparison]::Ordinal)) { throw 'paired Grok requested model differs from the governing profile' }
+          # The notice printed once every leg has passed needs only the
+          # finding lines, so the decoded verdict is not kept for it. Taking
+          # them is display work: a failure is reported with that notice and
+          # never fails the review.
+          $findingLines = $null; $findingError = ''
+          try { $findingLines = @(& $commands['Get-CrgPairNonBlockingFindingLines'] -VerdictText $successful.VerdictText) } catch { $findingError = $_.Exception.Message }
+          $passedVerdicts.Add([pscustomobject]@{ Provider = $backend; Directory = $attempt.Path; Leaf = $verdicts[0]; FindingLines = $findingLines; FindingError = $findingError })
         } else {
           if ($attemptNumber -ge $policy.MaximumAttempts -or $backend -ceq 'grok' -or $exhaustions.Count -ne 1) { throw 'paired exhausted attempt cannot satisfy this review leg' }
           if ($backend -ceq 'codex' -and $verdicts.Count -ne 1) { throw 'paired Codex exhaustion is missing the producer-required forensic verdict' }
@@ -359,6 +367,21 @@ function Invoke-CrgPairedReviewSessionCore {
       }
     }
     Write-Host '[paired-review] captured-pair review PASS - covers this source diff only, not target execution or deployment readiness; publication guards remain required.'
+    # Console projection for the submitting session only. The review outcome is
+    # already decided, so a print failure is reported on stderr, in a guard of
+    # its own (Write-Warning throws under $WarningPreference = 'Stop'), and
+    # never fails the PASS; $null keeps stray pipeline output out of this
+    # function's result. The reminder and each verdict have their own block so
+    # one failed print cannot suppress the others.
+    foreach ($passed in $passedVerdicts) {
+      try {
+        Write-Host "[paired-review] $($passed.Provider) verdict: $(Join-Path $passed.Directory $passed.Leaf)"
+        if ($null -eq $passed.FindingLines) { throw $passed.FindingError }
+        $null = & $commands['Write-CrgPairNonBlockingFindings'] -FindingLines $passed.FindingLines -LogTag 'paired-review'
+      } catch { try { [Console]::Error.WriteLine("[paired-review] WARN: the $($passed.Provider) verdict's non-blocking findings could not be printed ($($_.Exception.Message))") } catch { } }
+    }
+    try { Write-Host "[paired-review] $(& $commands['Get-CrgPairTaskReminderText'])" }
+    catch { try { [Console]::Error.WriteLine("[paired-review] WARN: the task reminder could not be printed ($($_.Exception.Message))") } catch { } }
     return [pscustomobject]@{
       ReviewUnitSha256 = $unit.ReviewUnitSha256; DescriptorSha256 = $snapshot.PreparedPairSha256
       ReviewLegs = $policy.Legs; ReviewAttempts = $attemptRecords.ToArray(); OutputRoot = $output.Root

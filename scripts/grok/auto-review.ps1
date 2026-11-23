@@ -520,8 +520,7 @@ try {
     -PublicObjectFormat $fields['public-object-format'] -PrivateObjectFormat $fields['private-object-format'] `
     -DescriptorSha256 $pairedHost.InputBundle.DescriptorSha256 -DisplayDiffSha256 $pairedHost.DiffSha256 `
     -Backend grok -Effort $effort -DurationSecs ((Get-ReviewDurationSecs -ElapsedSeconds $duration.Elapsed.TotalSeconds).ToString([Globalization.CultureInfo]::InvariantCulture)) -VerdictText $body -RequestedModel $model
-  $verdictPath = Write-CrgGrokEvidence -HostInput $pairedHost -Leaf ($stem + '.md') -Bytes $artifact
-  Write-CrgPairedFollowups -HostInput $pairedHost -VerdictText $body -VerdictFile $verdictPath -Backend grok
+  $null = Write-CrgGrokEvidence -HostInput $pairedHost -Leaf ($stem + '.md') -Bytes $artifact
   if ($exitCode -eq 0) {
     $readSuccess = if ($PreparedOrigin -ceq 'paired-v1') { Get-Command Read-CrgSuccessfulPairArtifactBytes -Module paired-governance }
       else { Get-Command Read-CrgSuccessfulFirstAttachmentArtifactBytes -Module paired-governance }

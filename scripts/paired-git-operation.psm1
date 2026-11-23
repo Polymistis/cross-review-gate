@@ -702,8 +702,8 @@ function Add-CrgPairedGitPublicPaths {
   $exclusionSet = [Collections.Generic.HashSet[string]]::new([string[]]$PrivateExclusions, [StringComparer]::Ordinal)
   foreach ($path in $Paths) {
     # Walk the positive's ancestor prefixes instead of scanning every exclusion:
-    # both arrays are bounded at 100000 entries, so the nested scan is the
-    # operation's largest cost on a wide stage.
+    # both arrays can reach the literal-path bound, so the nested scan would be
+    # the operation's largest cost on a wide stage.
     $candidate = $path
     while ($true) {
       if ($exclusionSet.Contains($candidate)) { throw "public staging refuses positive path '$path' under private exclusion '$candidate'" }

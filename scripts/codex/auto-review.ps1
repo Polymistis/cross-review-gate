@@ -21,7 +21,7 @@
 # scratch tree is deleted after the verdict is parsed.
 #
 # Exit codes (2026-07 severity contract: only BLOCKER aborts; QUALITY is a
-# non-blocking follow-up):
+# non-blocking finding):
 #   0 = PASS. Sub-cases that all pass the gate:
 #       (a) CLEAN - no findings, verdict line is `VERDICT: CLEAN`
 #       (b) NOTE-only - one or more NOTE findings (informational), no
@@ -29,10 +29,12 @@
 #       (c) QUALITY-only - one or more QUALITY findings (the legacy NON-BLOCKER
 #           prefix is severity-equivalent), no BLOCKER, verdict line is
 #           `VERDICT: NON-BLOCKING`. QUALITY does NOT abort the gate; the
-#           findings are printed prominently and routed to the durable
-#           logs/review-followups.md index for batch triage (staged
-#           for the gate parent when CROSS_REVIEW_FOLLOWUPS_PENDING is set, appended
-#           directly on a standalone run -- see Add-ReviewFollowups).
+#           QUALITY and NOTE findings are shown to the submitting session,
+#           grouped by what each cites, to fix as part of this change: a
+#           run on its own prints them (Write-NonBlockingFindingsNotice);
+#           the commit hook and the merge gate pass -NoFindingsNotice and
+#           show them from the verdict file. Nothing records them as work
+#           for a later session.
 #       Downstream wrappers should treat a NOTE- or QUALITY-bearing verdict as a
 #       pass WITH awareness that the verdict file still contains those entries
 #       (do not relabel it CLEAN).
@@ -103,22 +105,17 @@
 #                          a calling gate may require this invocation's emitted
 #                          artifact as current success evidence and validate its
 #                          identity and semantic rows before accepting exit 0.
+#   -NoFindingsNotice      print no non-blocking findings notice. The commit
+#                          hook and the merge gate pass it: they show the
+#                          findings from the verdict file, and this wrapper's
+#                          output is the transcript they validate under a size
+#                          limit, which the notice would only grow.
 
 [CmdletBinding(DefaultParameterSetName = 'Legacy')]
 param(
   [Parameter(Mandatory = $true, ParameterSetName = 'Legacy')]
-  [ValidateSet('Commit', 'Branch', 'Uncommitted', 'Staged', 'SealLegacy')]
+  [ValidateSet('Commit', 'Branch', 'Uncommitted', 'Staged')]
   [string]$Scope,
-
-  # SealLegacy scope only: the legacy region's byte length and lowercase-hex
-  # SHA-256 AS THE OPERATOR CAPTURED THEM AT INSPECTION. The seal operation
-  # recomputes both under the writer lock and refuses on any mismatch -- a
-  # seal is never emitted over bytes the operator did not inspect
-  # (docs/capture-doctrine-v6.md).
-  [Parameter(ParameterSetName = 'Legacy')]
-  [string]$SealExpectedBytes = '',
-  [Parameter(ParameterSetName = 'Legacy')]
-  [string]$SealExpectedSha = '',
 
   [Parameter(ParameterSetName = 'Legacy')]
   [string]$Target = '',
@@ -161,6 +158,9 @@ param(
   [Parameter(ParameterSetName = 'Legacy')]
   [string]$Title = '',
 
+  [Parameter(ParameterSetName = 'Legacy')]
+  [switch]$NoFindingsNotice,
+
   # Number of INDEPENDENT codex review passes to run and combine. A single
   # pass over a dense diff is non-exhaustive + non-deterministic (each run
   # surfaces a different subset of the real findings), which is why the gate
@@ -190,19 +190,7 @@ param(
   [Parameter(ParameterSetName = 'Legacy')]
   [Parameter(Mandatory = $true, ParameterSetName = 'PreparedPair')]
   [ValidateSet('', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')]
-  [string]$ReasoningEffort = '',
-
-  # Declares that an orchestrating parent will CONSOLIDATE this run's -OutDir
-  # into the backend's central log dir once the run finishes. It changes nothing
-  # about where this process writes; it changes only which path a QUALITY
-  # follow-up row NAMES as its verdict artifact. Without it a consolidated run's
-  # rows would name the parent's scratch dir -- a path that parent then deletes
-  # -- and the surviving central copy would earn no prune exemption at all. Only
-  # a caller that performs the consolidation may declare it; a run that
-  # centralizes nothing must leave it unset so its rows name the path it really
-  # wrote (auto-merge.ps1 declares it for its branch-review children).
-  [Parameter(ParameterSetName = 'Legacy')]
-  [switch]$CentralDestinationExpected
+  [string]$ReasoningEffort = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -243,9 +231,9 @@ $isPreparedPair = $PSCmdlet.ParameterSetName -ceq 'PreparedPair'
 # ValidateSet compares by culture and admits spellings such as one containing
 # U+00AD; keep only an exact listed value so later ordinal comparisons hold.
 if (-not $isPreparedPair) {
-  $crgScopeCanonical = @(@('Commit', 'Branch', 'Uncommitted', 'Staged', 'SealLegacy') | Where-Object { [string]::Equals($_, $Scope, [System.StringComparison]::OrdinalIgnoreCase) })
+  $crgScopeCanonical = @(@('Commit', 'Branch', 'Uncommitted', 'Staged') | Where-Object { [string]::Equals($_, $Scope, [System.StringComparison]::OrdinalIgnoreCase) })
   if ($crgScopeCanonical.Count -ne 1) {
-    Write-Host "[auto-review] ERROR: -Scope '$Scope' is not one of Commit, Branch, Uncommitted, Staged, SealLegacy."
+    Write-Host "[auto-review] ERROR: -Scope '$Scope' is not one of Commit, Branch, Uncommitted, Staged."
     exit 3
   }
   $Scope = $crgScopeCanonical[0]
@@ -340,10 +328,7 @@ $promptAbs = if ([System.IO.Path]::IsPathRooted($PromptPath)) {
   Join-Path $repoRoot $PromptPath
 }
 
-# Review-only requirement: the seal operation reads no prompt, and a missing
-# review configuration must not stop an operator from sealing (the dedicated
-# mode's §2 contract is independent of review findings).
-if (-not $isPreparedPair -and -not [string]::Equals($Scope, 'SealLegacy', [System.StringComparison]::Ordinal) -and -not (Test-Path $promptAbs)) {
+if (-not $isPreparedPair -and -not (Test-Path $promptAbs)) {
   Write-Host "[auto-review] ERROR: prompt template not found at $promptAbs"
   exit 3
 }
@@ -380,8 +365,8 @@ try {
 #     else exit 0 (every pass was CLEAN, NOTE-only, or QUALITY-only). Under the
 #     2026-07 severity contract QUALITY is NON-BLOCKING, so it does not escalate
 #     the union exit -- only a BLOCKER in any pass raises it to 2 (malformed/errored
-#     passes fail closed at 3, above). QualityMax is still returned so the caller
-#     records the union's QUALITY findings as non-blocking follow-ups.
+#     passes fail closed at 3, above). QualityMax and NoteMax are still returned
+#     so the caller shows the union's non-blocking findings.
 function Get-CombinedReviewExit {
   param(
     [object[]]$PassResults,
@@ -410,7 +395,7 @@ function Get-CombinedReviewExit {
 
   # Only $anyMalformed and $anyBlocker drive the union exit; QUALITY and NOTE are
   # NON-blocking (2026-07 severity contract), so the loop tracks their MAX counts
-  # (QualityMax/NoteMax, for the caller's follow-up notice) but the union never gates
+  # (QualityMax/NoteMax, for the caller's non-blocking findings notice) but the union never gates
   # on them.
   $anyMalformed = $false
   $anyBlocker = $false
@@ -433,7 +418,7 @@ function Get-CombinedReviewExit {
   if ($anyBlocker) { $res.ExitCode = 2; return $res }
   # QUALITY no longer escalates the union exit (2026-07 severity contract): a
   # union whose worst finding is QUALITY (or legacy NON-BLOCKER) PASSES. QualityMax
-  # was tracked above so the caller surfaces those findings as non-blocking follow-ups.
+  # was tracked above so the caller shows those findings as non-blocking.
   $res.ExitCode = 0
   return $res
 }
@@ -611,11 +596,7 @@ function Resolve-ReviewPasses {
 # CROSS_REVIEW_PASSES throws
 # (see the helper) -> FAIL CLOSED here with a stable diagnostic + exit 3 rather
 # than silently weaken the gate to a single pass.
-# SealLegacy runs none of this: no pass-count resolution (it launches no
-# review) and no output-dir creation -- an empty-legacy seal call must leave
-# the filesystem untouched when it reports "nothing to seal", and a broken
-# review knob must not stop a seal.
-if (-not $isPreparedPair -and -not [string]::Equals($Scope, 'SealLegacy', [System.StringComparison]::Ordinal)) {
+if (-not $isPreparedPair) {
 try {
   $ReviewPasses = Resolve-ReviewPasses -ParamValue $ReviewPasses -ParamExplicit $reviewPassesExplicit -EnvValue $env:CROSS_REVIEW_PASSES
 } catch {
@@ -656,21 +637,22 @@ if (-not (Test-Path -LiteralPath $outDirAbs -PathType Container)) {
 }
 }
 
-# Which artifact path a capture row must name (see Get-ReviewArtifactLocator),
-# decided by the RESOLVED destination plus the caller's declaration rather than
+# Which artifact path a findings record must name (see
+# Get-ReviewArtifactLocator), decided by the RESOLVED destination rather than
 # by the shape of the arguments (Resolve-CaptureCentralExpected).
-if (-not $isPreparedPair) {
+# Only a staged review reads these values, in its retry check and its
+# blocked-round record; every other scope skips the probes, which hold Git
+# directories and repeat a Git read in a linked worktree.
+$captureGitContext = $null
+$captureCentralExpected = $false
+$captureLocatorRoot = ''
+if (-not $isPreparedPair -and [string]::Equals($Scope, 'Staged', [System.StringComparison]::Ordinal)) {
 $captureCentralDir = Resolve-DefaultReviewOutDir -Backend 'codex'
-$captureCentralExpected = Resolve-CaptureCentralExpected -OutDirAbs $outDirAbs `
-  -CentralDir $captureCentralDir -Declared ([bool]$CentralDestinationExpected)
-# ONE probe for both, so the locator root and the index the prune reads can never
-# describe different repos: the root IS the parent of the resolved index dir.
-$captureGitContext = Resolve-FollowupGitContext
+$captureCentralExpected = Resolve-CaptureCentralExpected -OutDirAbs $outDirAbs -CentralDir $captureCentralDir
+# The findings records' repository and the locator root come from one call,
+# so both derive from the same common Git directory answer.
+$captureGitContext = Resolve-ReviewGitContext
 $captureLocatorRoot = if ($captureGitContext.Ok) { $captureGitContext.Root } else { '' }
-}
-
-if ([string]::Equals($Scope, 'SealLegacy', [System.StringComparison]::Ordinal)) {
-  exit (Invoke-FollowupLegacySeal -ExpectedBytes $SealExpectedBytes -ExpectedSha $SealExpectedSha -Backend 'codex' -LogTag 'auto-review')
 }
 
 # ---------------------------------------------------------------------------
@@ -702,9 +684,6 @@ if ($isPreparedPair) {
     $diffText = $pairedHostInput.DiffText
     $projectModeBlock = $pairedHostInput.ProjectModeBlock
     $outDirAbs = $pairedHostInput.OutDir
-    $captureGitContext = $pairedHostInput.CaptureContext
-    $captureLocatorRoot = $captureGitContext.Root
-    $captureCentralExpected = $false
   } catch {
     if ($null -ne $pairedHostInput) { $null = Complete-CrgPairedHostInput -HostInput $pairedHostInput -ProviderSnapshot $null }
     Write-Host "[auto-review] ERROR: paired input acquisition failed: $($_.Exception.Message)"
@@ -781,10 +760,11 @@ switch ($Scope) {
     # "simplify" these away.
     # --src-prefix=a/ --dst-prefix=b/ pins the `diff --git a/PATH b/PATH`
     # header shape regardless of user/repo `diff.noprefix` or
-    # `diff.{src,dst}Prefix` config. Get-PlanConsistencyReport's
-    # $planSectionRe relies on this exact prefix shape; without the pin,
-    # a user with `diff.noprefix=true` produces headers the regex cannot
-    # match and the PLAN missing-fields check silently disables.
+    # `diff.{src,dst}Prefix` config. Get-TouchedPlanLines compares a
+    # section's header with that exact shape to find the consistency doc;
+    # without the pin, a user with `diff.noprefix=true` produces headers it
+    # cannot match, and an unmatched doc section makes the consistency
+    # report `indeterminate`.
     # (Codex BLOCKER.)
     # --no-relative pins path reporting against a user `diff.relative=true`:
     # invoked from a subdirectory, a relative diff re-relativizes AND FILTERS
@@ -997,200 +977,6 @@ $verdictFile = Join-Path $outDirAbs "review-$timestamp-$scopeTag.md"
 $eventsFile  = Join-Path $outDirAbs "review-$timestamp-$scopeTag.jsonl"
 $stderrFile  = Join-Path $outDirAbs "review-$timestamp-$scopeTag.stderr.log"
 
-# ---------------------------------------------------------------------------
-# Auto-prune old per-review log artifacts.
-# ---------------------------------------------------------------------------
-# Each review writes into $outDirAbs:
-#   - review-<ts>-<scope>.md                 (the verdict artifact; long-term
-#                                             value -- the trend analyzer scans
-#                                             these. One per review: the
-#                                             per-pass concatenation.)
-#   - review-<ts>-<scope>-pass<N>.jsonl      (per-pass forensics event-stream
-#                                             from codex --json; hundreds of KB
-#                                             to tens of MB; one per concurrent
-#                                             review pass)
-#   - review-<ts>-<scope>-pass<N>.stderr.log (per-pass forensics stderr capture)
-# Without pruning these accumulate forever -- the dir hit 256 MB / 305 files
-# during the review-system arc, almost entirely .jsonl. Forensics
-# are only useful for very recent reviews (debugging a failure that just
-# happened), so age them out aggressively. The .md verdicts stay much longer
-# because the trend analyzer scans them and the audit protocol's recency
-# window is 30 days.
-#
-# Cutoffs:
-#   - .jsonl / .stderr.log: 7 days (forensics only; nobody investigates a
-#     week-old codex transcript)
-#   - .md verdicts: 90 days (3x the audit protocol's -SinceDays 30 window,
-#     so the analyzer can still pull historical depth if extended)
-#
-# Deletion goes ONLY through `$env:CROSS_REVIEW_PRUNE_TOOL` (the operator's
-# safe-delete script that routes through the Recycle Bin or equivalent), a
-# path (absolute, or relative to the current location) to a script file that
-# accepts file paths as positional arguments and is run with bash. Unset means
-# the prune is OFF. Paths go to the tool in small batches to bound the command
-# line. A batch counts as pruned only on tool exit 0; nonzero exits and launch
-# failures are reported and never abort the review -- pruning is housekeeping,
-# not a gate.
-#
-# DO NOT reintroduce a direct-deletion fallback (Remove-Item or a built-in
-# Recycle Bin call) for the unset case. Until 2026-09-22 an unset variable
-# fell back to `Remove-Item -Force`, which permanently deleted hundreds of
-# review logs on the first commit of a session with no operator warning. A
-# built-in Recycle Bin call was rejected too: the wrappers never delete on
-# their own; only the operator's configured safe-delete tool deletes.
-#
-# CAPTURE EXEMPTION (QUALITY capture lifecycle): a scoped row's locator is the
-# only path back to its finding text, and the batch pass fails toward duty when
-# that artifact is gone -- so aging one out would silently convert a resolvable
-# capture claim into permanent duty. This prune is also the index's DESTRUCTIVE
-# reader, so the doctrine frame binds it first: an unreadable index, or one
-# written under a doctrine version this wrapper does not know, leaves the prune
-# OFF entirely. Preserving log files costs disk; losing a referenced artifact
-# costs the capture. The name-shape guard that keeps a `-OutDir docs` invocation
-# from recycling unrelated .md/.jsonl files now lives in Get-ReviewLogPruneClass,
-# which mirrors the same `^review-[0-9]{8}-[0-9]{6}-` producer grammar
-# `scripts/shared/analyze-blocker-trends.ps1` scans with.
-if (-not $isPreparedPair) {
-$pruneHeld = New-Object 'System.Collections.Generic.List[object]'
-$pruneLock = Enter-PruneIndexLock -GitContext $captureGitContext -Held $pruneHeld -LogTag 'auto-review'
-try {
-$prunePlan = if ($pruneLock.Locked) {
-  Resolve-PruneExemptionPlan -Binding $pruneLock.Binding -Backend 'codex' -RepoRoot $captureLocatorRoot
-} else {
-  @{ PruneAllowed = $false; Reason = $pruneLock.Reason; Keys = @(); Stems = @(); Unresolved = @() }
-}
-# Each housekeeping status line beside a plain WARN is fixed text: the WARN
-# names this provider's log folder and exception detail, which a passing gate
-# must not show (Write-ReviewFeedbackStatus).
-if (-not $prunePlan.PruneAllowed) {
-  Write-Host "[auto-review] WARN: SKIPPING the review-log prune this run - $($prunePlan.Reason)."
-  Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the review-log age-prune was skipped this run: the follow-up index could not be locked, read or validated, or does not allow pruning yet; review logs are kept until a run can prune'
-}
-foreach ($pruneWarn in $prunePlan.Unresolved) {
-  Write-Host "[auto-review] WARN: the follow-up index carries $pruneWarn - the prune stays off until that entry is resolved."
-}
-if (@($prunePlan.Unresolved).Count -gt 0) {
-  Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the follow-up index carries entries the age-prune cannot resolve or validate, so the review-log age-prune is off'
-}
-$pruneExemptKeys = $prunePlan.Keys
-$pruneExemptStems = $prunePlan.Stems
-$pruneTargets = New-Object 'System.Collections.Generic.List[string]'
-$jsonlCutoff = (Get-Date).AddDays(-7)
-$mdCutoff    = (Get-Date).AddDays(-90)
-if ($prunePlan.PruneAllowed) {
-  $pruneEnumErr = $null
-  Get-ChildItem -LiteralPath $outDirAbs -File -ErrorAction SilentlyContinue -ErrorVariable pruneEnumErr | ForEach-Object {
-    if (Test-ReviewLogPrunable -Name $_.Name -Directory $_.DirectoryName -LastWrite $_.LastWriteTime -ForensicsCutoff $jsonlCutoff -VerdictCutoff $mdCutoff -ExemptKeys $pruneExemptKeys -ExemptStems $pruneExemptStems -SealRoot $captureCentralDir) {
-      $pruneTargets.Add($_.FullName) | Out-Null
-    }
-  }
-  $pruneEnumWarn = Get-PruneEnumerationWarning -ErrorRecords $pruneEnumErr -Directory $outDirAbs
-  if ($pruneEnumWarn) {
-    Write-Host "[auto-review] WARN: $pruneEnumWarn"
-    Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the review-log folder could not be fully listed, so this run considers only the files it could list for pruning'
-  }
-}
-if ($pruneTargets.Count -gt 0) {
-  $batchSize = 30
-  $pruned = 0
-  $pruneToolUnusable = 'CROSS_REVIEW_PRUNE_TOOL is set but could not be used, so old review logs were not pruned this run'
-  # Trim the env value, and DISTINGUISH "unset" from "set-but-empty-after-trim":
-  # $env:... is $null when UNSET and a (possibly whitespace) string when SET.
-  # Only a SET value that bash confirms names a regular file, with bash on
-  # PATH, proceeds; every other state skips the prune without deleting
-  # anything. A whitespace-PADDED value is trimmed; a whitespace-ONLY value is
-  # set-but-invalid and WARNs.
-  $pruneToolRaw = $env:CROSS_REVIEW_PRUNE_TOOL
-  $pruneTool = if ($null -ne $pruneToolRaw) { ([string]$pruneToolRaw).Trim() } else { $null }
-  $pruneToolSetButEmpty = ($null -ne $pruneToolRaw -and [string]::IsNullOrEmpty($pruneTool))
-  if ([string]::IsNullOrEmpty($pruneTool)) { $pruneTool = $null }
-  if ($null -eq $pruneToolRaw) {
-    Write-Host "[auto-review] auto-prune off: $($pruneTargets.Count) old log file(s) in $outDirAbs are eligible, but CROSS_REVIEW_PRUNE_TOOL is unset and the wrapper never deletes review logs directly. Set it to a Recycle-Bin delete tool to enable pruning."
-    $pruneTargets.Clear()
-  } elseif ($pruneToolSetButEmpty) {
-    Write-Host "[auto-review] WARN: CROSS_REVIEW_PRUNE_TOOL is set to a whitespace-only value; skipping auto-prune (pruning is housekeeping, not a gate). Set it to a valid tool path."
-    Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
-    $pruneTargets.Clear()
-  } else {
-    # CONTRACT: every spelling that either PowerShell or bash resolves to a
-    # regular file works, and the path bash validates is the path it runs.
-    # (1) If PowerShell resolves the trimmed value to an existing FileSystem
-    # file (relative, drive letter, FileSystem PSDrive, `~`, FileSystem::),
-    # that absolute Windows path is handed to bash in `windows` mode and
-    # translated by bash's own converter (cygpath -u in Git bash, wslpath -u
-    # in WSL), so bash opens the file PowerShell found; a bash with neither
-    # converter fails the check rather than guess at the Windows spelling.
-    # Log paths reach the tool as Windows-form absolute paths. (2) Otherwise the value
-    # is handed over in `raw` mode for bash's own namespace (`/usr/...`, WSL
-    # paths); a relative value is read as `./value`, so `-` or `-x` always
-    # names a file, never stdin or an option. bash then requires a regular
-    # file. Each batch re-validates and `exec`s the tool, so the tool's exit
-    # status is the batch result; a replacement between check and exec is the
-    # accepted residual race of any path-based launch. Windows PowerShell 5.1
-    # does not escape embedded double quotes in native arguments, so the bash
-    # script text contains none and a raw value containing `"` is refused
-    # (Windows paths cannot contain one). `set -f` plus an empty IFS keep the
-    # unquoted expansions from splitting or globbing.
-    # Rejected, do not reintroduce (2026-09-23): PowerShell-only validation
-    # (Test-Path, absolute-only .NET check, a spelling filter) disagreed with
-    # bash about which file a spelling names; passing a PowerShell-resolved
-    # Windows path untranslated broke WSL bash; bash-only validation broke
-    # PSDrive and `~` spellings.
-    $pruneToolWindows = $null
-    try {
-      $pruneToolProvider = $null; $pruneToolDrive = $null
-      $pruneToolCandidate = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($pruneTool, [ref]$pruneToolProvider, [ref]$pruneToolDrive)
-      if ([string]::Equals($pruneToolProvider.Name, 'FileSystem', [System.StringComparison]::Ordinal) -and [IO.File]::Exists($pruneToolCandidate)) { $pruneToolWindows = $pruneToolCandidate }
-    } catch { $pruneToolWindows = $null }
-    $pruneToolMode = if ($null -ne $pruneToolWindows) { 'windows' } else { 'raw' }
-    $pruneToolArg = if ($null -ne $pruneToolWindows) { $pruneToolWindows } else { $pruneTool }
-    $pruneToolResolve = 'set -f; IFS=; m=$1; t=$2; shift 2; if [[ $m == windows ]]; then if command -v cygpath >/dev/null 2>&1; then t=$(cygpath -u $t) || exit 126; elif command -v wslpath >/dev/null 2>&1; then t=$(wslpath -u $t) || exit 126; else exit 126; fi; else case $t in /*|[A-Za-z]:*) ;; *) t=./$t ;; esac; fi; [[ -f $t ]] || exit 126; '
-    $pruneToolCheck = $pruneToolResolve + 'exit 0'
-    $pruneToolRun = $pruneToolResolve + 'exec bash -- $t $@'
-    $pruneBash = @(Get-Command -Name bash -CommandType Application -ErrorAction SilentlyContinue)
-    if ($pruneToolMode -ceq 'raw' -and $pruneTool.Contains('"')) {
-      Write-Host "[auto-review] WARN: CROSS_REVIEW_PRUNE_TOOL is set to '$pruneTool', which contains a double quote that Windows PowerShell 5.1 cannot pass to bash intact; skipping auto-prune (pruning is housekeeping, not a gate). Fix the env var."
-      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
-      $pruneTargets.Clear()
-    } elseif ($pruneBash.Count -eq 0) {
-      Write-Host "[auto-review] WARN: CROSS_REVIEW_PRUNE_TOOL is set but bash is not on PATH to run it; skipping auto-prune (pruning is housekeeping, not a gate)."
-      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
-      $pruneTargets.Clear()
-    } else {
-      $pruneCheck = Invoke-PruneBash -Bash $pruneBash[0].Source -Arguments @('-c', $pruneToolCheck, 'prune-check', $pruneToolMode, $pruneToolArg)
-      if ($pruneCheck.Exit -ne 0) {
-        Write-Host "[auto-review] WARN: the bash check of CROSS_REVIEW_PRUNE_TOOL '$pruneTool' failed ($($pruneCheck.Reason); exit 126 means no regular file at that path or no cygpath/wslpath converter for a Windows path); skipping auto-prune (pruning is housekeeping, not a gate)."
-        Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text $pruneToolUnusable
-        $pruneTargets.Clear()
-      }
-    }
-  }
-  $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
-  for ($i = 0; $i -lt $pruneTargets.Count; $i += $batchSize) {
-    $endIdx = [Math]::Min($i + $batchSize - 1, $pruneTargets.Count - 1)
-    $batch = @($pruneTargets[$i..$endIdx])
-    # Each path is a single argv entry regardless of spaces because `&` unrolls
-    # the array.
-    $pruneBatch = Invoke-PruneBash -Bash $pruneBash[0].Source -Arguments (@('-c', $pruneToolRun, 'prune-tool', $pruneToolMode, $pruneToolArg) + $batch)
-    if ($pruneBatch.Exit -eq 0) { $pruned += $batch.Count } else { $pruneFailures.Add($pruneBatch.Reason) }
-  }
-  if ($pruneTargets.Count -gt 0) {
-    Write-Host "[auto-review] auto-pruned $pruned/$($pruneTargets.Count) old log files (confirmed by tool exit 0) from $outDirAbs via $pruneTool (>7d .jsonl/.stderr.log, >90d .md; artifacts a scoped follow-up row references are exempt)"
-    if ($pruneFailures.Count -gt 0) {
-      # Ordinal dedupe in first-seen order: Select-Object -Unique compares by culture.
-      $pruneFailureSeen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-      $pruneFailureUnique = @($pruneFailures | Where-Object { $pruneFailureSeen.Add($_) })
-      Write-Host "[auto-review] WARN: $($pruneFailures.Count) prune batch(es) reported failure; files in those batches may be partially deleted: $($pruneFailureUnique -join '; ')"
-      Write-ReviewFeedbackStatus -LogTag 'auto-review' -Housekeeping -Text 'the prune tool reported failure for some batches, so some old review logs may be partly deleted'
-    }
-  }
-}
-} finally {
-  [void](Exit-FollowupIndexLock -Lock $pruneLock.Lock -LogTag 'auto-review')
-  Exit-CrgHeldDirectories -Held $pruneHeld
-}
-}
-
 # Scratch lives under TEMP: a normal-ACL path with NO `CodexSandboxUsers`
 # Deny ACE (that ACE on the repo path is what originally forced the sandbox
 # bypass). Codex reads here under the read-only sandbox passed via the
@@ -1391,17 +1177,17 @@ disk:
   - ./$bundleName/PLAN-CONSISTENCY.txt    - validated finite-state consistency
                                             evidence (opt-in via
                                             CROSS_REVIEW_CONSISTENCY_DOC).
-                                            In `produced`, an explicit
+                                            In ``produced``, an explicit
                                             PLAN-CONSISTENCY-FINDING row is
                                             documentary evidence: a QUALITY
                                             finding under PLAN-DRIFT only when
                                             this change adds or causes the
                                             drift it names, otherwise context.
-                                            Both valid `skipped-*`
+                                            Both valid ``skipped-*``
                                             states are non-findings. When the
                                             configured document is in the changed
                                             set and a report is required,
-                                            `indeterminate`, missing, unreadable,
+                                            ``indeterminate``, missing, unreadable,
                                             malformed, or unterminated evidence
                                             is a SILENT-FAILURE BLOCKER.
   - ./$bundleName/PRIOR-BLOCKERS.txt      - on a retry of a blocked staged change:
@@ -1491,8 +1277,11 @@ $($retryEvidence.Summary)
       } else {
         try {
           $planText = & git show "${treeOid}:${consistencyDoc}" 2>&1
-          if ($LASTEXITCODE -ne 0 -or $null -eq $planText) {
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "[auto-review] WARNING: $consistencyDoc consistency report could not be produced: git show exited ${LASTEXITCODE}: $(@($planText) -join ' ')"
             $planConsistencyText = New-PlanConsistencyEvidenceEnvelope -State 'indeterminate' -Body "$consistencyDoc consistency report could not be produced because git show failed for the reviewed tree."
+          } elseif ($null -eq $planText) {
+            $planConsistencyText = New-PlanConsistencyEvidenceEnvelope -State 'indeterminate' -Body "$consistencyDoc consistency report could not be produced because git show returned no content for the reviewed tree."
           } else {
             $planJoined = if ($planText -is [System.Array]) { ($planText -join "`n") } else { [string]$planText }
             # Omission evidence belongs in DIFF.patch, not the exact metadata-only patch grammar.
@@ -1624,10 +1413,8 @@ $($retryEvidence.Summary)
   # real `git commit`. Scrub the git environment for the codex child so its
   # plugin git cannot reach this (or any) repo. Every git read the review
   # itself needs ran ABOVE this point with the proper environment. The
-  # environment is restored after the reviewer exits; the post-verdict
-  # records (Add-ReviewFollowups, Write-ReviewFeedbackRecords) then run Git
-  # again, and the TASKS.md checks isolate their children from these
-  # selectors (Read-CrgGitBytes -IsolateRepository).
+  # environment is restored after the reviewer exits, before a blocked round
+  # is recorded (Write-ReviewBlockedRound).
   $gitEnvNames = @(
     'GIT_INDEX_FILE', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_OBJECT_DIRECTORY',
     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_REFERENCE_BACKEND',
@@ -2010,7 +1797,7 @@ exit $realExit
   # Authoritative gate exit = the UNION of the review passes.
   # Fails CLOSED if any pass errored or was malformed; otherwise blocks
   # on the union severity (any BLOCKER -> 2; else 0 -- QUALITY is non-blocking under
-  # the 2026-07 severity contract and is surfaced as a follow-up, not an abort).
+  # the 2026-07 severity contract and is shown as a non-blocking finding, not an abort).
   $combined = Get-CombinedReviewExit -PassResults $passResults -PassErrored $passErrored -ExpectedPasses $ReviewPasses
 
   # Artifact: a deterministic per-pass concatenation (always available; the
@@ -2110,24 +1897,23 @@ exit $realExit
   if ($combined.Diagnostic) {
     Write-Host "[auto-review] $($combined.Diagnostic) - failing closed"
   }
-  # "Not overlooked" mechanism: a PASS (exit 0) that carries QUALITY findings
-  # prints them prominently as non-blocking follow-ups AND records them to the
-  # durable logs/review-followups.md index for batch triage. QUALITY no
-  # longer aborts (2026-07 contract), so this is what keeps it from being
+  # "Not overlooked" mechanism: a PASS (exit 0) that carries QUALITY or NOTE
+  # findings shows them to the submitting session, grouped by what each
+  # cites, so it fixes the ones worth fixing as part of this change. QUALITY
+  # does not abort (2026-07 contract), so this is what keeps it from being
   # silently swallowed. Never runs on a BLOCKER (exit 2) or fail-closed (exit 3).
-  if ($combined.ExitCode -eq 0 -and $combined.QualityMax -gt 0) {
-    if ($isPreparedPair) {
-      Write-CrgPairedFollowups -HostInput $pairedHostInput -VerdictText $artifact -VerdictFile $verdictFile -Backend 'codex'
-    } else {
-      Write-QualityFollowupNotice -Artifact $artifact -VerdictFile $verdictFile -Backend 'codex' `
-        -TreeOid $treeOid -DiffSha $diffSha `
-        -CentralExpected $captureCentralExpected -RepoRoot $captureLocatorRoot
-    }
+  # A prepared pair's wrapper output reaches only its transcript, so the
+  # paired session prints that notice itself (paired-governance.psm1).
+  # Under -NoFindingsNotice the launching gate shows the findings from the
+  # verdict file, and this output is the transcript it validates.
+  if ($combined.ExitCode -eq 0 -and ($combined.QualityMax -gt 0 -or $combined.NoteMax -gt 0) -and -not $isPreparedPair -and -not $NoFindingsNotice) {
+    # Display only: the verdict is classified and written, so a failure here,
+    # or in reporting it, must not reach the exit-3 handler below.
+    try { Write-NonBlockingFindingsNotice -Artifact $artifact -LogTag 'auto-review' }
+    catch { try { [Console]::Error.WriteLine("[auto-review] WARN: the non-blocking findings could not be shown ($($_.Exception.Message)); the verdict file $verdictFile holds them") } catch { } }
   }
   if ($combined.ExitCode -eq 0 -and -not $isPreparedPair) {
-    Write-ReviewFeedbackRecords -Artifact $artifact -VerdictFile $verdictFile -Backend 'codex' `
-      -GitContext $captureGitContext -CentralExpected $captureCentralExpected -RepoRoot $captureLocatorRoot -NameStatus $nameStatusText `
-      -TreeOid $treeOid -TreeList $treePathList
+    Write-Host "[auto-review] PASS - $(Get-ReviewPassCoverageText)"
   }
   # Exit-4 derivation: a fail-closed union whose errored passes ALL carry the
   # positively-identified exhaustion signature (and no malformed evidence, and
@@ -2167,23 +1953,6 @@ exit $realExit
     if (-not $sidecarOk) {
       Write-Host "[auto-review] ERROR: exhaustion was classified but the durable sidecar could not be written - failing closed (exit 3) instead of offering a fallback without evidence."
       $gateExit = 3
-    } elseif ((@($passResults | Where-Object { $null -ne $_.Cls -and (($_.Cls.QualityCount + $_.Cls.LegacyNbCount) -gt 0) }).Count -gt 0) -and
-              ($isPreparedPair -or -not [string]::IsNullOrWhiteSpace($env:CROSS_REVIEW_FOLLOWUPS_PENDING))) {
-      # Completed sibling passes may carry QUALITY findings worth keeping --
-      # scanned from $passResults DIRECTLY, because $combined.QualityMax is
-      # always 0 on an errored union (Get-CombinedReviewExit early-returns
-      # before iterating the pass results).
-      # STAGE them for the orchestrating parent only (the pending path exists,
-      # so this never appends directly); a standalone exhausted run
-      # deliberately stages nothing -- no overall gate decision exists to
-      # promote under.
-      if ($isPreparedPair) {
-        Write-CrgPairedFollowups -HostInput $pairedHostInput -VerdictText $artifact -VerdictFile $verdictFile -Backend 'codex'
-      } else {
-        Add-ReviewFollowups -VerdictText $artifact -VerdictFilePath $verdictFile -Backend 'codex' `
-          -TreeOid $treeOid -DiffSha $diffSha `
-          -CentralExpected $captureCentralExpected -RepoRoot $captureLocatorRoot
-      }
     }
   }
   exit $gateExit

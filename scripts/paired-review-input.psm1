@@ -638,7 +638,7 @@ function Read-CrgPreparedFilesCore {
   $total = 0L
   foreach ($path in $leaves.Keys) {
     if ($leaves[$path].Entry.Mode -cnotin @('100644', '100755')) { throw "prepared file input does not support mode $($leaves[$path].Entry.Mode) at '$path'" }
-    $bytes = Read-CrgPreparedHeldFileBytes -ReadFile $ReadFile -Path (Join-Path (Join-Path $root 'REVIEW_SRC') $path) -Maximum $MaximumBlobBytes
+    $bytes = Read-CrgPreparedHeldFileBytes -ReadFile $ReadFile -Path (Join-Path (Join-Path $root 'REVIEW_SRC') $path.Replace('/', '\')) -Maximum $MaximumBlobBytes
     $blobs.Add($path, $bytes); $total += $bytes.Length
   }
   $metadata = Read-CrgPreparedBundleCore -DescriptorBytes $descriptorBytes -ExpectedDescriptorSha256 $PreparedPairSha256 -Buffers $buffers -GoverningConfigBytes $preparations.governing.ConfigBytes -CandidateConfigBytes $preparations.candidate.ConfigBytes -PublicTreeBytes $treeBuffers.public -PrivateTreeBytes $treeBuffers.private -RuntimeTemplateBytes $RuntimeTemplateBytes -ContextBlobBuffers $blobs -Origin $Origin

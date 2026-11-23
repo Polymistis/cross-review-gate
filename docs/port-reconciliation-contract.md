@@ -13,8 +13,8 @@ package's hardening — never a file replacement in either direction. The
 source copies are newer and larger; this package's copies carry deliberate
 generalizations the source dropped. Both survive.
 
-**Trust tier.** Gate scripts guard the review process; the follow-up index
-and its lock are workspace-writable execution state. Execution-state
+**Trust tier.** Gate scripts guard the review process; review logs and
+findings records are workspace-writable execution state. Execution-state
 mechanisms receive correctness review, not adversarial hardening against a
 local actor who could delete the artifact outright — the calibration the
 source project's severity contract already encodes.
@@ -27,32 +27,18 @@ table, nothing renames by wildcard:
 | `SC_SKIP_REVIEW` | `CROSS_REVIEW_SKIP` |
 | `SC_SKIP_AUTHOR_LINT` | `CROSS_REVIEW_SKIP_AUTHOR_LINT` |
 | `SC_COMMIT_REVIEW_EFFORT` | `CROSS_REVIEW_COMMIT_EFFORT` |
-| `SC_FOLLOWUPS_PENDING` | `CROSS_REVIEW_FOLLOWUPS_PENDING` |
 | `SC_REVIEW_PASSES` | `CROSS_REVIEW_PASSES` |
-| `SC_FOLLOWUP_*` doctrine/lock shell constants | `CROSS_REVIEW_FOLLOWUP_*`, renamed in their lockstep slice (script-internal; the doctrine FRAME bytes contain no names and are untouched) |
 | `SC_ALLOW_MASTER_MUTATION` | project-only — guards a machine-local hook outside this package's scope; retained project-side, no package counterpart |
 
 `REVIEW_BACKEND` is package-owned, unprefixed, and unchanged. A rename lands
 with BOTH sides of each env handshake in the same slice; a half-renamed
-handshake silently drops staged follow-ups or pass counts.
-
-**Index location.** The follow-up index lives at `logs/review-followups.md`,
-resolved submodule-aware. The source project's `.orchestrator/` relocation is
-a consumer-side choice and never ships as the package default; if a
-configurable index directory is wanted, it is added as an explicit seam in
-its own slice.
+handshake silently drops pass counts.
 
 **Seams that survive the merge** (each was silently reversed in the source
 copies and must be restored around the incoming capability):
 - the configurable consistency-doc (`CROSS_REVIEW_CONSISTENCY_DOC` with
   blob-kind fail-closed validation) — never a hardcoded plan-file name
-- the `CROSS_REVIEW_PRUNE_TOOL` seam, resolved by PowerShell when possible
-  and translated into bash's namespace, otherwise read in bash's own
-  namespace, validated as a regular file by bash (the namespace that runs
-  the tool), credited only on tool exit 0, with no
-  direct-deletion fallback (unset means no prune) — never a machine-local
-  delete-tool path
-- submodule-aware log and index dir selection
+- submodule-aware log dir selection
 - origin/HEAD base-branch resolution in the merge gate — never a hardcoded
   base name
 - the no-recursive-delete cleanup policy (`Remove-TreeNoRecurse` and the
@@ -62,30 +48,6 @@ copies and must be restored around the incoming capability):
   additional raw case variants, then collapse all variants to one verified
   canonical `Path` entry or fail closed
 - the sh hook's Unix-tool PATH repair and `core.excludesfile` neutralization
-
-**Lockstep sets.** The capture-doctrine frame is byte-identity-pinned across
-every index writer — so the lock-protocol slice lands the complete writer file set
-as a single gated unit, or not at all. Any wording change to the frame is a
-doctrine version bump across every writer, never an edit.
-
-**Doctrine-version semantics.** The version numbers the frame's STATED
-CONTRACT — what the doctrine promises — not the reader implementation. A
-change that alters what the frame promises (a new exempt state, a narrowed
-duty, a different locator grammar) bumps the version and rewords the frame
-across every writer in lockstep. A reader-side change that makes a scanner
-CONFORM to the current frame's stated promises — denying the prune on a
-shape the validator rejects, treating an unresolvable or torn claim as
-unresolved, failing toward duty — is a conformance fix, not a contract
-change, and does not bump: the frame already said it, the reader now honors
-it. The discriminating test: would the frame's text need to change to
-describe the new behavior truthfully? If the existing text already describes
-it, no bump. Conformance fixes additionally lean toward safety in the
-common case — a conforming reader treats more states as unresolved, so it
-deletes less than a non-conforming one on those states — but that is a
-tendency of the fail-toward-duty rule, not a construction proof; a
-conformance fix still carries its own review of what its reader deletes,
-and a mixed-version deployment is expected (not guaranteed) to degrade
-toward retention.
 
 **Prose hygiene.** Source-project provenance (iteration numbers, dated
 incident citations, machine paths, memory-file references, project fixture
@@ -108,9 +70,8 @@ fail-closed. No slice adds iteration caps,
 early-stops, or retry limits TO GATE-REVIEW CONVERGENCE — a review iterates
 to its verdict and is never truncated by a counter. Distinct from that banned
 class: MECHANISM-INTERNAL bounded retry budgets that fail loud (warn-and-drop,
-warn-and-skip) are ported source design wherever the source carries them —
-the follow-up lock's contention budget and its delete-pending-window retry
-are the canonical cases. Their bounds are load-bearing: removing them trades
+warn-and-skip) are ported source design wherever the source carries them.
+Their bounds are load-bearing: removing them trades
 a loud, recorded drop for an unbounded hang on an ANCILLARY step — and the
 gate's ancillary machinery must always terminate. (The review WAIT itself is
 the sanctioned exception: the merge gate deliberately waits unbounded on a

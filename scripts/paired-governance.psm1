@@ -524,6 +524,25 @@ function Get-CrgPairSemanticVerdict {
   return Get-VerdictExitCode -Verdict $Verdict
 }
 
+function Get-CrgPairNonBlockingFindingLines {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $true)][string]$VerdictText)
+  Get-NonBlockingFindingLines -Artifact $VerdictText
+}
+
+function Write-CrgPairNonBlockingFindings {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$FindingLines,
+    [Parameter(Mandatory = $true)][string]$LogTag)
+  Write-NonBlockingFindingsNotice -FindingLines $FindingLines -LogTag $LogTag
+}
+
+function Get-CrgPairTaskReminderText {
+  [CmdletBinding()]
+  param()
+  return Get-ReviewTaskReminderText
+}
+
 function Read-CrgSuccessfulPairArtifactCore {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][byte[]]$Bytes,
@@ -768,4 +787,4 @@ function Read-CrgFirstAttachmentExhaustionBytes {
   return Read-CrgPairExhaustionCore @PSBoundParameters -Origin 'first-attachment-v1'
 }
 
-Export-ModuleMember -Function Read-CrgReviewUnitBytes, New-CrgReviewUnitBytes, Read-CrgPairReceiptBytes, New-CrgPairReceiptBytes, Read-CrgPairHandoffBytes, New-CrgPairHandoffBytes, Read-CrgPairArtifactBytes, New-CrgPairArtifactBytes, Read-CrgSuccessfulPairArtifactBytes, Read-CrgPairExhaustionBytes, Read-CrgFirstAttachmentUnitBytes, New-CrgFirstAttachmentUnitBytes, Read-CrgFirstAttachmentReceiptBytes, New-CrgFirstAttachmentReceiptBytes, Read-CrgFirstAttachmentHandoffBytes, New-CrgFirstAttachmentHandoffBytes, Read-CrgCompletedPairPointerBytes, New-CrgCompletedPairPointerBytes, Read-CrgCompletedPairReceiptBytes, Read-CrgFirstAttachmentArtifactBytes, New-CrgFirstAttachmentArtifactBytes, Read-CrgSuccessfulFirstAttachmentArtifactBytes, Read-CrgFirstAttachmentExhaustionBytes, Get-CrgPairSemanticVerdict
+Export-ModuleMember -Function Read-CrgReviewUnitBytes, New-CrgReviewUnitBytes, Read-CrgPairReceiptBytes, New-CrgPairReceiptBytes, Read-CrgPairHandoffBytes, New-CrgPairHandoffBytes, Read-CrgPairArtifactBytes, New-CrgPairArtifactBytes, Read-CrgSuccessfulPairArtifactBytes, Read-CrgPairExhaustionBytes, Read-CrgFirstAttachmentUnitBytes, New-CrgFirstAttachmentUnitBytes, Read-CrgFirstAttachmentReceiptBytes, New-CrgFirstAttachmentReceiptBytes, Read-CrgFirstAttachmentHandoffBytes, New-CrgFirstAttachmentHandoffBytes, Read-CrgCompletedPairPointerBytes, New-CrgCompletedPairPointerBytes, Read-CrgCompletedPairReceiptBytes, Read-CrgFirstAttachmentArtifactBytes, New-CrgFirstAttachmentArtifactBytes, Read-CrgSuccessfulFirstAttachmentArtifactBytes, Read-CrgFirstAttachmentExhaustionBytes, Get-CrgPairSemanticVerdict, Get-CrgPairNonBlockingFindingLines, Write-CrgPairNonBlockingFindings, Get-CrgPairTaskReminderText
