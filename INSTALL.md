@@ -325,7 +325,7 @@ for every changed path among:
 - `scripts/review-common.ps1`, the shared follow-up, verdict, project-mode,
   prompt-assembly, git, tree-path, commit-log evidence, codex-effort,
   argument-quoting, PATH, replacement-suppression, attribute-neutral Git and
-  fix-on-fix advisory functions those wrappers dot-source.
+  name-status path functions those wrappers dot-source.
 
 The set is derived from the installed bytes and the target repository's Git
 attributes; no fixed path-list assumption applies. A self-host install also
@@ -519,7 +519,11 @@ Project hazards remain the main project-specific quality input. Use
 `examples/project-hazards-example.md` as a structural example, then maintain
 actual hazards in the source's `project-hazards` block. Each hazard should name
 the defect class, recurring forms, a concrete diff-level red flag, and the
-runtime consequence. Cite symbols or types instead of bare line numbers.
+runtime consequence. This project text cannot make content a change leaves
+as it was a finding (the package prompt's "Scope of a finding"): a retained
+hazard that asks for such findings, such as an earlier example's instruction
+to report every `PLAN-CONSISTENCY-FINDING:` row, has no effect on that
+content. Cite symbols or types instead of bare line numbers.
 Maintain stack, dependency direction, source-of-truth documents, status terms,
 and convention documents in `project-context`. Maintain only the authority
 document path set, or the exact no-authority sentinel, in `scoped-authority`.
@@ -899,8 +903,10 @@ The wrappers respect these env vars:
   where the finite states are `produced`, `skipped-not-configured`,
   `skipped-not-in-diff`, and `indeterminate`, and ends with
   `PLAN-CONSISTENCY-END: v1`. In a well-formed `produced` envelope,
-  `PLAN-CONSISTENCY-FINDING:` rows are documentary `QUALITY:` findings under
-  `PLAN-DRIFT`; both valid skip states are non-findings. When the configured
+  `PLAN-CONSISTENCY-FINDING:` rows are documentary evidence: a row is a
+  `QUALITY:` finding under `PLAN-DRIFT` only when the change adds or causes
+  the drift it names, and otherwise context; both valid skip states are
+  non-findings. When the configured
   document is in the reviewed diff, indeterminate, absent, unreadable,
   malformed, or unterminated report evidence is a fail-closed
   `BLOCKER:` under `SILENT-FAILURE`. Independent planning blockers retain
@@ -1007,11 +1013,9 @@ and NOTE findings (`docs/review-feedback-v1.md`):
   and escaped, quoted text of each finding (a submodule writes them to
   `crg-review-findings` inside its common Git directory instead, one place
   for all of its checkouts, and still reads its working tree's own
-  `logs/review-findings`). The
-  next review of any cited file in the same repository is
-  shown that text in `CARRIED-FINDINGS.txt`. The gate
+  `logs/review-findings`). No later review is shown that text. The gate
   never deletes these files (the review-log prune tool does not cover them);
-  files older than 14 days are no longer carried, and old ones can be sent
+  old ones can be sent
   to the Recycle Bin by hand (a task line naming a removed file then leads
   nowhere).
 - `TASKS.md` at the main checkout's root: one task line per severity and
@@ -1029,8 +1033,7 @@ and NOTE findings (`docs/review-feedback-v1.md`):
   there meanwhile fails with `index.lock: File exists`; run it again). A
   review that finds the lock already held (for example under
   `git commit -a` or a partial `git commit <paths>` in the main checkout)
-  adds no tasks, with a warning; its findings file is still written and
-  carried.
+  adds no tasks, with a warning; its findings file is still written.
   If a write to `TASKS.md` (including its creation) is interrupted, its
   recovery copy stays in the Git directory as `crg-tasks-recovery.md` (for
   example `.git/crg-tasks-recovery.md`) and the gate adds no tasks, and
@@ -1083,7 +1086,7 @@ lines: the commit gate's task counts (`review-feedback: open review tasks in
 TASKS.md: QUALITY=<q> NOTE=<n>`) and a `review-feedback WARN:` line for each
 feedback step left undone (tasks not added and why, a recovery copy or
 `.partial` file left, a findings file not written, findings files skipped,
-carried findings or QUALITY follow-ups unavailable), plus a `review result:
+QUALITY follow-ups unavailable), plus a `review result:
 housekeeping WARN:` line for each piece of upkeep skipped or left half done
 (the review-log age-prune skipped or limited, `CROSS_REVIEW_PRUNE_TOOL`
 unusable, prune batches failed, a follow-up index lock left behind), so a

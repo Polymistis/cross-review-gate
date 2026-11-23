@@ -339,8 +339,9 @@ per domain, 2,097,152 bytes per raw commit object, 25,166,818 framed bytes per
 domain and 50,331,648 raw object bytes across both domains. The per-object limit
 matches verified published commits, including the accepted 1,048,576-byte message
 and Git headers. Overflow refuses rather than shortening messages or history.
-COMMIT-LOG.txt carries the existing data-only authority header and machine-authored
-domain/commit labels. Every raw content line, including commit metadata, receives
+COMMIT-LOG.txt carries a data-only authority header and machine-authored
+domain/commit labels; the header states that its entries are earlier commits,
+so a message there is context and never a finding. Every raw content line, including commit metadata, receives
 the quote prefix after injective byte escaping: backslash becomes `\x5C`, LF
 separates quoted lines, and every other byte outside printable ASCII becomes `\xNN`.
 Raw object identity and framing remain separate from that display transformation;
@@ -587,7 +588,8 @@ Preserve existing supported input decoding and fail-closed diagnostics.
 
 Generate one envelope and validate with `Test-PlanConsistencyEvidenceEnvelope`
 before either host launches. A produced report's documentary findings retain
-existing QUALITY treatment; missing/malformed or required indeterminate evidence
+the prompt's treatment (QUALITY only for drift the change adds or causes);
+missing/malformed or required indeterminate evidence
 retains the existing refusal/BLOCKER boundary. Claude's legacy no-producer guard
 remains unchanged for legacy scopes; only validated PreparedPair inputs can
 use this shared producer. Both hosts present the same report and instructions.

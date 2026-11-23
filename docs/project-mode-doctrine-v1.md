@@ -177,11 +177,10 @@ Candidate declaration review checks that:
 
 Failure of any candidate semantic check is a PLAN-DRIFT BLOCKER. Those
 checks are diff-anchored. A pre-existing semantic defect in the
-governing declaration is not an out-of-diff blocker on unrelated work.
-Ambiguous campaign text grants no compatibility carve-out, ambiguous
-surface text creates no instruction, and the reviewer reports any useful
-pre-existing observation only at the normal note tier allowed by scope
-discipline.
+governing declaration is review context and, like any content a change
+leaves as it was, never the subject of a finding at any severity.
+Ambiguous campaign text grants no compatibility carve-out, and ambiguous
+surface text creates no instruction.
 
 ## 6. Mode semantics
 

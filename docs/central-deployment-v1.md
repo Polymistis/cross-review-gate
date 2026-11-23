@@ -404,9 +404,11 @@ agent editing workflow. Existing project content must be preserved and reviewed:
   central discovery section below, and the persistent code-unit-tests-banned
   directive that keeps live testing, manual checks, ordinary program runs, and
   functional validation permitted.
-- Private `PLAN.md` and `History.md`: actual project requirements/work history,
-  with roles in configuration. Different private paths require matching roles
-  and discovery records, not duplicate placeholder documents.
+- Private `PLAN.md` and, optionally, `History.md`: actual project
+  requirements/work history, with roles in configuration. A project without a
+  history document omits its role and discovery record instead of adding a
+  placeholder. Different private paths require matching roles and discovery
+  records, not duplicate placeholder documents.
 - `PROJECT-MODE.md`: preserve the valid prototype declaration and actual campaign.
   For a missing declaration, author `project-mode: v1`, `mode: prototype`, and an
   actual nonempty `campaign:` using the [mode grammar](project-mode-doctrine-v1.md).
@@ -428,6 +430,9 @@ private-file PROJECT-MODE.md
 role History.md | Private work history and document discovery
 role PLAN.md | Project requirements and acceptance
 ```
+
+A project without a private history document leaves out the
+`private-file History.md` and `role History.md` records.
 
 The consistency document is privately tracked, not required in public software
 history. `consistency-document -` disables only plan preprocessing when explicitly
@@ -471,6 +476,23 @@ remain mandatory through the installed host.
 
 The `<runtime launcher>`, `<worktree>`, `<Operation>` and `[options]` text is
 part of the section; copy it unchanged.
+
+A project without a private history document removes only the
+`Private history: History.md` line and keeps every other line, so its section
+begins:
+
+```text
+<!-- crg-central-discovery v1 BEGIN -->
+## Central cross-review gate
+Runtime launcher: C:\CrossReviewGate\launcher.ps1
+Project configuration: .crg-project/project.conf
+Private plan: PLAN.md
+
+Use the central launcher for Open, Stage, Commit and Resume with the explicit
+```
+
+That form is accepted only with the current section text shown above; the older
+deployed sections remain accepted only with their history line.
 
 Prepare a real nonempty UTF-8 commit message at `.crg-project/message.txt` inside
 the project. The private directory keeps that work material out of public staging.
@@ -524,8 +546,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $CrgLauncher -TargetRepo $Cr
 For a bounded path selection, use `-Stage -Paths` with actual repository-relative
 paths instead of `-All`; no public/private index is supplied by the caller.
 Native `git commit` is refused for both domains. Normal public pushes invoke the
-installed pre-push guard; private content and completed-pair enforcement are not
-optional. No push is required merely to install or confirm the gate.
+installed pre-push guard, which validates the gate's completed-pair history and is
+not optional. The guard names outgoing public commits that no receipt in the
+pushing attachment's completed-pair chain records as a changed public result
+and does not refuse the push for lacking such a receipt; its enumeration bounds
+still apply whoever made the commits (`central-guards-v1.md`). Open, Stage and Commit
+no longer compare the public branch tip with the preceding pair (operator decision
+2026-11-23); the existing checks and bounds on what they read still apply to
+every commit (`central-publication-v1.md`). No push is required merely to install
+or confirm the gate.
 
 When Status reports a pending handoff, preserve the indexes and recorded message:
 

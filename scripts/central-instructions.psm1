@@ -34,22 +34,28 @@ function New-CrgCentralInstructionDiscoveryBytes {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][string]$RuntimeStore,
     [Parameter(Mandatory = $true)][string]$PlanPath,
-    [Parameter(Mandatory = $true)][string]$HistoryPath,
+    [string]$HistoryPath,
     [switch]$Previous, [switch]$Legacy)
   if ($Previous -and $Legacy) { throw 'discovery variants are mutually exclusive' }
+  # Every deployed earlier section carried a history record, and the reader
+  # accepts a section without one only in the current edition.
+  if (($Previous -or $Legacy) -and [string]::IsNullOrEmpty($HistoryPath)) { throw 'earlier discovery variants require an explicit history path' }
   $reader = @(Get-Command Read-CrgAttachmentBytes -Module private-governance -CommandType Function -ListImported -ErrorAction Stop)
   if ($reader.Count -ne 1) { throw 'discovery construction requires the already imported governance schema' }
   & $reader[0].Module {
     param($Store, $Plan, $History)
     Assert-CrgGovernancePath -Path $Store -Absolute -AllowGitMetadata
     Assert-CrgGovernancePath -Path $Plan
-    Assert-CrgGovernancePath -Path $History
+    if (-not [string]::IsNullOrEmpty($History)) { Assert-CrgGovernancePath -Path $History }
   } $RuntimeStore $PlanPath $HistoryPath
   if (-not [string]::Equals([IO.Path]::GetFullPath($RuntimeStore), $RuntimeStore, [StringComparison]::Ordinal) -or [string]::Equals($PlanPath, $HistoryPath, [StringComparison]::Ordinal)) { throw 'discovery requires canonical store and distinct explicit plan/history paths' }
   $lines = @('<!-- crg-central-discovery v1 BEGIN -->', '## Central cross-review gate',
     ('Runtime launcher: ' + (Join-Path $RuntimeStore 'launcher.ps1')),
-    'Project configuration: .crg-project/project.conf', ('Private plan: ' + $PlanPath), ('Private history: ' + $HistoryPath),
-    '', 'Use the central launcher for Open, Stage, Commit and Resume with the explicit',
+    'Project configuration: .crg-project/project.conf', ('Private plan: ' + $PlanPath))
+  # A private history document is optional (operator ruling 2026-11-23); a
+  # project without one carries no history record rather than a placeholder.
+  if (-not [string]::IsNullOrEmpty($HistoryPath)) { $lines += 'Private history: ' + $HistoryPath }
+  $lines += @('', 'Use the central launcher for Open, Stage, Commit and Resume with the explicit',
     'TargetRepo. Commit also requires MessageFile and AuthoringAgent. Public software',
     'and local private governance receive mandatory combined review; native commits',
     'do not substitute. Project mode describes review treatment, not permission to',
@@ -98,15 +104,20 @@ function Read-CrgInstructionDiscovery {
   $section = $text.Substring($open[0].Index, $end + 1 - $open[0].Index)
   $plan = [regex]::Matches($section, '(?m)^Private plan: ([^\r\n]+)$')
   $history = [regex]::Matches($section, '(?m)^Private history: ([^\r\n]+)$')
-  if ($plan.Count -ne 1 -or $history.Count -ne 1) { throw 'discovery lacks explicit plan/history records' }
+  if ($plan.Count -ne 1 -or $history.Count -gt 1) { throw 'discovery requires one explicit plan record and at most one history record' }
+  $historyPath = if ($history.Count -eq 1) { $history[0].Groups[1].Value } else { $null }
   $actual = Get-CrgInstructionDigest -Bytes ([Text.UTF8Encoding]::new($false, $true).GetBytes($section))
-  foreach ($variant in @('current', 'previous', 'legacy')) {
+  # Earlier editions stay admissible only as already-deployed bytes, and every
+  # deployed section carried a history record. Omitting the record is a reviewed
+  # edit of both root files, so it adopts the current edition at the same time.
+  $variants = if ($null -ne $historyPath) { @('current', 'previous', 'legacy') } else { @('current') }
+  foreach ($variant in $variants) {
     $previous = [string]::Equals($variant, 'previous', [StringComparison]::Ordinal)
     $legacy = [string]::Equals($variant, 'legacy', [StringComparison]::Ordinal)
-    $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $history[0].Groups[1].Value -Previous:$previous -Legacy:$legacy
+    $expected = New-CrgCentralInstructionDiscoveryBytes -RuntimeStore $RuntimeStore -PlanPath $plan[0].Groups[1].Value -HistoryPath $historyPath -Previous:$previous -Legacy:$legacy
     if ([string]::Equals($actual, (Get-CrgInstructionDigest -Bytes $expected), [StringComparison]::Ordinal)) {
       $edition = if ($previous -or $legacy) { 'previous' } else { 'current' }
-      return [pscustomobject]@{ Bytes = $expected; Edition = $edition; PlanPath = $plan[0].Groups[1].Value; HistoryPath = $history[0].Groups[1].Value }
+      return [pscustomobject]@{ Bytes = $expected; Edition = $edition; PlanPath = $plan[0].Groups[1].Value; HistoryPath = $historyPath }
     }
   }
   throw 'discovery section matches neither the current nor the previous canonical section; a reviewed Commit must carry the current section from packaged docs/central-deployment-v1.md in both root instruction files'
@@ -142,7 +153,9 @@ function Assert-CrgCentralInstructionDiscovery {
     }
     $section = Read-CrgInstructionDiscovery -Bytes $bytes -RuntimeStore $runtime.Store
     if ($null -ne $first -and -not [string]::Equals((Get-CrgInstructionDigest -Bytes $first.Bytes), (Get-CrgInstructionDigest -Bytes $section.Bytes), [StringComparison]::Ordinal)) { throw 'AGENTS.md and CLAUDE.md must contain the same reviewed discovery section' }
-    foreach ($path in @($section.PlanPath, $section.HistoryPath)) {
+    $documents = @($section.PlanPath)
+    if ($null -ne $section.HistoryPath) { $documents += $section.HistoryPath }
+    foreach ($path in $documents) {
       $document = @($entries | Where-Object { [string]::Equals($_.Path, $path, [StringComparison]::Ordinal) })
       $role = @($config.Roles | Where-Object { [string]::Equals($_.Path, $path, [StringComparison]::Ordinal) })
       if ($document.Count -ne 1 -or -not ([string]::Equals($document[0].Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($document[0].Mode, '100755', [StringComparison]::Ordinal)) -or

@@ -778,11 +778,23 @@ function Get-CrgRetentionPayload {
     foreach ($name in $names) {
       if (-not [string]::Equals($previous.Receipt.Fields[$name], $fields[$name], [StringComparison]::Ordinal)) { throw 'preceding retention belongs to a different association' }
     }
+    # The public parent is the branch tip the pair was based on and is compared
+    # with the predecessor only where it is the predecessor's public result
+    # (operator decision 2026-11-23); a parent with a different commit identity
+    # has no predecessor link to match. Only the gate writes the private
+    # database, so the private link stays exact. A changed public result keeps
+    # such a parent reachable through its own retained result ref; an unchanged
+    # one is retained under its own result ref.
+    $publicLinked = [string]::Equals($previous.Receipt.Fields['public-result'], $fields['public-parent'], [StringComparison]::Ordinal)
     foreach ($domain in @('public', 'private')) {
+      if ([string]::Equals($domain, 'public', [StringComparison]::Ordinal) -and -not $publicLinked) { continue }
       if ($previous.Receipt.Fields[$domain + '-result'] -cne $fields[$domain + '-parent'] -or
           $previous.Receipt.Fields[$domain + '-tree'] -cne $results[$domain].Parent.TreeOid) { throw 'preceding retained results differ from the recorded ordinary parents or trees' }
     }
-    if ((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref ('refs/crg-results/' + $fields['public-parent'])) -cne $fields['public-parent']) { throw 'preceding public result retention is absent or conflicting' }
+    # The predecessor's own result ref is required whatever the public parent:
+    # the push check requires that exact ref for every receipt in the chain, so
+    # accepting a successor without it would complete a chain that push refuses.
+    if ((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref ('refs/crg-results/' + $previous.Receipt.Fields['public-result'])) -cne $previous.Receipt.Fields['public-result']) { throw 'preceding public result retention is absent or conflicting' }
   }
   return [pscustomobject]@{ Receipt = $receipt; Files = $files; Metadata = $metadata; ContextBlobBuffers = $contextBlobs; Sources = $sources; ContextBytes = $contextTotal }
 }

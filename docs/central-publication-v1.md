@@ -8,9 +8,29 @@ guards. Existing immutable input and retention contracts remain authoritative.
 ## Ordinary operation
 
 `-Open` admits the actual attachment and preceding completed pair, then reports
-the governing private configuration, project mode and instruction state. `-Stage`
-classifies literal public/private paths before either index changes. Partial
-staging failures report actual index state without claiming a two-index rollback.
+the governing private configuration, project mode and instruction state.
+Admission requires the private branch at the preceding pair's private result,
+since only the gate writes the private database. Admission accepts the public
+branch tip whatever commit it is: the preceding public result, a descendant
+reached through commits made outside the gate, an earlier commit after a reset,
+or an unrelated commit after a rewrite (operator decision 2026-11-23). Commits
+made outside the gate are not reviewed; the next review covers only the staged
+change against that tip, and a changed public result takes the tip as its sole
+parent. `-Stage` classifies literal public/private paths before either index
+changes. Partial staging failures report actual index state without claiming a
+two-index rollback.
+
+Open, Stage and Commit still read the tip's public tree, and Commit's
+commit-log capture still reads the commits it lists from the tip
+(`paired-git-capture-v1.md`). Every existing validation and capture bound on
+what these operations read, including the indexes and the working files Stage
+reads, is unchanged and applies to every commit and file, whoever made it. When
+both trees hold a leaf at a configured role path, the private leaf binds the
+role, so Open, Stage and Commit are not refused for that duplicate at the tip;
+staging that path removes the public leaf from the public index, as every gate
+candidate requires, and stages the working file as the private document, which
+requires the working file to pass Stage's own checks and size limit like any
+staged file.
 
 `-Commit -MessageFile <path> -AuthoringAgent codex|claude` captures both indexes,
 the agreed UTF-8 message and immutable prepared review input. Relative message
@@ -66,7 +86,10 @@ match the immutable candidate.
 
 The data-only resume classifier accepts both-old, private-new/public-old and
 both-new states; unchanged sides already satisfy the recorded result. A changed
-public-new/private-old state or any unrecorded ref refuses. An ordinary missing
+public-new/private-old state or any unrecorded ref refuses, including a public
+branch moved by commits made outside the gate while the handoff is pending: the
+recorded transaction binds exact old and new public endpoints and its result's
+sole parent. An ordinary missing
 pointer is accepted only after both refs reached the results: no-replace pointer
 publication can have moved the predecessor aside. The immutable predecessor and
 handoff remain mandatory; absence supplies no review credit.

@@ -672,35 +672,62 @@ function Invoke-CrgCentralPushCheck {
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $completed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $next = $pointer.ReceiptSha256; $origin = $pointer.Origin; $successor = $null; $baseline = $null
+    # The receipt walk and the outgoing report share one supported history bound.
+    $historyBound = 100000
+    # The public branch tip is not compared with the newest receipt, and a public
+    # parent is linked to its predecessor only where it is that predecessor's
+    # result (operator decision 2026-11-23). Only the gate writes the private
+    # database, so the private tip and every private link stay exact.
     while ($null -ne $next) {
-      if ($seen.Count -ge 100000 -or -not $seen.Add($next)) { throw 'completed-pair chain is cyclic or exceeds the supported history bound' }
+      if ($seen.Count -ge $historyBound -or -not $seen.Add($next)) { throw 'completed-pair chain is cyclic or exceeds the supported history bound' }
       $record = Read-CrgCentralHistoricalPair -ProjectContext $ProjectContext -ReceiptSha256 $next -ExpectedOrigin $origin
       $fields = $record.Receipt.Fields
       if ($null -eq $successor) {
-        foreach ($domain in @('public', 'private')) {
-          if (-not [string]::Equals($fields[$domain + '-result'], $ProjectContext.Domains[$domain].Parent, [StringComparison]::Ordinal) -or
-              -not [string]::Equals($fields[$domain + '-tree'], $ProjectContext.Domains[$domain].ParentTree, [StringComparison]::Ordinal)) { throw 'current project state differs from the completed-pair pointer' }
-        }
+        if (-not [string]::Equals($fields['private-result'], $ProjectContext.Domains.private.Parent, [StringComparison]::Ordinal) -or
+            -not [string]::Equals($fields['private-tree'], $ProjectContext.Domains.private.ParentTree, [StringComparison]::Ordinal)) { throw 'current private branch differs from the completed-pair pointer' }
       } else {
         foreach ($domain in @('public', 'private')) {
+          if ([string]::Equals($domain, 'public', [StringComparison]::Ordinal) -and
+              -not [string]::Equals($fields['public-result'], $successor.Receipt.Fields['public-parent'], [StringComparison]::Ordinal)) { continue }
           if (-not [string]::Equals($fields[$domain + '-result'], $successor.Receipt.Fields[$domain + '-parent'], [StringComparison]::Ordinal) -or
               -not [string]::Equals($fields[$domain + '-tree'], $successor.Results[$domain].Parent.TreeOid, [StringComparison]::Ordinal)) { throw 'historical pair linkage differs from exact predecessor result and parent trees' }
         }
       }
-      $null = $completed.Add($fields['public-result'])
+      # An unchanged public side records its parent, which may be a commit made
+      # outside the gate, as its result; only a changed result is a gate commit.
+      if (-not [string]::Equals($fields['public-result'], $fields['public-parent'], [StringComparison]::Ordinal)) { $null = $completed.Add($fields['public-result']) }
       if ([string]::Equals($record.Origin, 'first-attachment-v1', [StringComparison]::Ordinal)) { $baseline = $fields['public-parent']; $next = $null }
       else { $next = $fields['previous-pair']; $origin = ''; $successor = $record }
     }
     if ([string]::IsNullOrEmpty($baseline)) { throw 'completed-pair history has no validated first-attachment boundary' }
     $enumerate = Get-CrgCentralGuardCommand -ProjectContext $ProjectContext -Module paired-git-operation -Name Get-CrgPairedGitOutgoingCommits
     $checked = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $outside = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $outsideShown = New-Object 'System.Collections.Generic.List[string]'
+    # Each tip's revision list is bounded only on its own, so this informational
+    # set stops growing at the shared history bound. The count stays exact at
+    # the bound and becomes a lower bound once a further distinct commit is met.
+    $outsideMore = $false
     foreach ($update in $updates) {
       if ($update.Delete) { continue }
       $outgoing = & $enumerate -ProjectContext $ProjectContext -OperationLock $OperationLock -TipOid $update.TipOid -BoundaryOid $baseline
       foreach ($oid in $outgoing.Value.CommitOids) {
-        if (-not $completed.Contains($oid)) { throw "public push contains post-attachment commit '$oid' without completed paired-review evidence" }
-        $null = $checked.Add($oid)
+        if ($completed.Contains($oid)) { $null = $checked.Add($oid) }
+        elseif ($outside.Count -lt $historyBound) { if ($outside.Add($oid) -and $outsideShown.Count -lt 10) { $outsideShown.Add($oid.Substring(0, 12)) } }
+        elseif (-not $outside.Contains($oid)) { $outsideMore = $true }
       }
+    }
+    # Informational: a commit that no receipt in this attachment's chain records
+    # as a changed public result is named, not refused for lacking such a
+    # receipt; the enumeration's own bounds still apply whoever made it. Only
+    # this attachment's chain is indexed, so a commit reviewed under another
+    # attachment, such as another linked worktree's, is named too: the line
+    # does not state that the commit went unreviewed.
+    $outsideLine = 'none'
+    if ($outside.Count -gt 0) {
+      $atLeast = if ($outsideMore) { 'at least ' } else { '' }
+      $outsideLine = "$atLeast$($outside.Count) public commit(s) that no receipt in this attachment's completed-pair chain records as a changed public result: $($outsideShown -join ', ')"
+      if ($outside.Count -gt $outsideShown.Count) { $outsideLine += " and $atLeast$($outside.Count - $outsideShown.Count) more" }
     }
     Assert-CrgCentralGuardCustody -State $state
     if ($state.LfsEnabled) {
@@ -714,7 +741,7 @@ function Invoke-CrgCentralPushCheck {
       }
     } $ProjectContext
     Assert-CrgCentralGuardCustody -State $state
-    return [pscustomobject]@{ CheckedUpdates = $updates.Count; CheckedCommits = $checked.Count; CompletedPairs = $seen.Count; LfsPrePush = $state.LfsEnabled; ValidationState = 'completed-public-history'; ReadyForPublication = $false }
+    return [pscustomobject]@{ CheckedUpdates = $updates.Count; CheckedCommits = $checked.Count; OutsideGateCommits = $outsideLine; CompletedPairs = $seen.Count; LfsPrePush = $state.LfsEnabled; ValidationState = 'completed-public-history'; ReadyForPublication = $false }
   } catch {
     $failure = $_.Exception
     while ($null -ne $failure) {

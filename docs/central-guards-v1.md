@@ -174,6 +174,11 @@ a move stay valid), public result
 retention, and predecessor linkage. Historical preparation is validated by
 recorded byte identity;
 older runtimes are not executed and historical PASS never authorizes a new commit.
+The newest receipt's private result and tree must equal the current private
+branch, and each private parent must be its predecessor's private result: only
+the gate writes the private database. A public parent need not be a gate result
+(operator decision 2026-11-23), and it is linked to its predecessor only where it
+is that predecessor's public result.
 
 Actual private parent/result configuration blobs supply the stable schema's
 governing/candidate union. Actual public/private result trees must satisfy that
@@ -181,13 +186,27 @@ ownership and namespace contract. First attachment uses the candidate inventory
 with the fixed mandatory-private names; previous public history is not silently
 rewritten or retrospectively re-reviewed.
 
-For each pushed tip, owned Git enumeration checks every reachable commit after
-the validated first-attachment public baseline. Every such commit must appear in
-the anchored completed-pair history. This includes outgoing intermediate commits,
-not only the current tree; remote-old objects need not exist locally to enforce
-the boundary. Shallow/grafted histories refuse rather than hide intermediate
+For each pushed tip, owned Git enumeration lists every reachable commit after
+the validated first-attachment public baseline, including outgoing intermediate
+commits; remote-old objects need not exist locally. A listed commit that is a
+changed public result in the anchored completed-pair history is a gate commit.
+No receipt in the pushing attachment's completed-pair chain records any other
+listed commit as a changed public result. A linked worktree carries its own
+attachment and chain, so this includes a commit reviewed under another
+attachment. Such commits are not refused for lacking such a receipt, and the
+result's `OutsideGateCommits` line gives their count and a bounded list of short
+IDs. The count stays exact when it reaches the receipt bound below and is
+labeled a lower bound only once a further distinct commit is met after that
+bound. The outgoing enumeration applies no private-path check to such commits;
+the receipt walk applies the ownership checks above to every receipt's result
+trees, and gate candidates keep their own validation.
+Shallow/grafted histories refuse rather than hide intermediate
 commits. The chain is cycle-checked and bounded to 100,000 receipts; outgoing
-enumeration is bounded to 16 MiB. Performance is not claimed from static checks.
+enumeration is bounded to 16 MiB. These existing enumeration bounds apply
+whoever made the commits: the revision list over the outgoing commits is bounded
+in size and time, and the commit objects of the pushed tip and the baseline are
+each read under the per-object read bound.
+Performance is not claimed from static checks.
 
 When exact stock LFS hooks are admitted, `Invoke-CrgPairedGitLfsPrePush` runs only
 after that history validation. The owned Git executable supplies its actual

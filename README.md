@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.7.3** (Windows / PowerShell) — the authoritative value is the
+**Version 2.7.4** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.7 supplies a read-only central launcher and an installation-managed
@@ -36,12 +36,12 @@ below 2.5 is unsupported (see `docs/private-governance-v1.md`).
 
 Version 2.6 keeps review findings. These features belong to the ordinary
 (not paired) Codex and Claude reviews: a passing review adds its QUALITY
-and NOTE findings as tasks in the per-user `TASKS.md` and shows them to the
-next review of the same files, and the retry of a blocked staged review
-needs a remediation record first (both described below and in
-`docs/review-feedback-v1.md`). Ordinary reviews other than Branch reviews
-also show a fix-on-fix advisory when a change rewrites recently added
-lines. Identity decisions and comparisons of outside field values (verdict
+and NOTE findings as tasks in the per-user `TASKS.md`, and the retry of a
+blocked staged review needs a remediation record first (both described
+below and in `docs/review-feedback-v1.md`). A passing review's findings
+are not shown to any later review; blocked rounds are shown to a later
+staged review of the same working tree and HEAD, as section 5 there
+defines. Identity decisions and comparisons of outside field values (verdict
 and record fields, Git output, paths) are ordinal rather than by culture;
 the review wrappers' `-Scope`, the Codex wrapper's `-ReasoningEffort` and
 the launcher's `-AuthoringAgent` keep `ValidateSet` binding (a culture
@@ -178,8 +178,7 @@ append-only `logs/review-followups.md` index for batch triage; NOTE
 is informational. A passing ordinary (not paired) Codex or Claude review also adds tasks for its QUALITY and
 NOTE findings (one per severity and citation) to the main checkout's
 per-user `TASKS.md` (QUALITY first,
-never committed) and shows its findings to the next review of the same
-files; PASS lines state that a review covers the source diff only, not
+never committed); PASS lines state that a review covers the source diff only, not
 target execution or deployment readiness. In an ordinary staged review, a
 retry of a blocked commit is
 refused before review until a remediation record names, for each earlier

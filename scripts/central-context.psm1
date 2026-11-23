@@ -969,11 +969,17 @@ function Read-CrgCentralPreparationSource {
     foreach ($domain in @('public', 'private')) {
       foreach ($entry in @($entries[$domain] | Where-Object { [string]::Equals($_.Path, $role.Path, [StringComparison]::Ordinal) })) {
         if (-not ([string]::Equals($entry.Mode, '100644', [StringComparison]::Ordinal) -or [string]::Equals($entry.Mode, '100755', [StringComparison]::Ordinal)) -or
-            -not [string]::Equals($entry.Type, 'blob', [StringComparison]::Ordinal)) { throw "document role '$($role.Path)' is not a regular blob" }
+            -not [string]::Equals($entry.Type, 'blob', [StringComparison]::Ordinal)) { throw "document role '$($role.Path)' is not a regular blob in the $domain tree" }
         $bindings += [pscustomobject]@{ Domain = $domain; Path = $entry.Path; Mode = $entry.Mode; Oid = $entry.Oid }
       }
     }
-    if ($bindings.Count -ne 1) { throw "document role '$($role.Path)' must resolve to exactly one domain leaf" }
+    # A tree holds a path once, so two bindings are one leaf in each domain. Only
+    # the gate writes the private database, so the private leaf is the reviewed
+    # document for the role. Refusing here would be premature: the next gate
+    # candidate must already drop the public leaf, and Open and Stage read this
+    # source before that candidate exists.
+    if ($bindings.Count -eq 2) { $bindings = @($bindings | Where-Object { [string]::Equals($_.Domain, 'private', [StringComparison]::Ordinal) }) }
+    if ($bindings.Count -ne 1) { throw "document role '$($role.Path)' must resolve to exactly one domain leaf (found in none)" }
     $roles.Add($bindings[0])
   }
   # Per-tree capture has no independent preceding config. Binding this config

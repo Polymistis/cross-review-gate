@@ -191,11 +191,18 @@ pins cannot upgrade a weaker ancestor handle after acquisition.
 An ordinary predecessor resolves the fixed private ref by the exact recorded
 receipt SHA256. Only an actual retained ordinary or first-origin receipt is
 accepted; raw receipt hash, fixed evidence-leaf shape, metadata message, sole
-private-result parent and actual prior result/tree/association bindings must
-match; for a linked worktree bound through Git's back-link the association
-excludes the recorded worktree folder (see `private-governance-v1.md`). The
-preceding public result-only ref must also
-exist exactly. Internal
+private-result parent and actual prior association bindings must match; for a
+linked worktree bound through Git's back-link the association excludes the
+recorded worktree folder (see `private-governance-v1.md`). The private parent and
+its tree must be the predecessor's private result and tree. The preceding public
+result-only ref must exist exactly whatever the public parent, because the push
+check requires that ref for every receipt. The public parent is the branch tip
+the pair was based on (operator decision 2026-11-23); receipt storage compares it
+with the predecessor only when it is the predecessor's public result, and then
+its tree must match the predecessor's. A public parent that is a different
+commit stays reachable through the pair's own result-only ref: directly for an
+unchanged public side, as the sole parent of a changed result.
+Internal
 closed dispatch constructs no persisted completion pointer and supplies no
 approval authority. Prior runtime IDs may differ after an approved upgrade;
 predecessor identity checks do not replay historical provider execution or claim

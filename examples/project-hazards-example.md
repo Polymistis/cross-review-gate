@@ -80,14 +80,16 @@ instance.
 6. **PLAN.md drift**. Cross-reference graph rot (a milestone tag
    referenced but never defined); range claims that do not match the
    actual numbered items present (`M19.0-M19.7` with `M19.5` missing);
-   missing `Deps:` / `Tag:` / `Status:` fields on touched milestones.
+   `Deps:` / `Tag:` / `Status:` fields missing from milestones the diff adds
+   or removed from milestones it edits.
    Diff-level red flag: any PLAN.md edit that touches a single milestone
    in isolation without sweeping references; every spot-fix to PLAN.md
    without a full reference sweep tends to ship at least one drift. If
    `./CODEX_REVIEW_EVIDENCE/PLAN-CONSISTENCY.txt` is present in the
    bundle, read it first. A `PLAN-CONSISTENCY-FINDING:` row in a well-formed
    `PLAN-CONSISTENCY-STATE: v1 produced` envelope is documentary drift and
-   reports as `QUALITY:` under `PLAN-DRIFT`; valid skip states are non-findings.
+   reports as `QUALITY:` under `PLAN-DRIFT` only when the change adds or causes
+   that drift; otherwise it is context. Valid skip states are non-findings.
    Required evidence that is indeterminate, absent, unreadable, malformed, or
    unterminated is a `BLOCKER:` under `SILENT-FAILURE`.
    (Checkbox-vs-body sentiment scanning and summary-status-table drift

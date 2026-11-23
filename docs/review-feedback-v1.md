@@ -1,16 +1,15 @@
-# Review feedback v1: findings files, carry-forward, TASKS.md, the PASS line and blocked retries
+# Review feedback v1: findings files, TASKS.md, the PASS line and blocked retries
 
 Audit source: a consumer project's corrective audit of 2026-10-07. It
 found that NOTE findings were not kept anywhere a later session would see
-them, that findings raised against a file were not shown to the next review
-of that file, and that a gate PASS was being read as approval of target
-behaviour or deployment. This design covers those gaps. Section 5 covers a
+them and that a gate PASS was being read as approval of target behaviour or
+deployment. This design covers those gaps. The audit also found that
+findings raised against a file were not shown to the next review of that
+file; section 2 says why that stays so. Section 5 covers a
 gap the review of this design itself exposed: a blocked commit was retried
 with only the cited line of each finding fixed, so each review round found
-the next instance of the same class. The fix-on-fix
-advisory (`Get-FixOnFixAdvisory`) and the review prompt's change-propagation
-duties are separate and documented where they live; the advisory reads
-committed history, so it never sees retries of one uncommitted change.
+the next instance of the same class. The review prompt's change-propagation
+duties are separate and documented where they live.
 
 ## Scope
 
@@ -48,9 +47,8 @@ no-follow CREATE_NEW, and the only explicit deletions set the delete
 disposition on the held handle, and only on files this run created through
 that handle: the recovery copies (`TASKS.md`'s and the exclude file's) and
 their `.partial` forms (section 3), a `TASKS.md` this run created and failed
-to write, and a findings file, `CARRIED-FINDINGS.txt` or
-`PRIOR-BLOCKERS.txt` this run created and failed to write (none is yet a
-record). Apart from these, the main checkout's `index.lock`, which
+to write, and a findings file or `PRIOR-BLOCKERS.txt` this run created and
+failed to write (neither is yet a record). Apart from these, the main checkout's `index.lock`, which
 the task write creates delete-on-close (section 3), is removed by the
 system when its handle closes, the process's end included.
 No review record is ever deleted. Text a file must hold exactly (a path
@@ -66,16 +64,16 @@ a main checkout so named is not confirmed, with that
 reason, and a working tree's Git directory so named gives no retry key
 (section 5). Folder
 listings go by path but only supply names, each then opened relative to the
-held folder. Work left undone is reported, as a WARN or a `NOT CARRIED`
-line. The main checkout and its Git directory are confirmed once, while
+held folder. Work left undone is reported, as a WARN or, in the review
+evidence, a `NOT SHOWN` or `unavailable` line. The main checkout and its Git directory are confirmed once, while
 held, when the review's Git context is resolved, and their identities
 (volume serial and file ID) are kept with their paths; every later use
 (task writing, the task counts) holds them again
 and refuses a folder that is no longer the one confirmed
 (`Enter-CrgMainCheckoutBinding`). The identities of the common Git
 directory and of the logs folder's parent are kept the same way even when
-there is no main checkout, and writing a findings file or selecting
-carried findings first holds the common Git directory and the parent of
+there is no main checkout, and writing a findings file or scanning for
+blocked rounds first holds the common Git directory and the parent of
 every findings folder written or read (section 1) and refuses one that changed
 (`Enter-CrgReviewLogsBinding`). So a record goes into, and is matched
 against, the repository the review started in; the logs and findings
@@ -105,8 +103,8 @@ the confirmed Git directory, or no task is added
 
 ## 1. Findings file per passing verdict
 
-When a wrapper's verdict passes (exit 0) and it has findings or was shown
-carried findings (section 2), the wrapper writes one findings file in the
+When a wrapper's verdict passes (exit 0) and it has findings, the wrapper
+writes one findings file in the
 repository's findings folder (beside the review logs, or for a submodule
 inside its common Git directory, below):
 
@@ -136,18 +134,18 @@ repositories can share it (separate Git directories under one parent), so
 every file names its repository (below). A
 separate folder keeps these files out of `logs/<backend>/reviews`, whose
 age-prune, trend and checklist readers have their own file-name rules. The
-time in the name is the file's `written` time to the second, so section 2
-can pass over old files by name alone. The 12 hex digits are the start of
+time in the name is the file's `written` time to the second, so the
+blocked-round scan (section 5) can pass over old files by name alone. The
+12 hex digits are the start of
 the file content's SHA-256, so two records written in the same second get
 different names in practice. The name is bound to the content: a file
-whose backend, time or hash disagrees with its content, or whose `carried`
-line names its own file, is invalid, so an edited record is reported
-rather than read as a retirement. The name alone guarantees nothing: an existing file of that name
+whose backend, time or hash disagrees with its content is invalid, so an
+edited record is reported. The name alone guarantees nothing: an existing file of that name
 is the same record, already written, only when it is stored under exactly
 that name and its content is identical; any other is refused with a WARN. A write that fails
 deletes the partly written file through its handle; one left by a process
 that died while writing is counted invalid and named in a WARN by the next
-carry-forward scan (section 2).
+blocked-round scan (section 5).
 
 Content (UTF-8 lines, each ending with LF, written once, never edited):
 
@@ -159,11 +157,10 @@ Content (UTF-8 lines, each ending with LF, written once, never edited):
     finding QUALITY|NOTE <sha256 hex digest> <path>:<line>[:<col>] or -
     cite <path>:<line>[:<col>]
     > <the finding's text, escaped, one line of it per quote line>
-    carried <sha256 hex digest> <findings file name>
     end
 
-`finding` blocks and `carried` lines repeat zero or more times, in that
-order; `-` stands for no opening citation. Each `finding` line is followed
+`finding` blocks repeat zero or more times; `-` stands for no opening
+citation. Each `finding` line is followed
 by zero or more `cite` lines, the finding's further citations (below), no
 two the same and none repeating the opening one. A blocked round (section 5) uses the same
 format and name with two more lines after `written`,
@@ -171,19 +168,24 @@ format and name with two more lines after `written`,
     retry-worktree <the working tree's own Git directory, absolute>
     retry-head <the HEAD commit id, or unborn>
 
-one or more `finding` blocks, all `BLOCKER`, and no `carried` line; a
+one or more `finding` blocks, all `BLOCKER`; a
 passing review's file has neither retry line and no `BLOCKER` finding. The
 writer refuses any other mix, and the reader's byte-for-byte check below
 holds both kinds to it. Each `finding` line and its `cite` lines are
 followed by one or more quote lines holding the finding's text (the lines its digest covers)
-escaped and quoted exactly as in `CARRIED-FINDINGS.txt` (section 2), so the
+escaped and quoted exactly as in `COMMIT-LOG.txt` (injective `\xNN`
+escaping, `> ` prefix on every content line), so the
 quote lines hold only printable ASCII and none can pass for a format line.
+Records written before carry-forward was removed (section 2) can hold
+`carried <sha256 hex digest> <findings file name>` lines before `end`. The
+reader checks and ignores them in a passing review's record, so such a
+record is not counted invalid, and refuses them in a blocked round, which
+never held them; the writer no longer produces them.
 The file is UTF-8: the repository, the verdict locator and the retry
 working tree, all paths, may hold any other character except the ASCII
 control characters (U+0000 to U+001F and U+007F; a Windows name may hold
 the C1 ones). The writer refuses any
-name outside the form above, so every file can be named by a later
-`carried` line. The format
+name outside the form above. The format
 is line based so it parses identically on every PowerShell version (PowerShell 7's JSON reader turns date strings
 into dates before any check could see them), and the `end` line makes a
 partly written file invalid.
@@ -193,7 +195,8 @@ partly written file invalid.
   `C:\` stays `C:\` because `C:` names the drive's current folder), as Git
   reports it with inherited repository selectors removed; a context whose
   inherited selectors name another repository has none. It is what binds a
-  record to its repository: section 2 uses only its own repository's files.
+  record to its repository: the blocked-round scan (section 5) uses only its
+  own repository's files.
   A run without one writes no findings file.
 - The verdict locator is the follow-up index's (`Get-ReviewArtifactLocator`):
   the repository-relative central path when the verdict ends up in
@@ -235,22 +238,23 @@ partly written file invalid.
   given, only the grammar, the same normalization as the opening citation
   and the refusal of a path starting with `/` decide; the live checkout is
   not read instead.
-- The file is self-contained: every later reader (section 2, a person or
-  agent following a task in section 3) gets the severity, citations and text
+- The file is self-contained: every later reader (the blocked-round scan of
+  section 5, a person or agent following a task in section 3) gets the
+  severity, citations and text
   from it alone, through one parser that decodes each text (strict UTF-8)
   and checks it against its digest, and accepts the file only when the
-  writer, given the parsed values, would produce it byte for byte (so a
+  writer, given the parsed values, would produce it byte for byte once a
+  passing review's legacy `carried` lines (above) are dropped (so a
   `\x41` where the writer puts `A` makes the file invalid: each record has
-  one stored form, and the size limits of section 2 read that form), so a
-  record cannot be read differently from how it was written. An earlier design kept the text only in the
+  one stored form apart from those lines, and the size limits of section 5
+  read that form), so a record cannot be read differently from how it was
+  written. An earlier design kept the text only in the
   verdict artifact and re-read it there by digest; that re-interpretation
   (verdict paths, the REVIEW_SRC decision, verdicts pruned over time) was
   a way for a record to be read differently from how it was written, and
   was dropped (2026-10-09); do not move the text back out of this file.
   The text stays reviewer output: it is escaped and quoted, never prose that
   a session-start file shows.
-- Each `carried` line names one occurrence this review was shown under
-  section 2: a digest and the earlier findings file that holds it.
 - A failed review writes no findings file. A blocked review's QUALITY and
   NOTE findings are not recorded either: they are re-raised by the review
   that follows the fix. A blocked staged review records its BLOCKER
@@ -259,106 +263,32 @@ partly written file invalid.
   only through the operator's `CROSS_REVIEW_PRUNE_TOOL` safe-delete script
   (off when unset; see `INSTALL.md`), which does not cover this folder; an
   expiry that deleted these files directly was removed for bypassing
-  that contract. Files written more than 14 days ago are never carried
-  forward (section 2); remove old ones by hand through the Recycle Bin when
-  wanted.
+  that contract. Files written more than 14 days ago are not read by the
+  blocked-round scan (section 5); remove old ones by hand through the
+  Recycle Bin when wanted.
 - Writing never affects the verdict or the exit code; a failure is a WARN.
 
-## 2. Carry-forward into later reviews
+## 2. No carry-forward between reviews
 
-While building the scope text, each wrapper looks for open findings from
-earlier reviews that cite a file in the current change:
-
-- A findings file is used only when it is exactly the version-1 format
-  above with valid values (citations in stored form, the timestamp in
-  exactly the written shape). Stored citations are checked, never
-  normalized again, so whatever the writer stores reads back unchanged. Any
-  other file is skipped and counted on a `NOT CARRIED` line (links and
-  non-files counted apart from invalid content; a directory or directory
-  link with a findings name is listed too and, since Windows refuses to open
-  it as a file with the same error as a denied access, counted as a file
-  that could not be read), so a malformed file can
-  neither suppress nor retire a finding. Skipped files (invalid, refused or
-  unreadable) are also named in WARN lines with the reason, up to 20; the
-  counts cover the rest. Their names go only to the WARN lines, never the
-  scope text, since a name that failed validation is not machine-authored.
-  A findings folder that cannot
-  be listed makes carry-forward `unavailable` rather than empty. A findings
-  file larger than 64 KiB is invalid, and the writer refuses to write one.
-- Candidates: valid passing-review findings files of this repository (their `repository`
-  equals this review's, compared exactly), from the folders of section 1
-  (the findings folder, then a submodule's working-tree folder; a name is
-  taken only by a valid file of this repository, so a later copy of a
-  taken name is passed over, and a damaged or foreign copy takes nothing),
-  whose `written` is within the
-  last 14 days and not after the current time, newest first, at most 200
-  files. Blocked rounds (section 5) are never candidates: their BLOCKER
-  findings are not carried, and having no `carried` line they retire
-  nothing. Another repository's files sharing the folder are neither selected
-  nor allowed to retire anything, and are not counted: they hold nothing of
-  this repository's. A file dated in the future is skipped and counted on
-  the `NOT CARRIED` line. The folder is listed one name at a time and the
-  scan keeps at most 400 parsed files, plus at most 40 blocked rounds
-  (section 5), each from at most 64 KiB, in memory.
-  Because the gate deletes no findings file, a file whose name (its
-  `written` time) is older than the window is passed over without being
-  opened, and a name outside the stored form is counted invalid without
-  being opened (the listing matches `.findings` in any letter case, so
-  `x.FINDINGS` is counted too): content reads follow the window, while
-  listing the names still grows with the folder.
-- An occurrence (a finding in one findings file) is open until a candidate's
-  `carried` line names both its digest and that file. That is the retirement
-  rule: a carried finding is shown to one review that passes, which retires
-  exactly the occurrences it was shown. A review can name only files that
-  existed when it was shown them, so an acknowledgement never retires an
-  occurrence written later: a finding raised again, even by a review that
-  overlapped the acknowledging one, sits in a new file and stays open. An
-  acknowledgement in a file tied, to the second, with the oldest kept
-  candidate can fall outside the newest 200; that shows its finding once
-  more and never hides one.
-- Selected when the path of any of its citations (the opening one or a
-  `cite` line) is one of the change's paths (both sides of a rename), and
-  labelled with the first such citation. Findings without any citation are
-  not carried. At most 20 are
-  selected, newest first, within 64 KiB in total, each finding counting its
-  label citation and quote lines (the evidence and scope text repeat the
-  citation); a finding whose citation and quote lines pass 8 KiB is named on
-  its own `NOT CARRIED` line, by its findings file and digest rather than its
-  citation, and takes no place, so it never keeps a smaller finding out.
-  Up to 20 such lines are written; one more line counts the rest.
-- Every limit that leaves something out is counted on a `NOT CARRIED`
-  line. Open findings beyond the 20 selected or the 64 KiB total and
-  occurrences beyond 10 per finding share one line: they are not retired,
-  so they are offered to a later review. Candidate files beyond the newest 200 get their own line
-  saying they were not used in this review. No exclusion is recorded: each
-  review selects its candidates afresh, so which files are left out can
-  change from one review to the next.
-- The same finding often sits in several findings files (a commit gate and
-  a merge gate raising one text). Occurrences are grouped only when digest,
-  severity and stored citations all match, so each occurrence in a group
-  passed the same changed-path check and is quoted under the one label
-  shown; up to 10 open occurrences are kept per group. The digest covers the
-  text, so every occurrence in a group holds the same text; it is taken from
-  the newest occurrence, as parsed in the scan. Nothing is read from verdict
-  files.
-- The text goes into `CARRIED-FINDINGS.txt`, created no-follow and new in
-  the held evidence bundle folder, as the stored quote lines under a machine
-  header: escaped and quote-framed exactly as `COMMIT-LOG.txt` (injective
-  `\xNN` escaping, `> ` prefix on every content line, machine headers alone
-  at column zero), never truncated: a write that fails deletes the file
-  through its handle, and the scope text then says it is unavailable and not
-  to be used. It is data for the reviewer, never instructions.
-- The scope text gets a `CARRIED FINDINGS` section listing severity,
-  citation and source findings file name for each, and the `NOT CARRIED`
-  lines, because reviewers often open only `DIFF.patch`.
-- The prompt (`review-prompt-template.md`, change-propagation duty 5) tells
-  the reviewer to check each carried finding against the current diff and
-  raise it again, at its proper severity, only if it still applies. A
-  carried finding is not a finding by itself.
-- Only the occurrences of findings actually quoted are recorded in this
-  review's findings file (`carried`); a `NOT CARRIED` finding stays open.
-- A failure prints a WARN with the reason, puts a fixed `unavailable` line
-  (no failure detail) in the scope text and never stops the review.
+Content a change leaves as it was is never the subject of a finding in its
+review, apart from an unchanged line the change makes wrong, which is
+reported at the changed line that causes it (operator rule, 2026-11-23; the
+prompt's "Scope of a finding"). Project-supplied text rendered into the
+prompt (project context and hazards) cannot make such content a finding, so
+retained project text that asks for findings on unchanged content has no
+effect. A passing review's findings file (section 1) feeds `TASKS.md`
+(section 3), and its findings are not shown to any later review. An
+earlier design carried passing reviews' QUALITY and NOTE findings into
+every later review that touched a cited file: a `CARRIED-FINDINGS.txt`
+evidence file, a `CARRIED FINDINGS` scope-text section, a prompt duty to
+raise each one again while it still applied, and `carried` lines in the
+findings files acknowledging the occurrences shown. It was removed (2026-11-23) because it put findings
+about other commits, and about content the later change left untouched, in
+front of reviewers, who then reported them against that change; do not
+reintroduce it. Blocked rounds are kept apart from this: section 5 shows
+them to a later staged review of the same working tree and HEAD, and
+another change staged on the same HEAD in the same working tree counts
+there as the same change.
 
 ## 3. TASKS.md
 
@@ -565,8 +495,8 @@ a plain WARN from the feedback path was lost whenever the review passed.
 Every outcome of that path the operator has to act on is therefore also
 printed as a `review-feedback WARN: ` line (`Write-ReviewFeedbackStatus`):
 tasks not added and why, recovery copies or `.partial` files left, a
-findings file not written, findings files skipped (counted, not named),
-carried findings unavailable, QUALITY follow-ups not staged, and a
+findings file not written, findings files skipped by the blocked-round
+scan (counted, not named), QUALITY follow-ups not staged, and a
 blocked-retry check or prior blocked findings unavailable (section 5).
 Housekeeping the review skipped or left half done is printed the same way
 as a `housekeeping WARN: ` line (`-Housekeeping`), with fixed text beside the
@@ -674,9 +604,28 @@ the gate hold a retry to them before another review is spent.
   rounds kept. The commit gate runs one wrapper per leg and stops at the
   first blocked leg, and a leg that falls back after exhaustion reviews
   once, so one commit attempt adds at most one round.
-- The carry-forward scan (section 2) also returns this change's rounds:
-  same repository, working tree and HEAD, within the same window, newest
-  20, with older ones counted toward the number of rounds only. A scan that
+- A staged review scans the findings folders of section 1
+  (`Select-ReviewBlockedRounds`) for this change's rounds: valid files of
+  this repository (their `repository` equals this review's, compared
+  exactly) with the same working tree and HEAD, written in the last 14 days
+  and not after the current time, newest 20, with older ones counted toward
+  the number of rounds only. Passing-review records in the same folders are
+  passed over (section 2), as are other repositories' files sharing the
+  folder. The findings folder is read before a submodule's working-tree
+  folder, and a name is taken only by a valid file of this repository, so
+  a damaged or foreign copy takes nothing. The folder is listed one name at
+  a time; a name older than the window (its `written` time) is passed over
+  without being opened, and a name outside the stored form (`x.FINDINGS`
+  included, since the listing matches `.findings` in any letter case) is
+  counted invalid without being opened. At most 40 rounds, each from at
+  most 64 KiB, are kept in memory. A file that is invalid, refused (a link
+  or not an ordinary file; a directory with a findings name counts as
+  unreadable, since Windows refuses it with the error of a denied access)
+  or unreadable is counted on a `review-feedback WARN:` line (section 4)
+  and named, with the reason, on plain WARN lines up to 20, since it can be
+  a lost round; a file dated in the future is counted on that status line
+  only. A folder that cannot be listed fails
+  the scan rather than reading as empty. A scan that
   fails, or a working tree whose Git directory is unknown, makes the check
   unavailable: a `review-feedback WARN:` status line (section 4) and a
   `PRIOR BLOCKERS unavailable` scope-text line, and the review runs. The
@@ -731,14 +680,14 @@ the gate hold a retry to them before another review is spent.
   created new and deleted if writing it fails (the review then runs without
   it, with a `review-feedback WARN:` status line and a
   `PRIOR BLOCKERS unavailable` scope-text line): each prior finding quoted as
-  in `CARRIED-FINDINGS.txt`, within the same per-finding and total size
-  limits (counting the citation) and at most 100 shown, the rest counted on
+  in `COMMIT-LOG.txt`, within 8 KiB per finding and 64 KiB in total
+  (counting the citation) and at most 100 shown, the rest counted on
   a `NOT SHOWN` line, then the record's blocks that name one of those
   findings and its approach line, rebuilt from the validated fields and
   quoted the same way; that part is bounded by the record's own 64 KiB,
   which the `\xNN` escaping can grow up to fourfold. The scope text lists
   the prior findings in a `PRIOR BLOCKERS` section. The prompt's
-  change-propagation duty 6 has the reviewer apply the class sweep to each
+  change-propagation duty 4 has the reviewer apply the class sweep to each
   block's invariant across the whole diff, not only at the listed sites (a
   remaining in-diff instance is a finding at its own severity), and report
   a record that misstates the class, the sweep or a site as a `QUALITY:`

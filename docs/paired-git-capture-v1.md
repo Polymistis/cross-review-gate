@@ -77,7 +77,12 @@ optional `PROJECT-MODE.md` from explicit concrete trees. Config and values are
 required regular blobs with their compiler bounds; positive mode absence is an
 empty buffer plus ModePresent=false. A non-file mode entry refuses rather than
 becoming absence. Each configured role resolves to one regular public or private
-blob; the result records the original domain/path/mode/OID binding.
+blob. When both trees hold a leaf at the role path, the private leaf binds the
+role: only the gate writes the private database, and candidate validation
+refuses a public leaf at a private-classified path (`central-publication-v1.md`).
+Every leaf at a role path must
+still be a regular blob, and a role path in neither tree refuses. The result
+records the original domain/path/mode/OID binding.
 Each listing receives per-domain syntax/namespace validation here. No ownership
 union runs with a single captured configuration standing in for both versions.
 

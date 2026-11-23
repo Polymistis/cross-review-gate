@@ -7,12 +7,17 @@ instruction merge, review bypass or private-index reset belongs to this module.
 
 ## Reviewed discovery
 
-`New-CrgCentralInstructionDiscoveryBytes -RuntimeStore -PlanPath -HistoryPath
+`New-CrgCentralInstructionDiscoveryBytes -RuntimeStore -PlanPath [-HistoryPath]
 [-Previous|-Legacy]` returns a canonical LF section bounded by
 `<!-- crg-central-discovery v1 BEGIN -->` and
 `<!-- crg-central-discovery v1 END -->`. The section identifies the stable
-`<runtime-store>/launcher.ps1`, `.crg-project/project.conf`, and explicit private
-plan/history paths. Normal consumers select `PLAN.md` and `History.md`; custom
+`<runtime-store>/launcher.ps1`, `.crg-project/project.conf`, an explicit private
+plan path and, when the project keeps one, an explicit private history path.
+A private history document is optional: without `-HistoryPath` the section omits
+the `Private history:` record and every other byte stays the same. `-Previous`
+and `-Legacy` require `-HistoryPath` and refuse without it, because every
+deployed earlier section carried a history record. Normal
+consumers select `PLAN.md` and, when present, `History.md`; custom
 paths are explicit document pointers, not roles inferred from description prose.
 The section names the central Open/Stage/Commit/Resume workflow and automatic
 provider fallback. The current edition also gives the exact launcher command
@@ -25,11 +30,25 @@ Consumer preparation places this same section in both root instruction files
 before review. The generator does not edit files. `Assert-CrgCentralInstructionDiscovery
 -Operation -CapturedInput` requires exactly one canonical matching section in
 each actual captured private blob, an accepted edition, with both root files carrying
-the same one. Both selected documents must be regular private
-tree leaves with explicit configured roles. Runtime store, blob identities,
-section grammar and exact section equality are checked; a duplicate or modified
-section refuses. Candidate instructions remain review data and never supply the
-rules used to approve that candidate.
+the same one. The plan document, and the history document when the section
+names one, must be regular private tree leaves with explicit configured roles.
+A section without a history record requires no history document or role; a
+section that names one still refuses when that document or its role is missing.
+Runtime store, blob identities, section grammar and exact section equality are
+checked; a duplicate or modified section refuses. Candidate instructions remain
+review data and never supply the rules used to approve that candidate.
+
+Removing an existing history document is one reviewed Commit that drops the
+`Private history:` record from the section in both root files, deletes the
+document and removes its `role` record, because every configured role must
+resolve to a regular candidate blob. `History.md` stays private by name whether
+or not its `private-file` record remains. When the governing configuration
+selects that document as its `consistency-document`, a separate reviewed Commit
+changes that selection first: the consistency report requires the governing
+selection to be a regular blob in the candidate, so the Commit that deletes the
+document cannot also be the one that changes the selection. The next Open
+validates the preceding receipt's tree, which then carries neither the record nor
+the document.
 
 The coordinator calls this assertion before review, adding `-RequireWorkingBytes`
 for first attachment. That mode compares each working instruction file to the
@@ -44,6 +63,9 @@ injects a missing section or upgrades instruction prose merely because a new
 central runtime was activated. Exact accepted bytes include the current host/client
 section, the preceding escalation section (`-Previous`), and the earlier baseline
 section (`-Legacy`). Both deployed older forms report the edition `previous`.
+Every deployed older form carries a history record, so a section without one is
+accepted only in the current edition; dropping the record adopts the current
+section in the same reviewed Commit.
 Central migration therefore leaves attached projects working; Open reports
 `DiscoverySection` as `previous` with the
 instruction to adopt the current section in both root files with the next

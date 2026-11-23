@@ -110,11 +110,17 @@ function Open-CrgPairedProjectOperation {
       # skips public-worktree there. Matching the folder would strand every move.
       if (-not [string]::Equals($ProjectContext.FolderBinding, 'git-back-link', [StringComparison]::Ordinal)) { $expected['public-worktree'] = $ProjectContext.Root }
       foreach ($name in $expected.Keys) { if (-not [string]::Equals($Fields[$name], $expected[$name], [StringComparison]::Ordinal)) { throw "preceding receipt association differs at '$name' (recorded '$($Fields[$name])', current '$($expected[$name])')" } }
-      foreach ($domain in @('public', 'private')) {
-        $selected = $ProjectContext.Domains[$domain]
-        if (-not [string]::Equals($Fields[$domain + '-result'], $selected.Parent, [StringComparison]::Ordinal) -or -not [string]::Equals($Fields[$domain + '-tree'], $selected.ParentTree, [StringComparison]::Ordinal) -or
-            -not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain $domain -Ref $selected.Ref), $selected.Parent, [StringComparison]::Ordinal)) { throw 'project branches do not match the preceding completed pair' }
-      }
+      # Admission does not compare the public branch tip with the preceding pair
+      # (operator decision 2026-11-23); only its direct ref is reread against the
+      # captured tip. The existing checks and bounds on what the operation reads
+      # from the tip still apply (docs/central-publication-v1.md). Only the gate
+      # writes the private database, so its tip must still be the preceding
+      # pair's private result.
+      $public = $ProjectContext.Domains.public
+      if (-not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref $public.Ref), $public.Parent, [StringComparison]::Ordinal)) { throw 'public branch changed during operation admission' }
+      $private = $ProjectContext.Domains.private
+      if (-not [string]::Equals($Fields['private-result'], $private.Parent, [StringComparison]::Ordinal) -or -not [string]::Equals($Fields['private-tree'], $private.ParentTree, [StringComparison]::Ordinal) -or
+          -not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain private -Ref $private.Ref), $private.Parent, [StringComparison]::Ordinal)) { throw 'private branch does not match the preceding completed pair' }
       if (-not [string]::Equals((Get-CrgRetentionRef -ProjectContext $ProjectContext -Domain public -Ref ('refs/crg-results/' + $Fields['public-result'])), $Fields['public-result'], [StringComparison]::Ordinal)) { throw 'preceding public result retention is absent or conflicting' }
     } $project $record.Receipt.Fields $pointer.Origin
     & $commands['Assert-CrgPairedOperationReads'] -Owner $reads

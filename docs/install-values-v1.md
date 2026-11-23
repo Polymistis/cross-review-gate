@@ -310,7 +310,10 @@ values source. A template and a rendered output may each contain at most
 
 Rendering replaces only the body between a slot's marker lines. Both marker
 lines and every byte outside the slot remain byte-identical. The replacement
-body is the corresponding values body byte-for-byte. Re-rendering the same
+body is the corresponding values body byte-for-byte. In the review prompt,
+that rendered project text cannot make content a change leaves as it was a
+finding (the prompt's "Scope of a finding"), so retained project text that
+asks for such findings has no effect on that content. Re-rendering the same
 inputs therefore produces identical bytes, and rendering an already matching
 output is a content no-op.
 

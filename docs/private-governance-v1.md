@@ -141,6 +141,8 @@ role PLAN.md | Requirements and acceptance
 ```
 
 The example is an editable shape, not a declaration of an actual project.
+A private history document is optional; a project without one omits the
+`private-file History.md` and `role History.md` records.
 `reviewer-policy default` retains compatible Codex/Claude routing with Grok
 disabled. Optional `reviewer-policy grok-fallback` enables the Grok fallback
 reviewer with a central profile (operator ruling 2026-09-23). A project names at
@@ -277,9 +279,11 @@ reinterpret mode as mutation permission.
 
 Both root `AGENTS.md` and `CLAUDE.md` are ordinary locally editable, privately
 tracked files. Each contains the same reviewed discovery section naming the
-stable launcher, `.crg-project/project.conf`, and the selected private plan/history
-paths. That section is supplied and reviewed during attach/configuration changes;
-opening a project does not inject unreviewed text into existing instructions.
+stable launcher, `.crg-project/project.conf`, the selected private plan path and,
+when the project keeps one, the private history path; a project without a history
+document omits that record. That section is supplied and reviewed during
+attach/configuration changes; opening a project does not inject unreviewed text
+into existing instructions.
 
 Initial attachment materializes approved instruction files before activating the
 association. On later `-Open`, only a clean file may advance from the recorded
@@ -597,10 +601,16 @@ The live coordinator and recovery ownership are specified in
 ## Public boundary and migration limits
 
 Public commit validation excludes private paths under the reviewed classification.
-Pre-push checks every outgoing post-attachment commit against recorded private-path
-authority and completed-pair evidence; a direct private commit or stale receipt is
-not sufficient. No private alternates, objects, refs, config, instructions, or
-receipt files are inserted into the public repository for capture or review.
+Pre-push validates the completed-pair history, including each gate result against
+its recorded private-path authority; a direct private commit or stale receipt is
+not sufficient. Outgoing public commits that no receipt in the pushing
+attachment's completed-pair chain records as a changed public result are named,
+not path-checked by the outgoing enumeration, and not refused for lacking such
+a receipt (operator decision
+2026-11-23); the push enumeration's existing bounds still apply to every commit
+(`central-guards-v1.md`), and gate candidates keep their own validation. No private
+alternates, objects, refs, config, instructions, or receipt files are inserted
+into the public repository for capture or review.
 Previously published governance requires a separate explicit history decision.
 This is path/authority enforcement, not a claim to detect arbitrary secret bytes.
 

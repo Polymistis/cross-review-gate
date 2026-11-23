@@ -51,7 +51,7 @@ Shared:
   project-mode, prompt-assembly, diff-identity, git, exhaustion-sidecar,
   commit-baseline, tree-path, commit-log evidence, codex-effort,
   argument-quoting, PATH, replacement-suppression, attribute-neutral Git and
-  fix-on-fix advisory implementation; the deliberate local copies outside it are listed under the
+  name-status path implementation; the deliberate local copies outside it are listed under the
   shared production contracts in criterion 4; both wrappers and the merge
   gate dot-source it so it runs in
   their own script scope, and `scripts/paired-governance.psm1`,
@@ -555,54 +555,22 @@ guard line.
 that contract with the prompt:
 
 - `DIFF.patch`, `STAT.txt`, `NAME-STATUS.txt`, `COMMIT-LOG.txt`,
-  `PLAN-CONSISTENCY.txt`, `FIX-ON-FIX.txt`, `CARRIED-FINDINGS.txt`,
-  `PRIOR-BLOCKERS.txt` — Codex is instructed by the
+  `PLAN-CONSISTENCY.txt`, `PRIOR-BLOCKERS.txt` — Codex is instructed by the
   prompt's scope-doc and/or hazards section to **read** these files.
-  `FIX-ON-FIX.txt` (both wrappers, ordinary path) is advisory git-history
-  evidence written by `Write-FixOnFixEvidence` in `scripts/review-common.ps1`:
-  lines a recent commit added that the change rewrites, removes or inserts
-  code directly below (reported separately), and files changed by several commits
-  in a row, plus the escaped messages of the commits that added the lines,
-  quoted only within the commit-log byte caps (a message can be missing).
-  Its rules are in the comment above `Get-FixOnFixAdvisory`: attribution is
-  limited to a fixed window of recent commits by commit identity, never by
-  date, and only commits blame actually walks are credited; a shallow clone
-  reports `unavailable`, and every later Git read, message capture included,
-  pins the shallow file to the empty device; a file name is used only when Git can be given exactly that name
-  (otherwise it is reported as not checked), and every name in an entry is
-  escaped onto one line; every Git call, message capture included, goes
-  through `Read-CrgGitBytes` (byte-limited, command line budgeted); the
-  repository settings overridden are path quoting, signature display and
-  pathspec magic for every history query (message capture keeps
-  `Build-CommitLogEvidence`'s own options), text conversion,
-  ignored revisions and the diff algorithm for blame, and rename,
-  submodule and relative-path handling for the per-commit path checks. When it finds entries, the
-  same function returns them for a `FIX-ON-FIX ADVISORY` section at the end
-  of the scope text, because a reviewer that opens only `DIFF.patch` would
-  otherwise never see them. The prompt's change-propagation duty 4 says how
-  to use it; an entry, an `unavailable`
-  state, a `not-applicable` state and a missing `FIX-ON-FIX.txt` are never
-  findings by themselves, and a Git failure while producing it must never
-  abort the review.
-  `CARRIED-FINDINGS.txt` (both wrappers, ordinary path) is written by
-  `Write-CarriedFindingsEvidence`: open QUALITY and NOTE findings that
-  earlier passing reviews raised against a path in this change, taken from
-  their findings files, which store the text already quoted in the
-  `COMMIT-LOG.txt` escaping, within 8 KiB per finding and 64 KiB in total (a finding over
-  either limit is named on a `NOT CARRIED` line, never cut). The same
-  function returns a `CARRIED FINDINGS` section for the scope text. The
-  prompt's change-propagation duty 5 says how to use it; the rules
-  (findings files, retirement, TASKS.md tasks and the PASS-line coverage
-  wording) are in `docs/review-feedback-v1.md`. A carried finding, a
-  `NOT CARRIED` line and a missing file are never findings by themselves.
+  `CARRIED-FINDINGS.txt` and `FIX-ON-FIX.txt` were removed (2026-11-23):
+  a passing review's findings are not shown to any later review, and
+  content a change leaves as it was is never the subject of a finding
+  (`docs/review-feedback-v1.md` section 2); do not add them back.
   `PRIOR-BLOCKERS.txt` (both wrappers, staged reviews only) is written by
   `Write-ReviewRetryEvidence` on a retry of a change that earlier staged
-  reviews blocked: those reviews' BLOCKER findings and the author's
+  reviews blocked (keyed by working tree and HEAD, so another change staged
+  on that HEAD in that working tree is shown them too; section 5 of
+  `docs/review-feedback-v1.md`): those reviews' BLOCKER findings and the author's
   remediation record, quoted the same way, with a `PRIOR BLOCKERS` section
   for the scope text. A retry whose record does not cover each prior
   BLOCKER it is asked to cover (bounded as section 5 states) is refused
   before any reviewer runs. The prompt's
-  change-propagation duty 6 says how to use it; the rules are in section 5
+  change-propagation duty 4 says how to use it; the rules are in section 5
   of `docs/review-feedback-v1.md`. A prior BLOCKER, the record, a
   `NOT SHOWN` line and a missing file are never findings by themselves.
 - `SCOPE.txt` — wrapper-produced, but the wrapper also **injects** the
@@ -621,11 +589,15 @@ byte-zero with exactly one `PLAN-CONSISTENCY-STATE: v1 <state>` line, using only
 When the consistency check is enabled (`CROSS_REVIEW_CONSISTENCY_DOC` set), the
 Project-hazards section should instruct the reviewer to read the file first and
 apply one severity mapping: a `PLAN-CONSISTENCY-FINDING:` row in a well-formed
-`produced` envelope is `QUALITY:` under `PLAN-DRIFT`; either valid skip state is
+`produced` envelope is `QUALITY:` under `PLAN-DRIFT` when the change adds or
+causes the drift it names, and context otherwise; either valid skip state is
 a non-finding; and, when the configured document is in the reviewed diff, an
 `indeterminate` state or absent, unreadable, malformed, or unterminated
 evidence is a fail-closed `BLOCKER:` under `SILENT-FAILURE`.
 Independent planning defects retain any BLOCKER severity assigned elsewhere.
+This project-supplied hazard text cannot make content the change leaves as
+it was a finding (the prompt's "Scope of a finding"), so a retained hazard
+that asks for such findings has no effect on that content.
 
 **Drift signals:**
 - A wrapper-produced evidence file in the prompt-reads-it set is not
