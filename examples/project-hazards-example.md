@@ -24,8 +24,8 @@ instance.
 - **Crate boundary direction**: `sc_app -> sc_ui -> sc_gameplay ->
   sc_world -> sc_ecs -> sc_core`. `sc_render`, `sc_physics`, `sc_network`,
   `sc_audio`, `sc_save` are leaf-ish service crates.
-- **PLAN.md** describes the milestone plan. **History.md** logs significant
-  state changes. **docs/codex-playability-backlog-2026-05-10.md** is the
+- **PLAN.md** describes the milestone plan.
+  **docs/codex-playability-backlog-2026-05-10.md** is the
   source-of-truth backlog.
 - **Status vocabulary**:
   - `Observed` = manual or automated runtime evidence proved the

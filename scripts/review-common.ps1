@@ -192,7 +192,7 @@ function Get-ReviewLogsFolder {
 # working tree. That layout is detected (the `.git/modules/` segment) and the
 # working-tree TOP-LEVEL (`git rev-parse --show-toplevel`) is used instead, so
 # verdicts land in the submodule's own `logs/` where its trend/dispatch scans
-# look. bootstrap.ps1 accepts submodule installs, so this path is reachable.
+# look. A gate can run inside a submodule, so this path is reachable.
 #
 # Returns $null when git cannot resolve a common dir so the caller falls back
 # to the cwd-relative default.
@@ -668,7 +668,7 @@ function Get-CrgSha256HexBytes {
 
 # Whether a cited path names a record or document rather than product code
 # or configuration: its extension is a prose one. The project records
-# (History.md, TASKS.md, PLAN.md) are Markdown, so the extension test covers
+# (TASKS.md, PLAN.md) are Markdown, so the extension test covers
 # them without a list of names. Pure.
 function Test-ReviewRecordCitationPath {
   param([string]$Path)
@@ -1375,7 +1375,7 @@ function Read-ReviewFindingsFile {
 # Findings files are never deleted by the gate. An expiry that deleted
 # them through the held handle was built here and removed (review,
 # 2026-10-09): the gate never deletes findings files or the review logs in
-# the logs folder; old ones are deleted by hand (INSTALL.md). Do not
+# the logs folder; old ones are deleted by hand (docs/review-feedback-v1.md). Do not
 # reintroduce deletion here.
 # The blocked-round scan ignores files older than its window.
 
@@ -3358,7 +3358,8 @@ function Join-ReviewPromptAssembly {
   return "${TitleBlock}${ScopeDoc}`n`n---`n`n${ProjectModeBlock}`n`n${PromptTemplate}"
 }
 
-# Strip only the exact metadata line bootstrap.ps1 can produce. This is a
+# Strip only the exact provenance line a per-project installation carries in its
+# installed prompt. This is a
 # producer-owned grammar, not a "looks similar" sanitizer: a loose v\S+ match
 # can delete project-authored first-line prompt content. SemVer, source identity,
 # fixed wording, closed HTML comment, position, and LF/CRLF termination all must

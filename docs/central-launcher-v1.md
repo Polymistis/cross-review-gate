@@ -15,8 +15,8 @@ Central-only source payloads:
 - `scripts/central-context.psm1`: release-local operation entry and paired capture.
 - `scripts/private-governance.psm1`: validated attachment/configuration byte parsers.
 
-Append these files only to the central source inventory. The legacy
-`Get-CrgCurrentFileList` and ordinary TRACKED/LOCAL installers stay unchanged.
+Append these files only to the central source inventory; `Get-CrgCurrentFileList`
+stays unchanged.
 
 ```text
 bootstrap.ps1 -InstallRuntimeLauncher -RuntimeStore <absolute-directory>

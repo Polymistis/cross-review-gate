@@ -240,7 +240,7 @@ and these operator documents from the source commit's `docs/`:
 `central-deployment-v1.md`, `central-guards-v1.md`,
 `central-instructions-v1.md`, `central-launcher-v1.md`,
 `central-publication-v1.md`, `central-runtime-v1.md`,
-`first-attachment-v1.md`, `install-values-v1.md`, `local-install-v1.md`,
+`first-attachment-v1.md`, `install-values-v1.md`,
 `paired-git-capture-v1.md`, `paired-git-operation-v1.md`,
 `paired-retention-v1.md`, `paired-review-input-v1.md`,
 `private-governance-v1.md`, `project-mode-doctrine-v1.md`,
@@ -375,8 +375,8 @@ attached project retires all of them. Nothing is retired before Attach
 completes, and ignored project data that is not gate payload stays. Linked
 worktrees share one common directory, so retirement follows ownership:
 
-- Tracked legacy gate files (the current and historical per-project installer
-  inventories beside `Get-CrgCurrentFileList` in `bootstrap.ps1`), the
+- Tracked legacy gate files (`Get-CrgCurrentFileList` in `bootstrap.ps1`, and
+  the historical per-project inventories beside it in `b8d2162:bootstrap.ps1`), the
   `.gitattributes` rules that exist only for them, and the legacy gate sections
   of the root instruction files leave through an ordinary reviewed Commit;
   Attach migrates only private-owned paths and refuses staged changes to public

@@ -300,7 +300,7 @@ opening citation names (`Get-NonBlockingFindingGroups`), in this order:
    path, and a finding without a valid opening citation;
 2. `QUALITY:` findings citing records or documentation: a path ending in
    `.md`, `.markdown`, `.txt`, `.rst` or `.adoc` in any letter case, which
-   covers `History.md`, `TASKS.md` and `PLAN.md`
+   covers `TASKS.md` and `PLAN.md`
    (`Test-ReviewRecordCitationPath`);
 3. `NOTE:` findings.
 

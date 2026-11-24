@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.8.1** (Windows / PowerShell) — the authoritative value is the
+**Version 2.9.0** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.7 supplies a read-only central launcher and an installation-managed
@@ -23,9 +23,8 @@ global wording. Version 2.4.3 fixes Stage, Open and Commit refusals when the
 gate starts from a project subfolder. Version 2.4.4 runs Grok reviews like
 Codex and Claude reviews: no turn cap or one-hour deadline, and the same
 warn-only stall heartbeat, now one shared `scripts/review-liveness.psm1`
-module that trusted review copies carry beside the wrappers. Per-project
-installs gain that module; a LOCAL install must ignore it like the other gate
-files. Portable archives now ship an explicit operator document list.
+module that trusted review copies carry beside the wrappers. Portable archives
+now ship an explicit operator document list.
 
 Version 2.5 keeps the code unit-test ban as the default and lets a centrally
 attached project loosen it through reviewed `unit-tests` records in
@@ -164,9 +163,9 @@ separate private governance history. One central activation upgrades all attache
 projects. Software and local LLM work remain subject to mandatory combined review;
 private instructions, plans and review records stay outside public software history.
 The Grok fallback reviewer supports API keys or an existing Grok Build CLI login
-and is enabled by reviewed project configuration. Existing per-project
-TRACKED/LOCAL installations remain available; central deployment is documented in
-[INSTALL.md](INSTALL.md) and [central deployment](docs/central-deployment-v1.md).
+and is enabled by reviewed project configuration. Central deployment is
+documented in [INSTALL.md](INSTALL.md) and
+[central deployment](docs/central-deployment-v1.md).
 
 A git pre-commit / pre-merge gate that runs **two independent AI agents
 in cross-review**: when one agent authors a commit, the OTHER reviews
@@ -197,11 +196,12 @@ cannot be looked up, the review runs without them and says so
 This package contains the Codex and Claude backend wrappers, the optional
 central Grok fallback reviewer adapter, the shared review
 prompt template, the pre-commit hook with backend routing, commit
-wrappers that handle the cross-review env-var convention, a backend-neutral
-project-value renderer, a trend analyzer, an author-side mechanical pre-pass
+wrappers that handle the cross-review env-var convention, a trend analyzer,
+an author-side mechanical pre-pass
 linter, a recurrence-ranked dispatch checklist generator, an audit protocol
-for the review surface itself, and a bootstrap script that drops the whole
-thing into a new git repo.
+for the review surface itself, and a bootstrap script that publishes releases
+into a central runtime store, installs the store's launcher and activates a
+release.
 
 ## Why
 
@@ -308,12 +308,6 @@ can be slotted in as a backend.
   the change governs that review, so the candidate never selects the rules
   used to judge itself. A malformed governing declaration produces a loud
   warning and `shipped` fallback rather than blocking project work.
-  Clones upgrading from a pre-redesign per-clone dispatcher must run
-  `bootstrap.ps1 -TargetRepo . -DispatcherOnly`; tracked-file updates cannot
-  remove retired project-mode enforcement from `.git/hooks/pre-commit`.
-  When trusted `HEAD` also contains the retired enforcement, dispatcher refresh
-  alone is not the package upgrade; follow INSTALL's bounded
-  kernel-and-completion TRACKED-upgrade procedure.
   Completion is argued with
   the evidence contract (date + command + observed output + named
   revision per citation; build output, captured ordinary operation, and
@@ -330,10 +324,10 @@ can be slotted in as a backend.
 
 - Windows + Windows PowerShell 5.1 (`powershell.exe`).
   The wrappers are PowerShell; porting to bash is not in this package.
-- Git 2.41 or later — bootstrap's identity-bound attribute proof requires
-  both `check-attr --source` and the global `--attr-source` option on
+- Git 2.41 or later — bootstrap's source-publication provenance proof requires
+  the global `--attr-source=<tree>` option on `check-attr` and on
   `hash-object --path --stdin`. Bootstrap runs behavioral probes for both
-  forms and refuses before target mutation when either capability is absent.
+  commands and refuses publication when either capability is absent.
   The wrappers also pin `--no-relative` on every project-mode evidence diff
   (available since Git 2.28)
 - complete, unshallowed repository history for `-Scope Commit`,
@@ -357,172 +351,51 @@ can be slotted in as a backend.
   single-backend installs work); the audit protocol references both
   backends' wrappers and the shared prompt template
 
-## Quick install
+## Install
 
-From the root of your git repo:
+Installation uses the central runtime launcher. [INSTALL.md](INSTALL.md)
+summarises the steps and [central deployment](docs/central-deployment-v1.md)
+is the procedure: an operator publishes or imports an approved release into a
+machine-local runtime store with `bootstrap.ps1`, installs the store's stable
+launcher once, activates the release, and attaches each project with the
+launcher's `-Attach`. Later compatible upgrades activate a new release
+centrally, with no per-project step.
 
-```powershell
-# 1. Extract the zip somewhere (e.g., a tools/ dir)
-Expand-Archive -Path cross-review-gate-X.Y.Z.zip -DestinationPath tools/
+Per-project installation (hook mode) is retired. The gate's own source
+repository keeps its installed hook files until that repository is attached to
+the launcher.
 
-# 2. Create CROSS-REVIEW-VALUES.md at the target root using the v1 grammar in
-#    INSTALL.md Step 2 and fill all three blocks with actual project content.
-#    TRACKED shape: git add -- CROSS-REVIEW-VALUES.md
-#    LOCAL shape: ignore that file and every incoming gate destination first.
+## What a project prepares before Attach
 
-# 3. Run the bootstrap script targeting your repo root
-powershell -NoProfile -ExecutionPolicy Bypass -File tools/cross-review-gate/bootstrap.ps1 -TargetRepo .
+The formats and the procedure are in "Prepare the first project attachment" of
+`docs/central-deployment-v1.md`.
 
-# 4. The bootstrap will:
-#    - Copy scripts/{codex,claude,git-hooks}/, scripts/run-gate.sh, and
-#      scripts/render-project-values.ps1 into your repo
-#    - Copy docs/audit-protocol.md and the rendered docs/AGENTS.md.template
-#      into your repo's docs/
-#    - Render project context, hazards, and SCOPED authority inline from the
-#      retained target-root values source before any destination mutation
-#      (package self-install checks matching stock slots without rewriting)
-#    - Ignore the gate's generated artifacts: `logs/` is appended to
-#      your repo's root .gitignore -- or to the git common dir's
-#      info/exclude instead when the gate hook path is already ignored
-#      (the LOCAL shape below leaves project files untouched). Each
-#      append is idempotent; the append is skipped only when one of
-#      the literal forms `logs/`, `/logs/`, `logs`, or `/logs` is
-#      already present -- a glob like `logs/**` still gets the
-#      explicit `logs/` added
-#    - Append the required named checkout rules for the sh-parsed gate surfaces
-#      and TRACKED render inputs/outputs to your
-#      repo's root .gitattributes -- through a handle-pinned write on
-#      a validated regular single-link file, never through a symlink
-#      -- and verify the EFFECTIVE conversion contract by behavior
-#      (CRLF probe bytes normalize to LF on checkin, an LF blob
-#      checks out as LF under core.autocrlf=true, and check-attr
-#      --all lists no filter/working-tree-encoding attribute; eol
-#      alone is defeated by a later -text or filter rule), resolved in
-#      an isolated context of the repo's own attribute files under an
-#      allowlisted environment (an ambient info/attributes or global
-#      rule, or environment-carried git configuration, cannot mask
-#      a violation a fresh clone would suffer); without
-#      the rules a core.autocrlf=true checkout rewrites the entry
-#      point to CRLF and sh fails parsing it. The values source, review prompt,
-#      and AGENTS merge template additionally require strict UTF-8/LF bytes
-#      with filter, ident, and working-tree encoding disabled. Each path is
-#      classified independently (hybrid layouts: an ignored
-#      local-shape path gets no rule, a tracked one always gets
-#      its rule), and the audited skip refuses any unreviewed
-#      landing whose staged attribute state breaks the contract
-#    - Install a per-clone dispatcher at .git/hooks/pre-commit
-#      (closes the `git rm gate` bypass that a versioned core.hooksPath
-#      install would leave open)
-#    - Record an install manifest (per-file SHA-256) and package-version
-#      record in the repo's PER-WORKTREE git dir (each linked worktree
-#      seals its own baseline). A copied install also stamps package
-#      version/source provenance into each installed file; a self-install
-#      deliberately leaves the package's tracked source bytes unstamped
-#      while still publishing the manifest and version record
-#    - On a version upgrade, compare tracked files with trusted HEAD first
-#      and use the manifest only after HEAD positively proves the path
-#      absent. Refuse to overwrite a local edit, back up EVERY
-#      pre-existing file before replacement, and report every replaced
-#      upgrade file. A same-version -Force refresh still backs up every
-#      replacement and reports baseline or late-copy divergence
-#    - Print a checklist of remaining setup steps you must do manually
-```
+1. **`.crg-project/project.conf`** — reviewer policy, the optional
+   consistency document, private paths and document roles.
+2. **Project values in root `CROSS-REVIEW-VALUES.md`** — actual
+   `project-context`, `project-hazards`, and `scoped-authority` bodies in the
+   three-block grammar of `docs/install-values-v1.md`. Hazard examples use
+   SYMBOL ANCHORS (the function / type / system name), not bare
+   `file.ext:NNN` line numbers.
+3. **The central discovery section** in both `AGENTS.md` and `CLAUDE.md`.
+4. **The private plan** the discovery section names (`PLAN.md` by default),
+   with a `role` record in the configuration.
+5. **`PROJECT-MODE.md`** — the project's mode declaration, prepared as that
+   section describes.
 
-See `INSTALL.md` for the detailed install + customization flow.
-
-**Install shapes.** The default (preferred) shape TRACKS the gate files
-in your repo — the checklist's bootstrap commit puts them in HEAD, which
-is the gate's trusted baseline. A project whose scope cannot admit
-tooling into its history can instead run the LOCAL shape: leave the gate
-files untracked and deliberately ignored (list the gate paths in
-the repository's `info/exclude` — resolve it with
-`git rev-parse --git-path info/exclude`; `.git/info/exclude` in a
-plain checkout — BEFORE running bootstrap, which then also routes
-the `logs/` rule there instead of touching the tracked `.gitignore`),
-and the trust chain verifies them against the install manifest instead
-of HEAD (bootstrap also records a local-shape authorization marker
-beside the manifest, listing exactly the components it observed
-untracked and ignored and epoch-bound to that manifest — the manifest
-alone never admits local authority, so a commit that merely untracks
-and ignores the gate files buys a refusal, not a shape change; the
-hook additionally refuses any staged untracking of a gate component
-without the operator's CROSS_REVIEW_ALLOW_GATE_UNTRACK=1 sanction).
-`CROSS-REVIEW-VALUES.md` follows the same selected authority family but remains
-project-owned and outside the install manifest. Project context is changed in
-that source, never by hand-editing the installed prompt or merge template. A
-TRACKED source update is staged before rendering; an existing TRACKED install
-can run `scripts/render-project-values.ps1 -TargetRepo <root>`, while install
-and upgrade use package `bootstrap.ps1 -TargetRepo <root> -Force`. A LOCAL
-source update uses full package bootstrap because standalone Apply never
-changes executable LOCAL gate bytes. `-SealManifest` is reserved for the
-bounded legacy/current LOCAL recovery cases in `docs/install-values-v1.md`, not
-routine customization. An unrecognized local gate edit is preserved and
-refused until the applicable recovery sequence establishes a trusted baseline.
-The
-advisory author-lint pre-pass is the exception: an unverifiable local
-copy skips fail-open with a WARN, and the review gate itself still
-runs.
-`docs/local-install-v1.md` defines the shape; nothing else in the
-setup differs.
-
-## What you MUST configure before relying on the gate
-
-1. **Project values in root `CROSS-REVIEW-VALUES.md`** — create the v1
-   source before bootstrap and supply actual `project-context`,
-   `project-hazards`, and `scoped-authority` bodies. Bootstrap validates the
-   retained source and renders all three bodies inline into the installed
-   prompt, and the `scoped-authority` body into the AGENTS merge template,
-   before any destination mutation. No review process
-   reads the values file at runtime. Hazard examples use SYMBOL ANCHORS (the
-   function / type / system name), not bare `file.ext:NNN` line numbers. Use
-   the exact no-authority sentinel when SCOPED capture is intentionally
-   dormant. `INSTALL.md` Step 2 and `docs/install-values-v1.md` define the
-   grammar, authority, update, and recovery rules.
-2. **Agent-instruction file merge** — `docs/AGENTS.md.template`
-   contains the role / convergence-loop / operational sections. The
-   two backends auto-discover different files: **Codex CLI** auto-loads
-   `AGENTS.md` from the working root + ancestors; **Claude Code CLI**
-   does NOT auto-load `AGENTS.md` — it auto-loads `CLAUDE.md` (project
-   + walk-up) and `~/.claude/CLAUDE.md` (user-global). So merge the
-   template sections into BOTH `AGENTS.md` AND `CLAUDE.md` if you
-   want both backends to see the contract as authoritative
-   instructions, or rely on a pre-existing user-global CLAUDE.md to
-   cover the Claude side. INSTALL.md Step 4 has the full guidance.
-3. **`~/.codex/config.toml`** (Codex backend only) — see INSTALL.md
-   for the minimum config; sandbox + approval are passed per-
-   invocation by the wrapper, so global config stays unmolested.
-4. **Claude auth** (Claude backend only) — interactive `claude` login
-   once on the machine is enough; the wrapper picks up credentials
-   via keychain. See INSTALL.md for the API-key fallback path if
-   keychain isn't an option.
-
-### Optional
-
-- **Consistency-doc precompute** — set `$env:CROSS_REVIEW_CONSISTENCY_DOC`
-  to the repo-relative path of a planning/spec doc (e.g. `PLAN.md`) to
-  enable the milestone cross-reference / range / missing-field precheck on
-  that doc. Default OFF: a fresh install runs no special-casing. When set,
-  the codex wrapper writes a `PLAN-CONSISTENCY.txt` report, the merge gate
-  refuses `-Backend claude` for branches that touch the doc (naming
-  `-Backend codex` as the remedy), and the Claude wrapper fails closed
-  (routes such edits to the Codex backend, which has the precompute). The value is trimmed + canonicalized to git path
-  form; a SET-but-invalid value — empty/whitespace-only, absolute, a `..`
-  escape, a path containing an internal control character, DEL, or a double
-  quote (spellings Git would C-quote), OR a path that does not resolve to a
-  tracked FILE (a git blob) in the reviewed tree (a typo, a directory, or any
-  non-blob object) — FAILS CLOSED
-  (the wrappers exit 3 / the merge aborts) rather than silently disabling the
-  gate — only an UNSET variable means "off". See INSTALL.md for details.
+The machine also needs its reviewer CLIs configured: `~/.codex/config.toml`
+for the Codex reviewer and an interactive `claude` login for the Claude
+reviewer (INSTALL.md).
 
 ## Layout
 
 ```
 cross-review-gate/
 ├── README.md              (this file)
-├── INSTALL.md             (detailed setup)
+├── INSTALL.md             (installation summary)
 ├── VERSION                (authoritative package version consumed by bootstrap)
-├── bootstrap.ps1          (copies files into a target repo; self-install aware)
-├── .gitignore             (ignores the gate's generated logs/ tree; bootstrap creates this in a target repo, and it is present here so this package self-gates)
+├── bootstrap.ps1          (central runtime publication, launcher installation and activation)
+├── .gitignore             (ignores the gate's generated logs/ tree)
 ├── .gitattributes         (named checkout contracts for sh and rendered-value surfaces)
 ├── scripts/
 │   ├── codex/
@@ -536,9 +409,8 @@ cross-review-gate/
 │   │   ├── author-lint.ps1            (author-side mechanical pre-pass linter)
 │   │   ├── dispatch-checklist.ps1     (recurrence-ranked dispatch checklist from verdict logs)
 │   │   └── worker-audit.ps1           (per-landing process audit over the verdict logs;
-│   │                                   auto-merge runs a TRUSTED copy after a merge --
-│   │                                   the base's, else the manifest-verified local
-│   │                                   snapshot -- non-gating; skipped with a note when
+│   │                                   auto-merge runs a TRUSTED copy after a merge,
+│   │                                   non-gating; skipped with a note when
 │   │                                   no trusted source holds it or the central
 │   │                                   review-log dirs do not resolve)
 │   ├── claude/
@@ -546,7 +418,6 @@ cross-review-gate/
 │   │   └── commit.ps1                 (the one commit wrapper; Claude implementer when run directly)
 │   ├── git-hooks/
 │   │   └── pre-commit                 (REVIEW_BACKEND-routed pre-commit hook)
-│   ├── render-project-values.ps1      (backend-neutral values renderer/checker)
 │   └── run-gate.sh                    (stable gate-firing entry point: worktree,
 │                                       message file, reviewer backend, pass count
 │                                       (codex-side) as arguments; refuses to commit
@@ -560,13 +431,12 @@ cross-review-gate/
 │                                       configured -- classified by git's exit
 │                                       status, so a set-but-empty value counts --
 │                                       or when the dispatcher is absent, disarmed,
-│                                       or fails its bootstrap-recorded digest
-│                                       attestation)
+│                                       or fails its digest attestation)
 ├── docs/
 │   ├── audit-protocol.md              (periodic review-surface audit)
 │   ├── AGENTS.md.template             (rendered merge source for AGENTS.md/CLAUDE.md)
 │   └── ...                            (additional product contracts and design
-│                                       documents, not installed and not exhaustively
+│                                       documents, not exhaustively
 │                                       listed here)
 └── examples/
     └── project-hazards-example.md     (sample hazards section from a real project)
@@ -584,6 +454,6 @@ the **Before redistributing this package** checklist in
 case/separator variants before shipping.
 
 Sub-features documented in `docs/audit-protocol.md` reference some
-project-specific paths (PLAN.md, History.md) as illustrative
+project-specific paths (such as PLAN.md) as illustrative
 examples; the audit protocol is the section most likely to need
 adaptation to your project's actual documentation structure.

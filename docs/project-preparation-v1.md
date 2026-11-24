@@ -96,8 +96,7 @@ Candidate mode diagnostics remain evidence and do not select governing rules.
 
 ## Deterministic values and document roles
 
-The compiler contains the renderer's marked byte-only values core as source.
-Marked copies must remain byte-identical by source inspection. Code unit-test
+The compiler contains the marked byte-only values core as source. Code unit-test
 authoring/execution is banned by operator decision; live testing, manual checks,
 ordinary program runs, and functional validation remain permitted.
 The accepted PowerShell compatibility repair lands alongside this compiler:

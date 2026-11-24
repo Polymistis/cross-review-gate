@@ -626,8 +626,7 @@ receipts separately from software; remote selection and credentials remain expli
 
 New attached shape only: private-blob preparation and reviewed root instruction
 materialization replace the fixed-root indexed-values/public-mode-authority rules
-only for this shape. Released TRACKED/LOCAL manifests, LOCAL authorization,
-standalone rendering/recovery and declaration rules remain unchanged. Routine
+only for this shape. Routine
 central upgrades continue to accept config schema 1 with launcher ABI 2 without
 project edits; the preceding ABI 1 loader requires one explicit store-wide upgrade.
 

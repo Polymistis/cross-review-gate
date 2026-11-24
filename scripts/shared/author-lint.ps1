@@ -54,22 +54,6 @@
                    is NOT enough, so an authored doc cannot self-exempt
                    (Test-IsGeneratedContent). The full-tree audit surfaces all real
                    bare anchors, including any pre-existing debt elsewhere in the doc tree.
-      SELF-NARR    narration of the PENDING change's OWN landing -- the deictic
-                   "this/here + landing-event" form (Get-SelfNarrationFindings):
-                   "this merge" / "this landing", "as of this entry" /
-                   "add(s|ing) this entry", and "landed ... here" (a deictic
-                   "here" within a short word window of "landed"). ERROR when the
-                   doc is History.md (the retrospective landing log, where a
-                   not-yet-landed self-reference is a factual defect -- the merge
-                   SHA is unknowable while the entry rides the branch); ADVISORY in
-                   any other narrative doc. CALIBRATED so the ERROR tier fires only
-                   on genuine self-narration: retrospective prose about an
-                   already-landed merge ("the merge landed at <sha>", "merged
-                   cleanly") has no this/here pointer and stays clean, and a bare
-                   "this entry" is NOT matched (legitimate timestamping like "at
-                   the time of this entry" would false-positive). History.md is the
-                   package's illustrative landing-log convention; a consumer without
-                   one simply never trips the ERROR tier (all forms stay advisory).
       LOCAL-PROOF  a proof/verification CLAIM co-located with a LOCAL-ONLY evidence
                    reference (Get-LocalEvidenceFindings). ERROR only in the TIGHT
                    form -- a word-bounded proof word (prove/proves/proved/proven/
@@ -101,20 +85,14 @@
                    with none the MAGNITUDE digit-first form already reports the
                    occurrence, and past two the noun is out of reach.
                    The VERB-GATED shapes with a DIGIT cardinal are ERROR in .md prose,
-                   the mapping the Self-Sweep's error-tier list documents -- EXCEPT a
-                   count inside a DATED entry body of the ROOT History.md log, which is
-                   SKIPPED (a dated entry is a static, append-only snapshot whose
-                   counts cannot drift). A SPELLED cardinal and the `names` verb are
+                   the mapping the Self-Sweep's error-tier list documents. A SPELLED
+                   cardinal and the `names` verb are
                    ADVISORY, as is the determiner-gated shape above: the pre-pass may
                    not be STRICTER than the gate it front-runs, and the reviewer
                    contract scores an exact-count-in-prose QUALITY, so a class the gate
                    declines to block must not abort a commit. (Re-tiering the documented
                    digit shapes to match is an OPERATOR decision, not a linter change.)
-                   The History exemption is CALLER-applied by
-                   Invoke-FileChecks and narrow on TWO axes -- root-path (NOT a
-                   nested History.md) + a dated-entry-body mask (the preamble and
-                   undated `## ` sections stay in class) -- not inside this detector
-                   (2026-07-09 operator decision). A CARDINAL-LEADING match at the
+                   A CARDINAL-LEADING match at the
                    START OF THE LINE'S TEXT -- column zero, or preceded only by
                    whitespace and the Markdown marks that open a line -- is ADVISORY
                    rather than ERROR: a hard wrap can leave a comparative bound
@@ -284,12 +262,17 @@
                    digit-first spelled branch additionally needs WHITESPACE before a
                    PLURAL noun, so a compound-adjective NAME ("two-stream design")
                    and a verb ("all four pass") stay clean. Advisory: some counts are
-                   load-bearing; the author judges. EXEMPT (like INVENTORY) for a
-                   count inside a DATED entry body of the ROOT History.md log: a
-                   dated entry is a static append-only snapshot, so the caller
-                   Invoke-FileChecks DROPS both count classes on those lines
-                   (root-path + dated-entry-body mask; the preamble, undated
-                   sections, and nested History.md stay in class). (2026-07-09.)
+                   load-bearing; the author judges.
+      SELF-NARR    narration of the PENDING change's OWN landing -- the deictic
+                   "this/here + landing-event" form (Get-SelfNarrationFindings):
+                   "this merge" / "this landing", "as of this entry" /
+                   "add(s|ing) this entry", and "landed ... here" (a deictic
+                   "here" within a short word window of "landed").
+                   CALIBRATED to genuine self-narration: retrospective prose about an
+                   already-landed merge ("the merge landed at <sha>", "merged
+                   cleanly") has no this/here pointer and stays clean, and a bare
+                   "this entry" is NOT matched (legitimate timestamping like "at
+                   the time of this entry" would false-positive).
       LOCAL-PROOF  (advisory forms; the ERROR tight form is above) a proof word
                    with a BARE local marker gitignored | local-only | untracked,
                    OR the loose "operator-side"/"local" + "evidence". These are
@@ -1208,10 +1191,6 @@ function Get-MagnitudeFindings {
   # fractions never shed a prefix -- see the detailed note below); $rxUnitFirst
   # uses `(?<![\w-])` (it guards the unit WORD); $rxTook needs none (the literal
   # `took ` anchor is the guard).
-  # This detector is doc-agnostic; the History.md count-drift exemption (a dated
-  # entry is a static snapshot whose counts cannot drift) is CALLER-applied by
-  # Invoke-FileChecks, which DROPS findings on lines inside a dated entry body of the
-  # ROOT History.md log. Every other line and doc is scanned normally.
   param([object[]]$Records)
   $out = @()
   if (-not $Records) { return $out }
@@ -1381,18 +1360,13 @@ function Get-MagnitudeFindings {
 
 function Get-SelfNarrationFindings {
   # Narration of the PENDING change's OWN landing -- the deictic "this/here" +
-  # a landing-event noun (merge/landing/entry) form. ERROR when the doc is
-  # History.md ($IsHistoryDoc), ADVISORY in any other narrative doc: History
-  # entries are retrospective records of what ALREADY landed, so an entry that
-  # narrates its own not-yet-landed merge is a factual defect (the merge SHA is
-  # not knowable while the entry rides the branch through the gate); elsewhere
-  # the same phrasing is a softer smell, so it only advises.
+  # a landing-event noun (merge/landing/entry) form. ADVISORY.
   #
   # The signature is the DEICTIC pointer at the current change, NOT the bare
   # word "merge"/"landed" -- legitimate RETROSPECTIVE prose about an
   # already-landed merge ("the merge landed at <sha>", "the batch merged
   # cleanly") carries no "this/here" pointer and must stay clean. The phrase set
-  # is kept NARROW so the ERROR tier aims at self-narration; a match is not
+  # is kept NARROW to aim at self-narration; a match is not
   # proof of it (retrospective prose quoting an earlier report's "this merge"
   # matches as well):
   #   - "this merge" / "this landing"  -- deictic + landing EVENT (covers
@@ -1402,21 +1376,17 @@ function Get-SelfNarrationFindings {
   #     entry-deixis forms (a state-as-of-the-entry claim; a commit narrating
   #     that it adds the entry). Deliberately NARROW: a bare "this entry" is NOT
   #     matched, because legitimate timestamping ("at the time of this entry")
-  #     uses it and would false-positive at ERROR tier.
+  #     uses it and would false-positive.
   #   - "landed ... here" -- the deictic "here" (this doc/point) within a short
   #     word window of "landed" (covers "landed here" and "landed through the
   #     gate here"). Word-bounded window (<=6 words) so it cannot cross a clause.
   # Lower-precision self-narration (a bare "this entry rides ...", "recordable
-  # here") is left to the AI gate on purpose -- under-flagging a borderline form
-  # beats an ERROR false positive that blocks a legitimate commit (the same
-  # calibration doctrine the LINE-ANCHOR tier note records).
+  # here") is left to the AI gate on purpose.
   param(
-    [object[]]$Records,
-    [bool]$IsHistoryDoc
+    [object[]]$Records
   )
   $out = @()
   if (-not $Records) { return $out }
-  $tier = if ($IsHistoryDoc) { 'ERROR' } else { 'ADVISORY' }
   $texts = @($Records | ForEach-Object { [string]$_.Text })
   $fenced = Get-FencedLineFlags -Lines $texts
   $patterns = @(
@@ -1438,7 +1408,7 @@ function Get-SelfNarrationFindings {
     foreach ($h in $hits) {
       $out += @{
         Class = 'SELF-NARR'
-        Tier  = $tier
+        Tier  = 'ADVISORY'
         Line  = [int]$Records[$i].Line
         Match = ($h -replace '\s+', ' ').Trim()
         Hint  = 'do not narrate the pending change''s own landing; state already-landed facts (a merge SHA is unknowable while the entry rides the branch)'
@@ -1607,7 +1577,7 @@ function Get-InventoryAssertionFindings {
   # A further, DETERMINER-gated shape carries its own (ADVISORY) tier:
   #   4. "(the|these|those) <spelled-N> <modifiers> <plural count-noun>"
   # The VERB-GATED shapes are ERROR-tier (calibrated: the full-tree .md run surfaces only
-  # genuine inventory claims -- true-positive debt, like LINE-ANCHOR/SELF-NARR --
+  # genuine inventory claims -- true-positive debt, like LINE-ANCHOR --
   # not legitimate prose, because the digit lookbehind excludes
   # identifier/version/date/SHA digits). NO frozen-snapshot downgrade: the
   # marker exemption is scoped to LINE ANCHORS (the symbol-anchor rule), so an
@@ -1628,12 +1598,7 @@ function Get-InventoryAssertionFindings {
   #     with backtick delimiters removed, exempting only a match wholly inside a
   #     single span). Fenced blocks are skipped as elsewhere.
   # (The source-comment code-echo exemption is applied by the caller
-  # Get-StagedSourceFindings, which alone knows the nearby code lines. The
-  # History.md count-drift exemption is likewise CALLER-applied by
-  # Invoke-FileChecks -- which alone knows the doc identity + line layout -- so
-  # this detector stays doc-agnostic and still fires when called directly on
-  # History content; the caller then DROPS findings on lines inside a dated entry
-  # body of the ROOT History.md log, a static snapshot whose counts cannot drift.)
+  # Get-StagedSourceFindings, which alone knows the nearby code lines.)
   param(
     [object[]]$Records
   )
@@ -4980,54 +4945,6 @@ function Measure-DiffFileHeaders {
   return $n
 }
 
-function Get-HistoryEntryBodyLineSet {
-  # For the root History.md log ONLY: return the hashtable-set of line numbers that
-  # fall inside a DATED entry BODY -- the lines AFTER a `## YYYY-MM-DD ...` heading
-  # (incl. the established slash day-range form `## YYYY-MM-DD/NN ...`)
-  # through the line before the NEXT `## ` heading (dated or not) or EOF. The dated
-  # heading line itself is EXCLUDED (the waiver is body-only per every contract
-  # site; a count-bearing dated title stays in class -- Codex BLOCKER
-  #). The count-drift exemption applies ONLY to these lines, matching the
-  # review contract's "a dated History.md ENTRY BODY": the file PREAMBLE (before the
-  # first dated heading) and any UNDATED `## ` section (e.g. `## Notes`) are a static
-  # snapshot too, but the contract scopes the waiver to DATED entries, so their
-  # counts stay in class. The whole-file gate the first cut used (leaf name ==
-  # History.md) over-exempted the lot -- preamble, undated sections, and a nested
-  # file named History.md -- past the contract; the caller now pairs this mask with a
-  # ROOT-path gate. (Codex CROSS-CRATE-CONTRACT.)
-  # `## ` boundaries are detected only OUTSIDE code fences (shared Get-FencedLineFlags),
-  # so a `## ...` line inside a ``` block is not mistaken for a heading. An H3 (`### `)
-  # is NOT an H2 boundary (a subsection stays inside its dated entry).
-  param([object[]]$Records)
-  $set = @{}
-  if (-not $Records) { return $set }
-  $texts = @($Records | ForEach-Object { [string]$_.Text })
-  $fenced = Get-FencedLineFlags -Lines $texts
-  $inDatedEntry = $false
-  for ($i = 0; $i -lt $Records.Count; $i++) {
-    $text = [string]$Records[$i].Text
-    # A level-2 ATX heading (`## `, not `### `) OUTSIDE a fence is an entry boundary:
-    # a dated heading opens a dated entry; ANY other `## ` heading closes the dated
-    # region (an undated section is not part of a dated entry).
-    if (-not $fenced[$i] -and $text -match '^##\s') {
-      # The date must END at a boundary: whitespace, EOL, or the established
-      # slash day-range form `/NN` itself ending at whitespace/EOL
-      # (`## 2026-05-01/02 ...` exists in the root log). A looser tail would
-      # accept `## 2026-07-090 notes`, `## 2026-07-09foo`, or `## 2026-07-09/9foo`
-      # and open the exempt region for a non-dated section. (Codex BLOCKER
-      #: prefix leak, range-form exclusion, then malformed
-      # range suffixes -- each direction is pinned by HEB7/HEB8.)
-      $inDatedEntry = ($text -match '^##\s+\d{4}-\d{2}-\d{2}(\s|$|/\d{2}(\s|$))')
-      # The HEADING itself is NOT in the mask -- every contract site scopes the
-      # waiver to the entry BODY, so a count-bearing dated title stays in class.
-      # (Codex BLOCKER: the heading leaked into the exempt set.)
-      continue
-    }
-    if ($inDatedEntry) { $set[[int]$Records[$i].Line] = $true }
-  }
-  return $set
-}
-
 # ---------------------------------------------------------------------------
 # Check runner: given a file path, its records (line/text), and the repo
 # resolver seams, run every check and return findings tagged with the file.
@@ -5046,57 +4963,19 @@ function Invoke-FileChecks {
   # reconstruct the head and probe for the marker. (Marker model.)
   $headText = (@($Records | Select-Object -First 30 | ForEach-Object { [string]$_.Text }) -join "`n")
   $isFrozen = Test-HasFrozenSnapshotMarker -Path $Path -Content $headText
-  # $isHistory (LEAF name) drives the SELF-NARR tier: History.md (the retrospective
-  # landing log) is ERROR, every other narrative doc ADVISORY -- an entry narrating
-  # its OWN not-yet-landed merge is a factual defect (the merge SHA is unknowable
-  # while the entry rides the branch), so it stays ERROR here. LEAF-based (nested
-  # History.md included) since SELF-NARR is a STRICTER treatment -- over-applying it
-  # only adds flagging, the safe direction.
-  $isHistory = [string]::Equals([System.IO.Path]::GetFileName($Path), 'History.md', [System.StringComparison]::OrdinalIgnoreCase)
-  # Count-drift EXEMPTION (INVENTORY + MAGNITUDE): a dated History entry is a static,
-  # append-only snapshot -- once written its counts cannot drift the way live-doc
-  # prose does -- so the operator ruled an exact count inside a dated entry is NOT a
-  # review finding (2026-07-09). The waiver is NARROWER than SELF-NARR on BOTH axes,
-  # matching the review-prompt-template contract ("a dated History.md ENTRY BODY"):
-  #   - FILE: only the ROOT History.md log, NOT a nested file named History.md, and
-  #     compared ORDINALLY -- `-eq` would exempt a root `history.md` case variant, and
-  #     `-ceq` is case-sensitive but still COLLATES BY CULTURE, which gives zero-weight
-  #     characters no value at all (MEASURED: a U+FEFF-prefixed `History.md` and a
-  #     soft-hyphen-bearing one both compare EQUAL under it). A waiver OVER-applied is
-  #     the risk here (opposite to SELF-NARR's strictness, whose -eq leaf match errs
-  #     STRICTER on a case variant), so the gate is a code-unit match on the exact root
-  #     path, not the leaf and not a collation.
-  #   - LINE: only lines inside a DATED entry body (Get-HistoryEntryBodyLineSet); the
-  #     file PREAMBLE and any UNDATED `## ` section stay in class.
-  # The detectors still RUN; a finding whose line is exempt is dropped below. DRIFT-
-  # staleness waiver ONLY: a History count that mis-states a LIVE contract the SAME
-  # diff changes is a factual doc-vs-code defect, but this mechanical SHAPE detector
-  # cannot tell drift-bait from a factual mismatch, so it defers that class to the AI
-  # gate for the exempt lines (the gate stays the failsafe; the reviewer-side contract
-  # is in review-prompt-template.md). LINE-ANCHOR and SELF-NARR are deliberately NOT
-  # count-exempted: a `file.ext:NNN` anchor drifts because the cited SOURCE moves (its
-  # exemption is the frozen-snapshot marker), and self-narration is a factual defect,
-  # not a count. (Codex CROSS-CRATE-CONTRACT: the first cut skipped
-  # both detectors for the WHOLE file off the leaf name, over-exempting the preamble,
-  # undated sections, and nested History.md past the contract.)
-  $relPath = ([string]$Path -replace '\\', '/')
-  $countExemptLines = if ([string]::Equals($relPath, 'History.md', [System.StringComparison]::Ordinal)) { Get-HistoryEntryBodyLineSet -Records $Records } else { @{} }
   foreach ($f in (Get-LineAnchorFindings -Records $Records -IsFrozenSnapshot $isFrozen)) { $f['File'] = $Path; $findings += $f }
   foreach ($f in (Get-DeadRefFindings -Records $Records -Resolver $Resolver -IsTopLevel $IsTopLevel)) { $f['File'] = $Path; $findings += $f }
   foreach ($f in (Get-MagnitudeFindings -Records $Records)) {
-    if ($countExemptLines.ContainsKey([int]$f.Line)) { continue }   # inside a dated History entry body -> count-drift exempt
     $f['File'] = $Path; $findings += $f
   }
-  foreach ($f in (Get-SelfNarrationFindings -Records $Records -IsHistoryDoc $isHistory)) { $f['File'] = $Path; $findings += $f }
+  foreach ($f in (Get-SelfNarrationFindings -Records $Records)) { $f['File'] = $Path; $findings += $f }
   foreach ($f in (Get-LocalEvidenceFindings -Records $Records)) { $f['File'] = $Path; $findings += $f }
   foreach ($f in (Get-MachineLocalStateFindings -Records $Records)) { $f['File'] = $Path; $findings += $f }
   # Inventory-assertion SHAPE detector: ERROR in .md prose, with NO frozen-snapshot
   # downgrade (the marker exemption is line-anchor-scoped -- see the detector).
   # No code-echo exemption in a .md doc (there is no code). Source-file
-  # COMMENT scanning runs on its own staged path (Get-StagedSourceFindings). A finding
-  # on a dated-History-entry-body line is dropped per $countExemptLines above.
+  # COMMENT scanning runs on its own staged path (Get-StagedSourceFindings).
   foreach ($f in (Get-InventoryAssertionFindings -Records $Records)) {
-    if ($countExemptLines.ContainsKey([int]$f.Line)) { continue }
     $f['File'] = $Path; $findings += $f
   }
   if ($PlanContentForClosure) {

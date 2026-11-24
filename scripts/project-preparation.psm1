@@ -1,9 +1,7 @@
 # Central-only byte preparation; no provider, filesystem, Git, or mutation authority.
-# Values core is shared verbatim with bootstrap and the standalone renderer;
-# source inspection verifies the marked copies retain identical content.
 
 # === CRG-INSTALL-VALUES-CORE-BEGIN v1 ===
-# The marked region is byte-buffer-only and shared with bootstrap and project preparation.
+# The marked region is byte-buffer-only.
 $script:CrgUtf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
 $script:CrgUtf8NoBom = New-Object System.Text.UTF8Encoding($false)
 

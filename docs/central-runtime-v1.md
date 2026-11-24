@@ -27,8 +27,8 @@ content, executes a package payload, or deletes a release or source input.
 
 ## Entry points and placement
 
-Add isolated `bootstrap.ps1` parameter sets; no central command accepts `TargetRepo`,
-`Force`, `DispatcherOnly`, `SealManifest`, or install-only fault switches:
+`bootstrap.ps1` accepts only these parameter sets, and none of them names a
+target repository:
 
 ```text
 bootstrap.ps1 -PublishRuntime -RuntimeStore <absolute-directory>
@@ -38,8 +38,10 @@ bootstrap.ps1 -PublishRuntime -RuntimeStore <absolute-directory>
   -ApprovedManifestSha256 <sha256>
 bootstrap.ps1 -ActivateRuntime -RuntimeStore <absolute-directory>
   -ReleaseId <sha256>
+bootstrap.ps1 -InstallRuntimeLauncher -RuntimeStore <absolute-directory>
+  -ReleaseId <sha256>
 bootstrap.ps1 -UpgradeRuntimeLauncher -RuntimeStore <absolute-directory>
-  -ReleaseId <approved-ABI-2-release-sha256>
+  -ReleaseId <sha256>
 ```
 
 Commands above are parameter forms, not multiline shell examples. The operator
@@ -104,11 +106,9 @@ Supported launcher ABIs require exact `VERSION`, `scripts/run-gate.sh`, `scripts
 `scripts/codex/review-prompt-template.md` entries (braces abbreviate this list only).
 Source publication uses this bootstrap's explicit `Get-CrgRuntimePayloadPaths`:
 `VERSION`, the existing `Get-CrgCurrentFileList` source paths, and the central-only
-launcher, context, governance, tree, and preparation modules. Those additions do
-not alter the legacy installer inventory. On-disk omissions, extras, or different casing versus the manifest
+launcher, context, governance, tree, and preparation modules. On-disk omissions,
+extras, or different casing versus the manifest
 refuse. `runtime-manifest` cannot be a payload and does not hash itself.
-Frozen v1.7/v2.0 inventories and
-the v2.1 consumer payload inventory remain unchanged by this unit.
 
 `active-release` (exactly 95 bytes):
 

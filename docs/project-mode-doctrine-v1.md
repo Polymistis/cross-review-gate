@@ -32,8 +32,8 @@ landed. In particular:
   release, repair, or feature work;
 - a declaration edit does not require operator approval or a dedicated
   commit; and
-- project-mode configuration never changes gate custody, install shape,
-  skip authority, severity parsing, finding categories, or output format.
+- project-mode configuration never changes gate custody, skip authority,
+  severity parsing, finding categories, or output format.
 
 Code quality remains the highest priority in every mode. Correctness,
 security, silent-failure, integration, contract-drift, convention, and
@@ -74,7 +74,7 @@ The grammar is deliberately small:
 - The entry must be a regular file. An executable regular-file mode is
   accepted; a symlink, gitlink, submodule, or directory at the path is
   invalid.
-- The declaration remains tracked project metadata in every install shape.
+- The declaration remains tracked project metadata.
 
 Grammar defines valid configuration, not authority. A candidate
 declaration is reviewed as ordinary diff content. Grammar or semantic
@@ -123,8 +123,8 @@ the injected evidence block. A fallback block also states explicitly that
 No activation-provenance walk participates in resolution. No last-touch
 parent, capability token, dispatcher token, component attestation, or
 parent-commit precondition decides whether valid configuration is read.
-Generic trusted-copy and LOCAL-install verification still protect the gate
-code that executes; those controls are independent of project-mode data.
+Generic trusted-copy verification still protects the gate code that executes;
+that control is independent of project-mode data.
 
 ## 4. Ordinary landing paths
 
@@ -273,11 +273,8 @@ cross-review remain unchanged.
   normal review and audited-skip contracts. No declaration-specific
   sanction, skip refusal, rollback anchor, or recovery bypass belongs in
   either layer.
-- TRACKED and LOCAL install shapes resolve project mode identically. The
-  local manifest and authorization marker verify gate code, never
-  `PROJECT-MODE.md` authority.
-- README, INSTALL, the installed AGENTS template, and the audit protocol
-  describe the same ordinary-configuration boundary.
+- README, the AGENTS template, and the audit protocol describe the same
+  ordinary-configuration boundary.
 
 Production invariants to inspect during review include (not code-unit-test-authoring
 tasks):
@@ -302,122 +299,14 @@ tasks):
 - an unrelated, high-quality diff remaining admissible when a campaign is
   present but not advanced.
 
-## 9. Pre-redesign TRACKED upgrade boundary
-
-A TRACKED install whose trusted `HEAD` still implements the original
-project-mode enforcement cannot safely replace the whole package in one
-commit. Refreshing the per-clone dispatcher removes the dispatcher-level retired checks,
-but the dispatcher must still execute the old trusted `HEAD` hook. A full
-package candidate also changes routing drivers, which the old audited-skip
-guard correctly refuses.
-
-A normal consumer target begins with an empty index and worktree before the
-separate package source is copied in. A self-host target begins with an empty
-index and the intended candidate package diff already present in the worktree:
-source and target are identical there, so a clean self-host worktree contains
-no candidate kernel to publish. Unrelated worktree state is excluded.
-
-The bounded retirement therefore uses a kernel landing followed by a completion
-landing:
-
-1. Refresh the dispatcher with `-DispatcherOnly`, then run the full bootstrap.
-   A successful full install publishes a base-HEAD-bound identity record for
-   the changed review-kernel entries and `.gitattributes` when the LF contract
-   changes. Restore or remove each raw routing driver according to the trusted
-   `HEAD` state, stage exactly the record-named entries, and use the ordinary
-   audited skip for that identity-attested kernel landing. A self-host install
-   preserves the phase-two routing-driver bytes in digest-verified,
-   base-bound custody outside the worktree before publishing the record.
-2. After that exact kernel commit is present in the target base, restore the
-   self-host routing drivers through the generated custody checks when
-   applicable, re-run the full bootstrap under the current kernel, and land
-   the remaining package normally with `REVIEW_BACKEND=both`. In a self-host
-   transition, those remaining candidate bytes were present before the first
-   bootstrap and stay uncommitted while only the record-named kernel lands.
-
-The first landing is a gate-policy retirement transaction, not authority for
-project work and not a declaration transition. `PROJECT-MODE.md` remains
-untouched. The refreshed dispatcher recognizes the retired trusted-HEAD
-signatures, verifies the record base, modes, filter-aware blob OIDs, omitted
-protected paths, staged LF contract, routing-driver state, and absence of extra
-staged paths, records the staged tree, and exits without executing either the
-retired policy or candidate gate code. Ordinary non-skip commits still delegate
-to trusted `HEAD`. A generic audited skip delegates only when trusted `HEAD`
-carries exactly one `# crg-dispatch-tree-handoff-v1` capability marker; a
-pre-handoff legacy kernel refuses generic skips while this exact record-bound
-transition remains available.
-
-The target-base condition is substantive. A merge gate extracts trusted
-wrappers and the prompt from the target base, so placing the kernel only in an
-earlier commit on the candidate branch does not activate the new contract for
-that branch review. A feature-branch workflow must land the kernel alone, then
-create or rebase the remaining branch onto the updated base before the normal
-second landing.
-
-Legacy prompt customization does not justify restoring legacy gate rules.
-Only project-owned content from the project-context and project-hazards
-sections may be ported into the current stock prompt; the entire legacy prompt
-must never be copied over the current template. Those section edits may join
-the normal second landing because the trusted stock prompt from current
-`HEAD` reviews the candidate. A separate prompt-only reviewed commit is an
-optional isolation choice, not a third required infrastructure landing.
-
-An interruption does not create a declaration recovery state.
-
-A self-host full bootstrap publishes base-bound, digest-verified routing
-custody before attempting transition identity publication. Custody is the
-write-ahead record for that publication boundary. Positive absence of
-`crg-review-kernel-transition` is recoverable only while `HEAD` remains the
-exact recorded legacy base, with the held active record, matching base-directory
-record, and every custody source digest verified.
-
-When the current self-host routing sources still match the captured candidate
-bytes, the full self-bootstrap may retry the incomplete publication against
-that same custody epoch. An external package source may not perform that retry:
-different candidate bytes could otherwise be bound to existing self-host
-custody. When the routing sources instead contain phase-A bytes, an absent
-driver, a mixture of candidate and phase-A state, or any edit, the full
-bootstrap refuses before mutation. Run `-RestoreLegacyRoutingCustody` from the
-target checkout before retrying. At the exact legacy base with a positively
-absent identity record, that restore reconstructs the candidate routing
-sources and creates no post-kernel completion marker.
-
-A malformed or non-file transition record is not absence. Such a record, a
-moved `HEAD`, foreign or divergent custody, or divergent routing-source bytes
-causes the full bootstrap to fail before package, repository, or per-worktree
-Git-directory mutation. Preserve every custody record.
-
-The transition identity and self-host active custody cannot be rebound to
-another legacy base in the same worktree. A full bootstrap targeting that
-worktree after such a base change refuses before package or repository mutation
-rather than publishing a second active epoch. A complete external package
-source cannot make the stale target safe because the active epoch belongs to
-the target's Git directory. Recovery either returns that worktree to the
-recorded base or targets a fresh linked worktree at the intended legacy base,
-whose independent per-worktree Git directory carries no foreign epoch. If phase
-A already left the candidate routing drivers in legacy or absent state, first
-return the candidate checkout to the recorded base and run
-`-RestoreLegacyRoutingCustody`; the resulting complete candidate payload may
-then serve as the external package source for the fresh target.
-
-After the kernel reaches the target base, the same operation accepts only the
-exact base-to-kernel landing and restores the phase-two routing drivers; no
-manual copy recipe is a supported recovery path. A normal consumer install
-likewise reads candidate bytes from the separate package source. Re-run the
-full bootstrap before the remaining landing. A later bootstrap overwrite of a
-customized prompt is recovered by porting only the project-context and
-project-hazards sections from verified custody or a trusted current commit. The
-audited skip is not used again after the kernel landing.
-
-## 10. Historical boundary
+## 9. Historical boundary
 
 The retired operator sanction, declaration isolation, activation
 provenance, standing component attestation, dispatcher rollback anchor,
 lineage-exact project-mode recovery, and campaign-advancement verdict rule
 were properties of the original implementation. Historical delivery
 records may continue to describe those facts in past tense. No current
-instruction, installer checklist, or audit criterion
-may present those mechanisms as live contract.
+instruction or audit criterion may present those mechanisms as live contract.
 
 Worker-side hard-cutover guidance for individual consumer projects and
 test-churn telemetry remain separate concerns. Neither changes the review

@@ -222,13 +222,11 @@ Each audit run consumes:
    `GIT_CONFIG_VALUE_n` carriers, including empty values. Ordinary
    `HOME` / `XDG_CONFIG_HOME` remain admissible. Also check the
    `core.hooksPath` config-redirect guard (`Resolve-HooksPathGuard`
-   classifier) for parity across every hand-kept copy -- the commit
-   wrapper AND `bootstrap.ps1` (the installer classifies `core.hooksPath`
-   the same way so it never reports success under a state the wrapper
-   aborts on). After that unset proof, the wrapper must resolve and attest
+   classifier) in the commit wrapper. After that unset proof, the wrapper
+   must resolve and attest
    the default dispatcher before `git commit`: ordinary non-reparse bytes,
    leading shebang, the gate-untracking capability marker, and the exact
-   adjacent bootstrap-written v1 digest record matching those bytes. Inspect
+   adjacent v1 digest record matching those bytes. Inspect
    refusal of NON-empty and empty `core.hooksPath=` values and missing, foreign,
    or digest-mismatched default dispatchers. Verify `REVIEW_BACKEND` and PATH
    save/restore error handling and the worker environment's single
@@ -245,17 +243,15 @@ Each audit run consumes:
    reserved as author-lint's crash signal, so a crashed linter fails open to the
    AI gate). It encodes the
    script-detectable defect classes the gate repeatedly raises: at ERROR tier,
-   line-anchor citations, self-narration of the pending change's own landing
-   (`this merge`/`this landing`/`landed ... here` — ERROR only in `History.md`,
-   the retrospective landing log), local-only review-artifact paths cited as
+   line-anchor citations, local-only review-artifact paths cited as
    proof (`logs/(codex|claude)/reviews` beside a proof/verification word), and
    exact inventory/count claims in `.md` prose (the verb-gated `there are <N>
    <word>` / `covers <N> <word>` shapes — magnitude-or-delete, never a corrected
-   number; a count inside a dated entry body of the root `History.md` log is
-   EXEMPT — the drift-only History exemption, though a count there mis-stating
-   a live contract the same diff changes stays a factual finding); at ADVISORY
+   number); at ADVISORY
    tier, dead repo-relative references, dangling milestone
    tags, exact-magnitude transients (incl. spelled enumerated-case totals),
+   self-narration of the pending change's own landing
+   (`this merge`/`this landing`/`landed ... here`),
    machine-local install/wiring state, the looser local-evidence forms,
    MAGIC-COUNT-ASSERT (Rust EQUALITY assertions — `assert_eq!` /
    `debug_assert_eq!`, or `assert!` / `debug_assert!` with `==` — pinning a
@@ -378,8 +374,7 @@ Each audit run consumes:
    probe would consult ambient sources a fresh clone lacks. The dispatcher checks (shebang, marker,
    digest) are DETECTIVE drift guards, not a boundary against a
    hooks-path writer — treat a digest mismatch as an incident to
-   investigate before any `bootstrap.ps1 -DispatcherOnly` repair, never
-   as noise to re-bless.
+   investigate, never as noise to re-bless.
 5e. **`scripts/shared/worker-audit.ps1`** — the per-landing process audit
    `auto-merge.ps1` runs after a successful ff-merge whenever a TRUSTED
    copy resolves (NON-GATING, time-bounded, report under gitignored
@@ -432,8 +427,8 @@ Each audit run consumes:
    caller-visible semantic projection, successful-path
    cleanup, and the displayed candidate PASS. Only an overall hook/process exit
    0 authorizes Git to continue.
-   **Trust chain for hook edits:** the per-clone dispatcher installed
-   by `bootstrap.ps1` at `.git/hooks/pre-commit` captures the exact
+   **Trust chain for hook edits:** the per-clone dispatcher at
+   `.git/hooks/pre-commit` captures the exact
    `HEAD:scripts/git-hooks/pre-commit` blob in a shell-owned buffer,
    verifies its byte length and blob OID, and evaluates THAT buffer in
    a fixed `/bin/sh` subshell — not the working-tree candidate or an
@@ -473,10 +468,6 @@ Each audit run consumes:
    and the audit records that explicitly — a criterion silently skipped is
    indistinguishable from one that passed, and this one is skipped legitimately
    by most consumers of a review gate.
-7a. **`bootstrap.ps1`** — the installer, consumed by criterion 4a:
-   audit the installed dispatcher for normal audited-skip behavior,
-   the gate-untracking guard, and trusted hook routing. Project-mode
-   configuration adds no declaration-specific dispatcher guard.
 8. **Recent verdict logs** — `logs/codex/reviews/*.md` AND
    `logs/claude/reviews/*.md` from the last ~14 days, for spot-checks
    across both backends (the audit does not re-parse them itself; the
@@ -642,7 +633,7 @@ Preserve the following shared production contracts:
   (`Invoke-CrgStatusGit`, `Read-CrgCentralObjectBatch`) and
   `scripts/paired-retention.psm1` (`Invoke-CrgRetentionGit`), which quote
   every argument and refuse NUL; and `Convert-CrgWindowsProcessArgument` in
-  the standalone `bootstrap.ps1` and `scripts/render-project-values.ps1`.
+  the standalone `bootstrap.ps1`.
   `author-lint.ps1` keeps a narrower quoter that quotes only arguments holding
   whitespace and relies on refusing any path that contains a double quote.
 - Raw-environment replacement suppression (`Set-CrgNoReplaceObjects` for the
@@ -657,9 +648,8 @@ Preserve the following shared production contracts:
   suppression must remove every case-variant spelling from the raw native
   environment block, set exactly one canonical `GIT_NO_REPLACE_OBJECTS=1`, and
   fail closed on a malformed raw entry. Local copies remain only where the
-  shared file cannot be loaded: `bootstrap.ps1` and
-  `scripts/render-project-values.ps1` run standalone, and the merge gate's
-  generated `child-runner.ps1` runs as its own process.
+  shared file cannot be loaded: `bootstrap.ps1` runs standalone, and the
+  merge gate's generated `child-runner.ps1` runs as its own process.
 - Inspect keyword-list changes against actual findings and classification logic;
   changed classifications must not silently mislabel existing artifact evidence.
 
@@ -758,7 +748,6 @@ several of these rows.
 | evidence, alternatives, measurements, selected designs | research dossiers |
 | completed packages, commit identities, exact history | git |
 | review pass lines and verdict evidence | the gate's own receipts under `logs/` |
-| concise pointers only — NEVER startup context | a history index |
 
 Finding shapes to raise, in priority order:
 
@@ -928,7 +917,7 @@ case; because no review component was staged, normal review applies.
 
 **`scripts/git-hooks/pre-commit` edits run under HEAD's logic, not
 the candidate's.** Pre-commit is in `REVIEW_INFRA`, and the dispatcher
-at `.git/hooks/pre-commit` (installed by `bootstrap.ps1`) captures the
+at `.git/hooks/pre-commit` captures the
 exact `HEAD:scripts/git-hooks/pre-commit` blob, verifies the resulting
 shell-owned buffer against the blob OID, and evaluates that buffer in
 a fixed `/bin/sh` subshell — not the working-tree candidate or an
