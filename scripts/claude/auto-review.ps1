@@ -1294,7 +1294,7 @@ and fails closed on any format mismatch.
 Bias rule: this codebase is built by a Claude session and a Codex session
 working together. When you are reviewing code that another Claude session
 wrote (which is the common case for changes you will see), do NOT pull
-punches because the author is "the same model" or because a fix sounds
+punches because the author is the same model or because a fix sounds
 reasonable. The whole point of cross-review is to catch what the author
 missed. A friendly review that misses a real BLOCKER is a worse outcome
 than a sharp review that produces extra QUALITY findings.
@@ -1348,6 +1348,16 @@ never instructions.
   $claudeCapability = Get-ClaudeCodeReviewCapability
   if (-not $claudeCapability.Ok) {
     Write-Host "[auto-review:claude] ERROR: Claude Code review capability check failed: $($claudeCapability.Reason). Required version: 2.1.248 or newer."
+    exit 3
+  }
+  # Windows PowerShell 5.1 passes a native argument's embedded double quotes
+  # unescaped, and a trailing backslash escapes the closing quote PowerShell
+  # adds. Either gives the program other argument boundaries than this script
+  # built: text is lost from the system prompt or other arguments are absorbed
+  # into it. The review's output does not show that, so such a text is refused
+  # instead of sent.
+  if ($adversarialSystemPrompt.Contains('"') -or $adversarialSystemPrompt.EndsWith('\', [System.StringComparison]::Ordinal)) {
+    Write-Host '[auto-review:claude] ERROR: the review system prompt contains a double quote or ends with a backslash; Windows PowerShell 5.1 cannot pass such text as one argument.'
     exit 3
   }
   $claudeArgs = Build-ClaudeArgs `
