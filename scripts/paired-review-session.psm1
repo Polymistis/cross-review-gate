@@ -37,10 +37,15 @@ function Get-CrgPairedSessionPolicy {
         throw 'paired dispatch cannot classify a captured change-name record'
       }
       foreach ($path in $columns[1..($columns.Count - 1)]) {
-        # These are the existing mandatory both-mode paths. Both
-        # rename endpoints participate; unrelated filenames are not heuristics.
+        # A change to code that decides which providers review must itself
+        # pass both providers, or a single provider could approve a change to
+        # its own scheduling: the hook-mode commit wrappers and gate entry
+        # point, and this module, which schedules the legs of a launcher
+        # review. Both rename endpoints participate; unrelated filenames are
+        # not heuristics.
         if ([string]::Equals($path, 'scripts/codex/commit.ps1', [StringComparison]::Ordinal) -or [string]::Equals($path, 'scripts/claude/commit.ps1', [StringComparison]::Ordinal) -or
-            [string]::Equals($path, 'scripts/run-gate.sh', [StringComparison]::Ordinal)) { $protectedChange = $true }
+            [string]::Equals($path, 'scripts/run-gate.sh', [StringComparison]::Ordinal) -or
+            [string]::Equals($path, 'scripts/paired-review-session.psm1', [StringComparison]::Ordinal)) { $protectedChange = $true }
       }
     }
   }

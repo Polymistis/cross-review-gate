@@ -640,7 +640,11 @@ same paired identity before attached mode activates. Exhaustion still requires t
 existing positive classification and complete-leg automatic fallback. Claude
 may emit an exhaustion sidecar and exit before constructing a verdict artifact;
 record positive absence rather than fabricating a successful/empty verdict.
-Protected changes retain separate complete review legs. Positively identified
+A protected change touches code that decides which providers review: the
+hook-mode commit wrappers, `scripts/run-gate.sh`, or
+`scripts/paired-review-session.psm1`, which schedules the legs of a launcher
+review. Protected changes retain separate complete review legs, one per
+provider. Positively identified
 exhaustion permits automatic substitution without distinct effective providers;
 mandatory pass coverage remains coordinator policy. This contract introduces no provider, quota switch or review bypass.
 
