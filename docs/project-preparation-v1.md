@@ -143,8 +143,7 @@ replaced by fixed text naming the scope (anywhere, for an effective prototype
 allowance; otherwise the configured folders) and keeping the stock rules outside
 it, and a template without the boundaries refuses. The paired PROJECT-MODE
 block's `pm-authority` line then defers to that policy instead of stating the
-every-mode ban; the legacy wrappers' copies of that block serve installs without
-project configuration and keep the ban.
+every-mode ban.
 
 The caller proves role-document presence, original domain, and regular blob shape
 from pinned combined context. Pure compilation cannot authenticate that inventory.

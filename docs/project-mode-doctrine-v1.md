@@ -73,7 +73,7 @@ The grammar is deliberately small:
 - The file is at most 8 KiB.
 - The entry must be a regular file. An executable regular-file mode is
   accepted; a symlink, gitlink, submodule, or directory at the path is
-  invalid.
+  refused before the grammar is checked (section 3).
 - The declaration remains tracked project metadata.
 
 Grammar defines valid configuration, not authority. A candidate
@@ -83,16 +83,14 @@ candidate bytes do not become the governing block for the same run.
 
 ## 3. Governing state and safe fallback
 
-The change under review never selects its own review mode. Each
-prompt-producing scope reads the declaration from the newest trusted state
-that precedes the change:
-
-| scope | governing state |
-|---|---|
-| `Staged` | `HEAD`, never the index |
-| `Uncommitted` | `HEAD`, never the synthesized working-tree candidate |
-| `Commit` | the reviewed commit's first parent; a root commit has no declaration |
-| `Branch` | the merge gate's pinned base OID, never the candidate tip |
+The change under review never selects its own review mode. A review reads
+the declaration from the newest trusted state that precedes the change: a
+paired review from the private branch tip, which is the preceding completed
+pair's private result, a first attachment from release-owned bootstrap
+governance ([project preparation](project-preparation-v1.md)). Each Commit
+that prepares a review compiles a fresh governing preparation from that tip
+under the active release; Resume reuses the retained prepared input under the
+release recorded in the handoff.
 
 A declaration edit may be mixed with any other project change. The entire
 diff is reviewed under the preceding declaration. After landing, the new
@@ -103,28 +101,30 @@ Resolution outcomes are:
 1. **Valid declaration** — inject the parsed mode, campaign, surfaces,
    and governing ref.
 2. **Verified absence** — proceed under `shipped` defaults.
-3. **Positively malformed declaration** — a verified non-regular entry or
-   grammar-invalid regular file produces a loud warning and proceeds under
-   `shipped` defaults. Malformed review configuration never wedges project
-   work.
-4. **Indeterminate repository read** — a failed ref, tree, object, or blob
-   read is a tooling failure and refuses the run. Failure is neither
-   verified absence nor verified malformation.
+3. **Grammar-invalid declaration** — a regular file of at most 16 MiB that
+   fails the grammar proceeds under `shipped` defaults. Such malformed review
+   configuration never wedges project work.
+4. **Refused acquisition** — a non-regular entry at the path, a regular file
+   above 16 MiB, or a failed ref, tree, object, or blob read, refuses the run
+   (`Read-CrgCentralPreparationSource`). A non-file entry is not absence,
+   and a failed read is neither verified absence nor a parsed declaration.
 
-Exactly one governing-state visibility line is printed for every invocation
-that reaches project-mode resolution. The line names a governing mode,
-verified absence, malformed-to-shipped fallback, or a tooling refusal from
-that resolution. A scope preflight that fails before project-mode resolution
-may exit without such a line. Auxiliary warnings are reserved for positively
-malformed configuration; routine valid or deleted candidate state stays in
-the injected evidence block. A fallback block also states explicitly that
-`shipped` defaults govern the run.
+No console warning is printed. The injected block reports the state: a
+fallback block carries a `pm-state` line stating that `shipped` defaults
+govern the run, plus a `pm-diagnostic` line naming the grammar error when the
+declaration is grammar-invalid. In an ordinary paired review a candidate
+declaration whose presence or bytes differ from the governing one is reported
+in a `pm-candidate-state` evidence line, plus a `pm-candidate-diagnostic`
+line unless the candidate is deleted. A first-attachment review always
+carries a `pm-candidate-state` line, with a `pm-candidate-diagnostic` line
+when the candidate declaration is present. Open reports the governing
+`ModeState`.
 
 No activation-provenance walk participates in resolution. No last-touch
 parent, capability token, dispatcher token, component attestation, or
 parent-commit precondition decides whether valid configuration is read.
-Generic trusted-copy verification still protects the gate code that executes;
-that control is independent of project-mode data.
+The launcher's verification of the selected release still protects the gate
+code that executes; that control is independent of project-mode data.
 
 ## 4. Ordinary landing paths
 
@@ -136,11 +136,10 @@ configuration:
 - a declaration may be added, edited, renamed, or deleted beside other
   work;
 - no branch-history sanction or declaration-specific topology rule exists;
-- `CROSS_REVIEW_SKIP=1` has the ordinary audited-skip behavior and no
-  declaration-specific refusal; and
-- a malformed governing declaration does not create a special repair
-  transaction because ordinary work and ordinary fixes already proceed
-  under the safe fallback.
+  and
+- a grammar-invalid governing declaration of at most 16 MiB does not create a
+  special repair transaction because ordinary work and ordinary fixes already
+  proceed under the safe fallback.
 
 The candidate remains authority-free without any of those restrictions:
 the trusted preceding state governs the current review. A candidate cannot
@@ -214,10 +213,9 @@ matrix is:
 
 “Surviving transition machinery” means machinery designed to outlive the
 landing: dual-path dispatch, old-path selection flags, adapters preserving
-the retired path, or keep-just-in-case retention. Branch scope can observe
-whether such machinery remains at the tip. Staged, Uncommitted, and Commit
-scope apply the existing explicit-removal-declaration convention because
-future commits are not visible. These rules target named cutover residue;
+the retired path, or keep-just-in-case retention. A review applies the
+existing explicit-removal-declaration convention because future commits are
+not visible. These rules target named cutover residue;
 they do not make unrelated work inadmissible.
 
 ## 7. Verification evidence and code unit-test ban
@@ -245,9 +243,9 @@ safety checks. Source inspection, mandatory code review, builds, ordinary
 program operation, and functional validation remain verification methods. Build output establishes buildability;
 a captured real-interface run demonstrates only the behavior actually observed.
 Every credited citation names the date, command, observed output, and revision.
-Commit and Branch scopes can consume the labeled full commit-message channel;
-Staged and Uncommitted scopes require evidence in the diff or another visible
-channel. Unverified behavior is reported explicitly, never filled with a new
+A review reads the proposed commit message (`COMMIT-MESSAGE.txt`, part of the
+change) and the labeled earlier history (`COMMIT-LOG.txt`, context only).
+Unverified behavior is reported explicitly, never filled with a new
 code unit test.
 
 New or restored code unit tests, unit-test-only support, or instructions requiring
@@ -258,44 +256,38 @@ cross-review remain unchanged.
 
 ## 8. Implementation contract
 
-- `scripts/codex/auto-review.ps1` and
-  `scripts/claude/auto-review.ps1` mirror governing-ref resolution,
-  declaration parsing, safe fallback, visibility, and block assembly.
+- `scripts/project-preparation.psm1` compiles the governing and candidate
+  declarations and assembles the block through the shared parser and
+  formatter in `scripts/review-common.ps1`.
 - `scripts/codex/review-prompt-template.md` owns the reviewer-facing mode,
   campaign, invariant-surface, compatibility, evidence, and stock code-unit-test-ban
   rules; `scripts/project-preparation.psm1` replaces the marked ban body with a
   configured scope ([project preparation](project-preparation-v1.md)).
-- `scripts/shared/auto-merge.ps1` supplies the pinned base OID. The wrappers
-  remain the declaration resolvers.
 - Candidate declaration content reaches the reviewer through the ordinary
   diff. No candidate block replaces the governing block.
-- `scripts/git-hooks/pre-commit` and the installed dispatcher apply the
-  normal review and audited-skip contracts. No declaration-specific
-  sanction, skip refusal, rollback anchor, or recovery bypass belongs in
-  either layer.
-- README, the AGENTS template, and the audit protocol describe the same
-  ordinary-configuration boundary.
+- No declaration-specific sanction, skip refusal, rollback anchor, or
+  recovery bypass belongs in the launcher or the wrappers.
+- README and the audit protocol describe the same ordinary-configuration
+  boundary.
 
 Production invariants to inspect during review include (not code-unit-test-authoring
 tasks):
 
 - verified absence selecting `shipped`;
 - every valid mode and every grammar boundary;
-- malformed governing regular-file and entry-type cases warning and
-  selecting `shipped` without refusing ordinary work;
+- a grammar-invalid governing regular file of at most 16 MiB selecting
+  `shipped` without refusing ordinary work, and a non-regular entry or a
+  larger regular file being refused;
 - an indeterminate governing or candidate repository read still failing
   closed;
 - verified unborn/root absence remaining distinct from failed `HEAD` or parent
   resolution;
-- Staged and Uncommitted scopes governed by `HEAD`;
-- Commit scope governed by the first parent, including root and merge
-  commits;
-- Branch scope governed by the pinned base;
+- a paired review governed by the preceding completed pair's private
+  result, and a first attachment by release-owned bootstrap governance;
 - mixed declaration-and-work changes proceeding under the preceding
   declaration;
 - a candidate declaration never governing its own run;
-- candidate grammar and semantic defects reaching ordinary diff review;
-- declaration edits using the normal audited skip path; and
+- candidate grammar and semantic defects reaching ordinary diff review; and
 - an unrelated, high-quality diff remaining admissible when a campaign is
   present but not advanced.
 

@@ -5,10 +5,6 @@ project through the central launcher. The operator procedure, with every
 command and parameter, is [Central deployment v1](docs/central-deployment-v1.md);
 this guide summarises it and adds the reviewer configuration a machine needs.
 
-Per-project installation (hook mode) is retired: `bootstrap.ps1` accepts only
-the central runtime operations. The gate's own source repository keeps its
-installed hook files until that repository is attached to the launcher.
-
 ## Prerequisites
 
 - Windows PowerShell 5.1 (`powershell.exe`).
@@ -37,8 +33,10 @@ procedure.
    activate the release or change any project.
 3. **Install the stable launcher once, then activate** ("Install the stable
    launcher once, then activate"): `-InstallRuntimeLauncher` for a new store,
-   `-UpgradeRuntimeLauncher` for the explicit migration of an existing ABI 2
-   store, then `-ActivateRuntime`.
+   or `-UpgradeRuntimeLauncher` for the explicit migration of an existing
+   store, then `-ActivateRuntime`. An ABI 3 store migrates once to ABI 4, in
+   the maintenance window that section describes; an ABI 2 store migrates to
+   ABI 3 with an approved ABI 3 release, then to ABI 4.
 4. **Attach each project** ("Prepare the first project attachment"): prepare
    `.crg-project/project.conf`, `CROSS-REVIEW-VALUES.md`, the discovery section
    in `AGENTS.md` and `CLAUDE.md`, the private plan that section names, and
@@ -95,5 +93,8 @@ Complete the login flow. The wrapper then picks up your credentials
 via keychain on subsequent runs. No further configuration needed.
 
 **API-key fallback (NOT recommended — significantly more expensive)**:
-see the "Claude reviewer auth setup" section in
-`docs/AGENTS.md.template` for the env-var and apiKeyHelper options.
+Claude Code takes the key from `ANTHROPIC_API_KEY`, or the wrapper passes
+Claude Code the settings JSON named by `CLAUDE_REVIEW_SETTINGS`, whose
+`apiKeyHelper` command prints the key. Reviews run in the installed launcher
+host, which accepts no environment from the calling session, so set either
+variable in the user environment the host starts with.

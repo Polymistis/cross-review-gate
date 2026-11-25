@@ -44,8 +44,8 @@ after the applicable acquisition checks.
 
 ## Internal PreparedPair invocation
 
-The integration interface is a distinct `PreparedPair` parameter set on each
-existing Codex/Claude review host:
+The integration interface is the `PreparedPair` parameter set, the only
+parameter set of each existing Codex/Claude review host:
 
 ```text
 -PreparedPairPath <absolute descriptor path>
@@ -55,11 +55,10 @@ existing Codex/Claude review host:
 -OutDir <owned private attempt directory>
 ```
 
-Supplying `PreparedPairPath` selects the set; do not combine legacy `Scope`,
-`Target`, `Tip` or `PromptPath` selectors with the set. Codex also requires explicit
+Codex also requires explicit
 `ReviewPasses` and nonempty `ReasoningEffort`; neither is resolved from ambient
 child configuration. Existing tier validation remains unchanged. Claude retains
-its existing model/effort and tagged single-pass interface. Provider-specific
+its existing model/effort and single-pass interface. Provider-specific
 parameters are constrained by the live coordinator's captured policy.
 No environment variable chooses a different pair or preparation.
 The descriptor is input, never a receipt, PASS token or publication capability.
@@ -82,11 +81,9 @@ Matching files alone cannot supply any of those guarantees.
 ### Provider-host connection
 
 Each existing review host imports the paired modules from the executed release
-only for its distinct PreparedPair parameter set, after legacy function
-declarations and before any legacy native initialization. The paired path skips
-ambient Git scope capture, loose prompt/mode/consistency lookup and
-public/default output selection. Legacy
-parameter sets retain the existing behavior.
+after its function declarations. The host performs no
+ambient Git scope capture, loose prompt/mode/consistency lookup or
+public/default output selection.
 
 `Open-CrgPairedHostInput` in `paired-preparation` accepts the internal invocation
 fields plus HostScriptPath and Backend. The executed path must have the selected
@@ -121,7 +118,7 @@ exhaustion or a verdict.
 
 The coordinator supplies exactly one nonempty, case-exact Path entry in the
 raw child environment. The host asserts that native block instead of repairing
-inherited aliases through the legacy managed setter; PowerShell 7 can bind a
+inherited aliases through a managed setter; PowerShell 7 can bind a
 null string as empty and leave an alias present. A different/ambiguous child
 environment refuses rather than changing the captured executable search path.
 Before provider/helper children launch, the host joins a fresh non-breakaway
@@ -576,8 +573,7 @@ Generate one envelope and validate with `Test-PlanConsistencyEvidenceEnvelope`
 before either host launches. A produced report's documentary findings retain
 the prompt's treatment (QUALITY only for drift the change adds or causes);
 missing/malformed or required indeterminate evidence
-retains the existing refusal/BLOCKER boundary. Claude's legacy no-producer guard
-remains unchanged for legacy scopes; only validated PreparedPair inputs can
+retains the existing refusal/BLOCKER boundary. Only validated PreparedPair inputs can
 use this shared producer. Both hosts present the same report and instructions.
 
 ## Explicit paired artifact identity
@@ -629,7 +625,7 @@ required policy, runtime custody, completed review scheduling or publication gua
 
 Reuse existing effort/duration validation and semantic verdict/union checks.
 There is deliberately no `REVIEW-TREE-OID`: no single real Git tree identifies
-the pair. Existing six-line single-tree headers remain unchanged. Paired readers
+the pair. Paired readers
 must recognize this exact era, not loosen legacy header allowlists or accept a
 public-only identity as equivalent. Compare both tree OIDs, unit digest,
 descriptor digest and displayed diff digest with the live parent's pins, plus
@@ -640,8 +636,7 @@ same paired identity before attached mode activates. Exhaustion still requires t
 existing positive classification and complete-leg automatic fallback. Claude
 may emit an exhaustion sidecar and exit before constructing a verdict artifact;
 record positive absence rather than fabricating a successful/empty verdict.
-A protected change touches code that decides which providers review: the
-hook-mode commit wrappers, `scripts/run-gate.sh`, or
+A protected change touches code that decides which providers review:
 `scripts/paired-review-session.psm1`, which schedules the legs of a launcher
 review. Protected changes retain separate complete review legs, one per
 provider. Positively identified

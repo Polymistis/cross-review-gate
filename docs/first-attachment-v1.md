@@ -182,8 +182,8 @@ Matching artifact bytes never prove current child execution, exhaustion or appro
 
 ## Origin-bound host transport
 
-Both review wrappers accept `-PreparedOrigin first-attachment-v1` only in the
-existing explicit `PreparedPair` parameter set. Omission retains `paired-v1`;
+Both review wrappers accept `-PreparedOrigin first-attachment-v1` in their
+`PreparedPair` parameter set. Omission retains `paired-v1`;
 the selector never infers origin from model prose or falls back between readers.
 The shared host pins the first descriptor/file reader and artifact constructor,
 keeps the first scope in artifact/exhaustion identity, and retains the

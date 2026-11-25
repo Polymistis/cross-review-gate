@@ -76,13 +76,14 @@ still warn-not-kill, and self-clearing: growth resumes, the escalation
 stops. The threshold is `CROSS_REVIEW_STALL_WARN_SECS`: an integer-seconds
 value in 30..86400, default 300 when unset or blank; a SET-but-invalid
 value (non-integer, or out of that range) fails the review closed as an
-invocation/config error, like the other env knobs.
+invocation/config error, like the other env knobs. Launcher reviews always
+run at the default (see Consumer documents).
 
 Samples and escalation TRANSITIONS are also appended, with an ISO-8601
 local arrival timestamp, to a run-owned LIVENESS LOG preserved alongside
-the run's forensics (`review-<ts>-<tag>-r<pid>.liveness.jsonl` -- the
-`.jsonl` suffix keeps it inside the consolidation regex, and
-the pid component keeps same-second runs' artifacts disjoint). Appends and
+the run's forensics in the private attempt directory
+(`review-<ts>-<tag>-r<pid>.liveness.jsonl` -- the pid component keeps
+same-second runs' artifacts disjoint). Appends and
 preservation are best-effort with LOUD failure reporting: a denied
 append retries briefly then warns, never silently thinning the record.
 Console lines serve the live watcher; the log serves the post-run audit,
@@ -95,9 +96,10 @@ loaded type can never be redefined in-process). Since 2.4.4 it lives once,
 with the threshold resolver and the duration stamp, in
 `scripts/review-liveness.psm1`, which the Codex and Claude wrappers and the
 Grok adapter import; the earlier per-wrapper mirrored copies are gone. The
-module is review infrastructure: the pre-commit hook's trusted copy, the
-merge gate's base extraction and LOCAL manifest snapshots carry it beside
-the wrappers, so a candidate edit to it never watches its own review. Grok
+module is review infrastructure: the retained payload of the release
+selected for the operation (for Resume, the release recorded in the
+handoff) carries it beside the wrappers, so a candidate edit to it never
+watches its own review. Grok
 passes follow the same rule as the others: the adapter's former 128-turn
 cap and one-hour CLI and API deadlines were removed in 2.4.4, and Grok
 liveness logs are retained per pass as
@@ -117,13 +119,10 @@ the flag to satisfy the combined print/stream/verbose contract. Stdout is redire
 - The file IS the reviewer's activity transcript: what it read, what it
   claimed, when it went quiet -- readable mid-run by any supervising
   agent (the wrapper announces the scratch path at launch), and preserved
-  afterward as `review-<ts>-<tag>-r<pid>.stream.jsonl` (the pid component
+  afterward in the private attempt directory as
+  `review-<ts>-<tag>-r<pid>.stream.jsonl` (the pid component
   keeps same-second runs' artifacts disjoint -- the timestamp has
-  one-second resolution and scope/tag values repeat). That SHAPE is the
-  contract: the merge gate centralizes only the closed
-  `review-<ts>-<tag>...` artifact shape and deletes consolidated child
-  run dirs, so a nonmatching name would be excluded as transient
-  scaffolding and LOST at cleanup. This closes the
+  one-second resolution and scope/tag values repeat). This closes the
   "transcripts are invisible" gap without touching machine-global session
   storage (the wrapper keeps `--no-session-persistence`).
 - The RESULT ENVELOPE the failure classification depends on is the
@@ -164,14 +163,14 @@ the flag to satisfy the combined print/stream/verbose contract. Stdout is redire
 
 ## Consumer documents
 
-The slice updates the operator-facing inventories WITH the mechanisms,
-never after them: `INSTALL.md` documents `CROSS_REVIEW_STALL_WARN_SECS`
-(grammar, default, fail-closed rule) and the liveness-log artifact; the
-`docs/AGENTS.md.template` wrapper rows state the stream-json invocation,
-the preserved stream/liveness artifacts, and the duration stamp; and
 `docs/audit-protocol.md` carries the review-the-reviewers section that
-consumes them. A mechanism whose knob, artifact, or header is absent from
-those inventories is not landed.
+consumes the duration stamps and the liveness artifacts. The stall
+threshold is not operator configuration under the launcher: paired
+dispatch removes every `CROSS_REVIEW_` variable from the reviewer's
+environment (`Get-CrgPairedSessionEnvironment` in
+`scripts/paired-review-session.psm1`), so every review host resolves the
+default. `INSTALL.md` therefore documents neither the threshold nor the
+liveness log.
 
 ## Out of scope, stated deliberately
 
@@ -183,10 +182,8 @@ those inventories is not landed.
 
 ## Consumers checked
 
-Verdict-header consumers were verified against the added header line:
-the trend analyzer and dispatch-checklist each hold a CLOSED whitelist
-regex over header-fragment lines and fail closed on anything outside it
-(measured at their `$headerLineRe` definitions), so `REVIEW-DURATION-SECS:`
-joins each consumer regex in the same slice that makes
-the wrappers emit it; landing the emitters without the widened consumers
-would make every new verdict read as malformed. a pattern sweep of the script tree surfaced no further whitelist copy.
+The verdict-header consumer is the shared paired artifact reader
+(`Read-CrgPairArtifactCore` in `scripts/paired-governance.psm1`, behind every
+verdict artifact reader of both origins, successful reviews included), which
+accepts only the exact ordered paired header, `REVIEW-DURATION-SECS:`
+included, and fails closed on anything else.

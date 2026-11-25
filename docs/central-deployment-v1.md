@@ -8,11 +8,12 @@ supplies an approval or fabricated release identity.
 
 One activation updates every attached project's next invocation. Existing
 invocations retain the selected release through completion. Routine compatible
-upgrades retain launcher ABI 3 and project configuration schema 1, with no
+upgrades retain launcher ABI 4 and project configuration schema 1, with no
 per-project release pin, copied runtime update or configuration rewrite.
-Existing ABI 2 stores require explicit store-wide launcher migration before
-activating ABI 3; fresh stores install ABI 3 directly. An ABI 1 store first uses
-an approved retained ABI 2 release for the preceding migration.
+Existing ABI 3 stores require explicit store-wide launcher migration before
+activating ABI 4; fresh stores install ABI 4 directly. An ABI 2 store first uses
+an approved retained ABI 3 release for the preceding migration, and an ABI 1
+store an approved retained ABI 2 release before that.
 
 ## Prerequisites and input approval
 
@@ -236,8 +237,7 @@ approved runtime manifest is not a central package.
 
 Outside `release/` the archive carries exactly `bootstrap.ps1`, `INSTALL.md`
 and these operator documents from the source commit's `docs/`:
-`AGENTS.md.template`, `audit-protocol.md`,
-`central-deployment-v1.md`, `central-guards-v1.md`,
+`audit-protocol.md`, `central-deployment-v1.md`, `central-guards-v1.md`,
 `central-instructions-v1.md`, `central-launcher-v1.md`,
 `central-publication-v1.md`, `central-runtime-v1.md`,
 `first-attachment-v1.md`, `install-values-v1.md`,
@@ -248,9 +248,8 @@ and these operator documents from the source commit's `docs/`:
 `reviewer-liveness-design.md`, `sandbox-execution-v1.md` and
 `v2.2-grok-reviewer-design.md`. The list is explicit because following links
 cannot tell operator documents from development records: the contracts cite
-plans, registers and audits by path. The gate source's own `AGENTS.md` and
-`CLAUDE.md`, earlier release records under `deploy/`, and the development
-records in `docs/` (plans, audits, investigations, the debt and scope
+plans, registers and audits by path. Earlier release records under
+`deploy/` and the development records in `docs/` (plans, audits, investigations, the debt and scope
 registers, migration contracts, incident notes and session guidance) are not
 packaged. A new operator document ships only once it is added to this list.
 
@@ -324,14 +323,37 @@ previous section, so attached projects keep working; each project's Open reports
 section in both root instruction files
 ([central instructions](central-instructions-v1.md)).
 
-For an existing ABI 2 store, import the approved ABI 3 release, let current
-invocations finish, then run the explicit migration before activation:
+For an existing ABI 3 store, publish or import the approved ABI 4 release, then
+run the explicit migration before activation, in a maintenance window: no
+session in any logon starts a gate operation of this store; every operation
+already started has completed, every unknown outcome has been inspected with
+Status or Resume, and no gate host or command keeps custody of an unconfirmed
+descendant; only then is every gate host of the store, in every logon, ended,
+before `-UpgradeRuntimeLauncher` runs. Ending a host or command that still
+keeps such custody would release it, so while one cannot be brought to that
+state, defer the migration. No restore of store files runs during the window:
+the store lock serializes maintenance operations, not a restore. The ABI 4
+launcher refuses a release whose launcher declares another ABI than its
+manifest names; a bootstrap from before the declaration rule (before source
+commit `4025c2c`) could publish one, an ABI 4 launcher stamped ABI 3, and
+activate it. Before the window, with the ABI 3 launcher still installed,
+finish or resume to completion every pending operation bound to such a
+release, since the ABI 4 launcher cannot resume it, and activate a release
+that both launchers admit: a verified release of launcher ABI 3 or earlier
+whose launcher declares the ABI its manifest names, or declares none. An
+ABI 4 release is not such a replacement, because activation refuses it while
+the ABI 3 launcher is installed. A release that fails verification is run by
+neither launcher: restore its files or activate a verified release, and
+operations bound to it stay pending until its files are restored. The
+migration ends no process. Of that window it
+verifies only that no other process holds either launcher file, and only while
+it still has a launcher file to replace; otherwise it refuses:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -UpgradeRuntimeLauncher -RuntimeStore $CrgStore -ReleaseId $CrgReleaseId
 if ($LASTEXITCODE -ne 0) { throw 'Launcher ABI migration incomplete; preserve the recorded transition' }
 powershell -NoProfile -ExecutionPolicy Bypass -File $CrgBootstrap -ActivateRuntime -RuntimeStore $CrgStore -ReleaseId $CrgReleaseId
-if ($LASTEXITCODE -ne 0) { throw 'ABI 3 activation failed' }
+if ($LASTEXITCODE -ne 0) { throw 'ABI 4 activation failed' }
 ```
 
 After the last bootstrap command, release the private directories:
@@ -341,14 +363,114 @@ Close-CrgPrivateWork
 ```
 
 Migration preserves the predecessor release/hash in `launcher-install`, the
-bounded `launcher-upgrade-v3` transition and exact `launcher-prior-v3` provenance.
-An earlier ABI 1 store first completes the retained ABI 2 migration, preserving
-the existing `launcher-upgrade` record. An interrupted migration resumes only
+bounded `launcher-upgrade-v4` transition and exact `launcher-prior-v4` provenance.
+An earlier ABI 2 store first completes the retained ABI 3 migration, which keeps
+its `launcher-upgrade-v3` and `launcher-prior-v3` records, and an ABI 1 store
+the ABI 2 migration before that, preserving `launcher-upgrade`.
+
+Every gate host and gate command holds `launcher.ps1` and `launcher-install`,
+sharing only reads, while it runs. Under the store lock and before its first
+write, the migration checks the first-line ABI declarations of the release's
+launcher and of the installed launcher against their manifest and provenance
+([launcher](central-launcher-v1.md)), that each provenance record it relies on
+is byte for byte the record the store's recorded transitions imply, that this
+account's gate
+startup entry has no conflict host installation would refuse, while it has
+replaced neither launcher file, that the ABI 4 launcher admits the release
+`active-release` names (verified payloads, a launcher ABI no later than its
+own, the launcher capabilities and a launcher declaration that agrees with
+its manifest), and, while it
+still has a launcher file to replace, that no process other than the migration
+holds either launcher file; a holder list that does not name the migration's
+own open of that file is refused as unconfirmed. When a check fails it writes
+nothing; a refusal of the release an intact `active-release` names gives that
+release and the steps above, while an `active-release` that cannot be decoded
+refuses with its own record error. A
+holder refusal names each holding process ID and its session; a process that
+holds a launcher file without read sharing, or with write or delete access,
+makes the migration's own open of that file fail with a sharing violation
+instead, and that refusal names no process. A process that opens a launcher file
+after these checks blocks the replacement of that file with a sharing violation
+unless it holds only read access and shares both reads and deletion; every gate
+host and command denies delete sharing and so blocks it. If
+`launcher-install`, replaced first, fails, the transition is recorded and the
+complete ABI 3 pair is unchanged: the ABI 3 launcher stays runnable, project
+commands work again once its host is started, and
+activation of an ABI 3 or earlier release stays permitted. If `launcher.ps1`
+then fails, `launcher-install` already holds the ABI 4 provenance beside the
+ABI 3 launcher: every launcher command and host refuses to start, and
+activation refuses, until the migration completes. A rerun of the same command
+resumes either state once no other process holds the launcher files, and
+refuses while one does. A run interrupted after it wrote `launcher-prior-v4`
+but before it recorded the transition leaves that record; the next run accepts
+it when it equals the verified installation record and refuses otherwise.
+After both files are replaced the migration starts this logon's ABI 4 host. A
+rerun after that replaces nothing: it reports the migration complete and,
+without the holder check, repairs only this account's startup entry and host.
+Installation and migration register the per-user Run entry, which names the
+store's `launcher.ps1`, only for the account that runs them; every account with
+that entry starts the ABI 4 host at its next logon.
+
+An interrupted migration resumes only
 through the same command and target release; differing occupants are not replaced.
-Activation checks actual installed-loader provenance and refuses an ABI mismatch
-or incomplete pair. Project configuration, hooks and private history do not change.
-The ABI 3 launcher retains earlier manifest support for recorded-runtime recovery
-and compatible rollback; keep the original releases required by pending work.
+The newest recorded transition owns the installation, and activation and
+migration classify the installed pair against it alone
+([launcher](central-launcher-v1.md)), with one action for each class:
+
+- predecessor, the exact pair the transition replaces, whose provenance
+  `launcher-prior-v4` holds: activation proceeds for
+  releases the predecessor launcher admits, and rerunning the same migration
+  completes the transition.
+- successor, the pair the transition installs: activation proceeds, rerunning
+  the same migration reports it complete and repairs only host registration,
+  and a migration to the next ABI may follow.
+- partial, each launcher file absent or one of those two sides: activation and
+  every launcher command refuse; retry the same `-UpgradeRuntimeLauncher`
+  command, which completes the transition.
+- conflict, anything else: activation and every migration refuse; preserve
+  the store and restore its launcher files and records to one side of the
+  transition.
+
+Every class, the successor included, also requires the retained records of
+this and every earlier migration: `launcher-prior-v4` must equal the provenance
+the earlier records imply, and when that provenance is the ABI 3 transition,
+`launcher-prior-v3` must likewise equal the provenance implied for its
+predecessor. A missing or differing record makes the pair a conflict, and a
+malformed transition record refuses activation and migration.
+
+A new migration requires the successor pair when a transition is recorded, and
+a migration to an ABI below the newest transition's refuses before writing
+anything. Activation also requires `launcher-install` to be byte for byte the
+record the store's recorded transitions imply, checks actual installed-loader
+provenance, the installed launcher's ABI declaration and the selected release
+launcher's ABI declaration, and refuses an ABI mismatch or incomplete pair.
+
+The preceding ABI 3 bootstrap reads the `launcher-upgrade` and
+`launcher-upgrade-v3` records but neither `launcher-upgrade-v4`,
+`launcher-prior-v4`, ABI 4 manifests nor ABI 4 provenance. Its activation
+checks only that the installed pair is complete and agrees with its recorded
+origin; it neither classifies the pair against a transition nor checks its
+lineage, so it can activate an ABI 3 or earlier release on a complete ABI 3
+pair that the current bootstrap refuses, such as a restored pair outside the
+recorded transitions. Its `-InstallRuntimeLauncher`
+or ABI 3 `-UpgradeRuntimeLauncher` can start an ABI 3 host, which a resumed migration
+then refuses as a holder. Once `launcher-install` holds ABI 4 provenance it
+refuses all three. While a crash has left either launcher file absent it
+refuses activation. On a store migrated to ABI 3, its ABI 3
+`-UpgradeRuntimeLauncher` restores an absent `launcher-install` to the recorded
+ABI 3 provenance, which the resumed migration accepts. On a store installed
+directly at ABI 3, its `-InstallRuntimeLauncher` writes into an absent
+`launcher-install` the ABI 3 provenance of any release it is given whose
+launcher equals the installed one; unless that release is the one
+`launcher-prior-v4` names, the resumed migration and activation of the current
+bootstrap then refuse, so complete such a store with the current bootstrap
+only. Activation changes only `active-release`, which migration reads but
+never changes.
+Project configuration, hooks and private history do not change.
+The ABI 4 launcher retains earlier manifest support for recorded-runtime recovery
+and compatible rollback, so an active ABI 3 release that it admits keeps working
+until the ABI 4 release is activated; keep the original releases required by
+pending work.
 
 ## Prepare the first project attachment
 
@@ -375,8 +497,8 @@ attached project retires all of them. Nothing is retired before Attach
 completes, and ignored project data that is not gate payload stays. Linked
 worktrees share one common directory, so retirement follows ownership:
 
-- Tracked legacy gate files (`Get-CrgCurrentFileList` in `bootstrap.ps1`, and
-  the historical per-project inventories beside it in `b8d2162:bootstrap.ps1`), the
+- Tracked legacy gate files (`Get-CrgCurrentFileList` in `41557c1:bootstrap.ps1`,
+  and the historical per-project inventories beside it in `b8d2162:bootstrap.ps1`), the
   `.gitattributes` rules that exist only for them, and the legacy gate sections
   of the root instruction files leave through an ordinary reviewed Commit;
   Attach migrates only private-owned paths and refuses staged changes to public
@@ -615,10 +737,12 @@ installer wrote kept the host and every later Run entry from starting at
 logon. While that entry remains, installation reports an incomplete host
 installation and names it with its removal command: the registry offers no
 conditional delete, so the operator removes it and reruns the installation.
-A store migrated from ABI 2 reruns `-UpgradeRuntimeLauncher` with the release
-ID recorded in `launcher-upgrade-v3`; a store installed at ABI 3 reruns
-`-InstallRuntimeLauncher` with the release ID recorded in `launcher-install`.
-Neither rerun changes a launcher file.
+A store whose current launcher came from a migration reruns
+`-UpgradeRuntimeLauncher` with the release ID recorded in that latest
+transition (`launcher-upgrade-v4` after migration to ABI 4); a store installed
+directly at its current ABI reruns `-InstallRuntimeLauncher` with the release
+ID recorded in `launcher-install`. Neither rerun changes a launcher file or
+checks for processes that hold one.
 Compatible activation changes the next worker's runtime without restarting
 project sessions. All mutable operation state remains owned by the project.
 

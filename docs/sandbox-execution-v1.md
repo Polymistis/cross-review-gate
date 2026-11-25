@@ -85,7 +85,7 @@ the preamble-free invariant before process start.
 
 ## Runtime capture and installation
 
-Launcher ABI 3 preserves ordinary command forms and retained release support.
+Launcher ABI 3 and later preserve ordinary command forms and retained release support.
 The worker validates installed provenance, captures active-release with a retained
 read handle, validates the immutable release, releases the selector and invokes
 existing code. Readers share read access and never acquire runtime.lock.
@@ -98,17 +98,32 @@ selector beyond the bounded transition refuses and preserves recovery material.
 The existing release retention, preceding-runtime Resume and uncertain-child
 custody contracts remain binding.
 
-Explicit ABI 2 to ABI 3 migration validates predecessor provenance and retains
-the transition separately from earlier migration metadata. Installation creates
-a per-user logon startup entry and starts the host for the current logon. Foreign
-startup entries are preserved and refused. Startup metadata contains no project
+Explicit ABI 2 to ABI 3 and ABI 3 to ABI 4 migrations validate predecessor
+provenance and retain each transition separately from earlier migration
+metadata. Maintenance never stops a host. A running host holds the launcher
+files, so before the ABI 4 migration the operator ends every gate host and gate
+command of the store in every logon, each only after its operations have
+completed, its unknown outcomes have been inspected through Status or Resume
+and it keeps no custody of an unconfirmed child (see the failure transitions
+below). The holder list cannot tell that custody from an idle host, and ending
+the holder would release it; while a holder cannot be resolved that way, the
+migration is deferred. While the migration still has a launcher file to
+replace, it refuses before its first write while any other process holds
+either file, and names each holder that, like every gate host and gate
+command, only reads and shares reads; a rerun after both files are replaced
+only repairs host registration.
+Installation and migration ensure a per-user logon startup entry and start the
+host for the current logon; migration checks that entry for conflicts before its
+first write. Foreign
+startup entries that check finds are preserved and refused; the check and the
+registration are separate registry calls. Startup metadata contains no project
 root or review state. Compatible activation needs no session or project change.
 
 Transport code is retained from the installed-origin manifest. Workers capture
 the active runtime independently. The operation-read guard preserves the selected
 runtime's complete implementation and signature, adding validation at the held
 lock boundary and preserving the guard on read facades. Retained ABI 2 execution
-uses the trusted ABI 3 orchestration boundary while retaining the recorded
+uses the trusted installed-origin orchestration boundary while retaining the recorded
 compiler, review modules and runtime identity. No immutable older payload changes.
 Existing discovery sections remain admissible;
 normal reviewed instruction edits adopt the current host/client description.

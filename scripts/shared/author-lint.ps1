@@ -16,23 +16,23 @@
   authoritative for everything this linter does not encode.
 
   Run it before the first gate commit and paste its report into the
-  completion report. It ALSO runs mechanically: scripts/git-hooks/pre-commit
-  invokes it in staged mode as a fail-fast pre-pass before the AI backend --
-  ERROR-tier findings abort the commit there; CROSS_REVIEW_SKIP_AUTHOR_LINT=1 skips
-  ONLY that pre-pass (the AI review still runs; the escape for a linter
-  false positive). The hook executes HEAD's copy of this file (tempdir
-  extraction, never the working tree), so an edit here takes effect on the
-  NEXT commit after it lands. Manual runs remain the author-side default
-  before the first gate commit of a round.
+  completion report. It ALSO runs mechanically: the launcher's central
+  publication (Invoke-CrgCentralAuthorLint in scripts/central-publication.psm1)
+  runs it on the captured review input (-PairedInput or -FirstAttachmentInput)
+  as a fail-fast pre-pass before any reviewer starts, and ERROR-tier findings
+  stop the operation there. The launcher runs the retained copy of this file
+  from the release selected for the operation (for Resume, the release
+  recorded in its handoff), never the working tree, so an edit here takes
+  effect only once a release carrying it is activated. Manual runs remain the
+  author-side default before the first gate commit of a round.
 
   Check classes (v1). Tiers were set by CALIBRATION against the real doc tree
   (`-Tree`), not a priori: an error-tier check must fire ZERO false positives
   on the current (gate-clean) tree; one that cannot is downgraded to advisory.
     ERROR-tier (any finding -> exit 3; exit 1 is deliberately NOT used for
     findings -- an uncaught crash under $ErrorActionPreference='Stop' makes
-    `powershell -File` exit 1, so the pre-commit pre-pass reads 3 as
-    "findings, abort" and 1/anything-else as "linter broke, warn and fail
-    open to the AI gate"):
+    `powershell -File` exit 1, so 3 alone means "findings" and
+    1/anything-else means "linter broke"):
       LINE-ANCHOR  bare `<name>.<ext>:<line>` source citations in tracked
                    narrative docs (both `/` and `\` separators). Violates the
                    symbol-anchor rule (name the grep-able symbol, not the
@@ -215,9 +215,8 @@
                    surfaced as advisory). ADVISORY in v1 BY
                    CALIBRATION: the full-tree run surfaced irreducible false
                    positives that no mechanical rule separates from real dead
-                   refs -- a gitignored OPERATIONAL target
-                   (.orchestrator/dispatch-checklist.md) is indistinguishable
-                   from a gitignored EVIDENCE path (probe-pack) by ignore
+                   refs -- a gitignored OPERATIONAL target is
+                   indistinguishable from a gitignored EVIDENCE path (probe-pack) by ignore
                    status; plus intentional "this path does not exist"
                    references and doc-relative paths in package docs. Surfaces
                    candidates for author review; the gate stays the failsafe.
@@ -395,7 +394,7 @@
   inventory-count + magnitude classes), PLUS the ADDED lines of staged .rs
   files (MAGIC-COUNT-ASSERT only -- no count class ever reports a finding from a
   code line; the count classes read code solely to resolve their echo exemption). This
-  is the author-side pre-commit use, keyed on what THIS commit ADDS -- though the
+  is the author-side use before a commit, keyed on what THIS commit ADDS -- though the
   added-line SET is the trigger, not a bound on the reported TEXT: the prose classes
   report the added line itself, while MAGIC-COUNT-ASSERT reports the whole assertion
   SPAN once any physical line in it is added, so an untouched assertion resurfaces
@@ -417,9 +416,8 @@
   the report always prints to stdout regardless).
 
 .NOTES
-  PowerShell 5.1 compatible. Sibling of scripts/shared/dispatch-checklist.ps1;
-  mirrors its UTF-8 (read UTF-8 / write UTF-8-no-BOM) conventions. Unlike its
-  MoveFileEx atomic write, the optional -OutPath report uses a best-effort move
+  PowerShell 5.1 compatible. Reads UTF-8 and writes UTF-8 without a BOM. The
+  optional -OutPath report uses a best-effort move, not an atomic replace
   (the report always prints to stdout, so the file copy is a convenience).
 #>
 [CmdletBinding()]
@@ -507,13 +505,12 @@ function Set-CrgProcessConsoleEncoding {
 # console's code page, not UTF-8) and encodes text piped to native commands
 # with $OutputEncoding (ASCII by default), so `git ls-files` / `git show` /
 # `git diff` output is decoded lossily and UTF-8 Markdown can mojibake before
-# scanning -- masking or inventing a finding. auto-review.ps1 / auto-merge.ps1
-# pin the same trio so the documented UTF-8 read contract holds for the default
+# scanning -- masking or inventing a finding. auto-review.ps1 pins the same
+# trio so the documented UTF-8 read contract holds for the default
 # staged scope. Never swallow a failure here: continuing would run the scan
 # under a lossy decoder and risk a FALSE-CLEAN lint, the one outcome this
 # linter exists to prevent. (Codex BLOCKER: swallowed encoding setup defeated
-# the UTF-8 contract.) A failure is named and exits 1, the linter-crash status
-# the pre-commit pre-pass already reads as "the linter itself broke".
+# the UTF-8 contract.) A failure is named and exits 1, the linter-crash status.
 # Only this process's cached encodings change, never the console window shared
 # with the invoking shell; the finally at the end of the script puts back the
 # values a switching run saved so the script leaves the process as it found
@@ -563,9 +560,7 @@ $script:PowerShellExtPattern = '\.(ps1|psm1)\z'
 # FORMAT (file:line cites, counts), not authored prose -- the ONLY files eligible
 # for the generated-doc skip. This is the security boundary: an authored doc at
 # any other path can never self-exempt by typing a `Generated:` stamp (see
-# Test-IsGeneratedContent). The tracked generator output this pattern names is
-# analyze-blocker-trends.ps1 -> docs/blocker-trends.md (its default -OutPath);
-# dispatch-checklist's default OutPath is gitignored, and author-lint's own reports are
+# Test-IsGeneratedContent). author-lint's own reports are
 # conventionally written to gitignored logs/. -OutPath is an UNRESTRICTED string,
 # so this PATH gate -- not the destination convention -- is what guarantees a
 # report written to ANY tracked path is still scanned unless it is this exact
@@ -576,10 +571,6 @@ $script:PowerShellExtPattern = '\.(ps1|psm1)\z'
 # boundary, so a case-variant authored path like `docs/Blocker-Trends.md`
 # must NOT match and must NOT be skipped. (Codex BLOCKER: a
 # case-insensitive gate let a wrong-cased authored doc self-exempt.)
-# Path matches the analyzer's default -OutPath (docs/blocker-trends.md) and the
-# install docs' generate-this-file instruction, so a generated trend report is
-# skipped rather than scanned as authored prose and flagged on its machine-
-# emitted citations. If you configure a different -OutPath, update this pattern.
 $script:GeneratedDocPathPattern = '^docs/blocker-trends\.md\z'
 
 # Extensions a bare line-anchor can name -- the TEXT file types cited with a
@@ -2696,9 +2687,6 @@ function ConvertTo-ProcessArgumentList {
 # Start-Process on Windows PowerShell 5.1 rejects a raw process environment
 # carrying both Path and PATH. Preserve effective lookup order first,
 # append raw-only directories, then collapse to one verified canonical entry.
-# These PATH helpers equal the shared ones in scripts/review-common.ps1 but stay
-# local: the pre-commit hook runs this file as a standalone single-file trusted
-# copy, so it cannot dot-source a sibling. Keep the copies equivalent.
 function Get-PrependedToolPathParts {
   param([string[]]$CandidateDirs, [string]$CurrentPath)
   $parts = New-Object 'System.Collections.Generic.List[string]'
@@ -5029,8 +5017,6 @@ function ConvertTo-SafeDisplayText {
   # finding read as though it named a different file. LineSeparator and
   # ParagraphSeparator (U+2028 / U+2029) are line breaks to many renderers, so a name
   # carrying one SPLITS the report row that names it -- the erasure a raw CR performs.
-  # The sibling gate scripts' `ConvertTo-SafeProcessDiagnostic` escapes the same
-  # categories, so the gate's diagnostics keep one vocabulary.
   #
   # THE UNIT OF CLASSIFICATION IS THE SCALAR, NOT THE UTF-16 CODE UNIT, and the
   # distinction is the whole correctness of the guard. `GetUnicodeCategory(Char)` over
@@ -5117,9 +5103,8 @@ function Format-Report {
 function Write-ReportFile {
   param([string]$Body, [string]$Path)
   # Best-effort write: full body to a sibling temp, then replace the target, so a
-  # mid-write failure does not truncate an existing report. NOTE this is NOT the
-  # MoveFileEx atomic-replace the sibling dispatch-checklist.ps1 uses for its
-  # GATE artifact -- `Move-Item -Force` is adequate here because -OutPath is an
+  # mid-write failure does not truncate an existing report. NOTE this is NOT an
+  # atomic replace -- `Move-Item -Force` is adequate here because -OutPath is an
   # optional convenience copy (the report also always prints to stdout), not a
   # consumed artifact. Do not claim atomic-replacement semantics for it.
   $dir = Split-Path -Parent -Path $Path
@@ -5551,9 +5536,8 @@ function Invoke-GitCheckedNulText {
   # Redirecting to a file and reading the whole text back is what keeps the bytes
   # git wrote; the caller then splits on NUL, the one separator no pathname holds.
   # UTF-8: git writes `-z` pathnames as raw bytes, and this repo's paths are UTF-8.
-  # The scratch file goes to the OS temp dir, never inside the repo: this linter runs
-  # from the pre-commit hook, and a scratch file in the tree would dirty the very
-  # worktree the gate checks for cleanliness.
+  # The scratch file goes to the OS temp dir, never inside the repo: a scratch
+  # file in the tree would dirty the very worktree being linted.
   param([string[]]$GitArgs, [string]$What)
   $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "author-lint-z-$([guid]::NewGuid().ToString('N')).bin")
   $tmpErr = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "author-lint-zerr-$([guid]::NewGuid().ToString('N')).bin")
@@ -6150,9 +6134,8 @@ if ($OutPath) {
 # Error-tier findings exit 3, NOT 1: an uncaught crash under
 # $ErrorActionPreference='Stop' makes `powershell -File` exit 1, so exit 1
 # is effectively reserved as the crash signal. Using a distinct findings
-# code lets the pre-commit pre-pass distinguish "real findings -> abort
-# the commit" (3) from "the linter itself broke -> warn and fail open to
-# the still-running AI gate" (1, or any other unexpected exit).
+# code lets a caller distinguish real findings (3) from the linter itself
+# breaking (1, or any other unexpected exit).
 $errorCount = @($allFindings | Where-Object { [string]::Equals($_.Tier, 'ERROR', [System.StringComparison]::Ordinal) }).Count
 if ($errorCount -gt 0) { exit 3 } else { exit 0 }
 } finally {

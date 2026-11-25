@@ -136,11 +136,11 @@ function Assert-CrgNoReservedProjectPlaceholder {
 function Get-CrgRenderSlotLayout {
   param(
     [Parameter(Mandatory = $true)][byte[]]$Bytes,
-    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target,
+    [Parameter(Mandatory = $true)][ValidatePattern('\Areview-prompt\z', Options = 'None')][string]$Target,
     [switch]$FinalOutput
   )
   $records = Read-CrgInstallValueRecords -Bytes $Bytes -MaxBytes 1048576 -Label $Target
-  $required = if ([string]::Equals($Target, 'review-prompt', [System.StringComparison]::Ordinal)) { @('project-context', 'project-hazards', 'scoped-authority') } else { @('scoped-authority') }
+  $required = @('project-context', 'project-hazards', 'scoped-authority')
   $allowed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
   foreach ($name in $required) { $null = $allowed.Add($name) }
   $found = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
@@ -177,7 +177,7 @@ function Invoke-CrgInstallValueRender {
   param(
     [Parameter(Mandatory = $true)][object]$Values,
     [Parameter(Mandatory = $true)][byte[]]$TemplateBytes,
-    [Parameter(Mandatory = $true)][ValidatePattern('\A(?:review-prompt|agents-template)\z', Options = 'None')][string]$Target
+    [Parameter(Mandatory = $true)][ValidatePattern('\Areview-prompt\z', Options = 'None')][string]$Target
   )
   if ($null -eq $Values.Blocks) { throw 'renderer received no parsed values blocks' }
   $layout = Get-CrgRenderSlotLayout -Bytes $TemplateBytes -Target $Target

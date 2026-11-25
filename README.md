@@ -1,6 +1,6 @@
 # cross-review-gate
 
-**Version 2.9.1** (Windows / PowerShell) — the authoritative value is the
+**Version 2.12.7** (Windows / PowerShell) — the authoritative value is the
 `VERSION` file at the package root; this line restates it for readers.
 
 Version 2.7 supplies a read-only central launcher and an installation-managed
@@ -33,16 +33,15 @@ named folders. Reviews apply the scope the preceding approved configuration
 selects. Once any project's retained history holds such a record, rollback
 below 2.5 is unsupported (see `docs/private-governance-v1.md`).
 
-Version 2.6 keeps review findings. These features belong to the ordinary
-(not paired) Codex and Claude reviews: a passing review adds its QUALITY
-and NOTE findings as tasks in the per-user `TASKS.md` (removed in 2.8.0),
-and the retry of a blocked staged review needs a remediation record first
-(described below and in `docs/review-feedback-v1.md`). A passing review's findings
-are not shown to any later review; blocked rounds are shown to a later
-staged review of the same working tree and HEAD, as section 5 there
-defines. Identity decisions and comparisons of outside field values (verdict
+Version 2.6 keeps review findings. These features belonged to the ordinary
+(not paired) Codex and Claude reviews, which 2.12.0 removed: a passing
+review added its QUALITY and NOTE findings as tasks in the per-user
+`TASKS.md` (removed in 2.8.0), and the retry of a blocked staged review
+needed a remediation record first. A passing review's findings are not
+shown to any later review; blocked rounds were shown to a later staged
+review of the same working tree and HEAD. Identity decisions and comparisons of outside field values (verdict
 and record fields, Git output, paths) are ordinal rather than by culture;
-the review wrappers' `-Scope`, the Codex wrapper's `-ReasoningEffort` and
+the Codex wrapper's `-ReasoningEffort` and
 the launcher's `-AuthoringAgent` keep `ValidateSet` binding (a culture
 match) and are then mapped ordinally to the exact listed spelling, and
 2.6.0 still found verdict lines with culture matches. The
@@ -57,7 +56,7 @@ names as Git reports them. Its PowerShell entry points put back the console
 code pages they change; the hook's promoter child leaves that to the commit
 wrapper. The bootstrap changed again; take its hash from the release record.
 Version 2.6.2 has the hook's promoter child put back the console code pages
-itself, so a commit through `run-gate.sh` or a plain `git commit` no longer
+itself, so a gated commit no longer
 leaves the console on UTF-8; has bootstrap raise a console code-page
 failure around a Git call to its caller, whose recovery puts back a gate
 file moved aside during install, instead of ending the run; has the
@@ -97,15 +96,15 @@ again; take its hash from the release record.
 Version 2.6.5 switches console encodings only inside the running process,
 never on the console window it shares with the invoking shell, so a killed
 run leaves that console as it was (Git input setup, the review wrappers,
-author-lint, auto-merge and worker-audit); in the central status,
+author-lint, the merge gate and the worker audit); in the central status,
 object-batch and retention runners, the attribute-neutral diff runner and
-auto-merge's identity runner, confirms that a failed Git child
+the merge gate's identity runner, confirms that a failed Git child
 has exited and every holder of its output pipes has closed them before
 anything it uses is released, keeping the index copy, history control file, admission owners,
 private initialization pins, attribute-neutral context and the launcher's runtime
 owners when that cannot be shown; and bounds the remaining Git captures (the
 project-mode declaration, the reviewed tree listing, the attribute-neutral
-runner's errors, auto-merge's identity runner and the claude version probe)
+runner's errors, the merge gate's identity runner and the claude version probe)
 and the waits for the attribute-neutral and identity runners to exit.
 The bootstrap changed again; take its hash from the release record.
 Version 2.6.6 extends that confirmation to bootstrap's identifier capture,
@@ -167,41 +166,35 @@ and is enabled by reviewed project configuration. Central deployment is
 documented in [INSTALL.md](INSTALL.md) and
 [central deployment](docs/central-deployment-v1.md).
 
-A git pre-commit / pre-merge gate that runs **two independent AI agents
-in cross-review**: when one agent authors a commit, the OTHER reviews
-it. Every commit and every merge gates on the review's verdict;
-findings are categorized into BLOCKER / QUALITY / NOTE tiers with
-strict fail-closed semantics. Only BLOCKER findings block (2026-07
-severity contract): QUALITY findings pass the gate as non-blocking
-findings; NOTE is informational. A passing ordinary (not paired) Codex
-or Claude review shows its non-blocking findings to the session that
-submitted the change, QUALITY first, for that session to fix as part of
-the current change or drop; no finding is recorded as work for a later
-session, and a passing review's findings are not shown to any later
-review. PASS lines state that a review covers the source diff only, not
-target execution or deployment readiness, and a passing commit or merge
-review also prints a reminder to delete any task the change completes from
-`TASKS.md` and every other task list once the change has landed, since task
-lists hold unfinished work only. In an
-ordinary staged review, a
-retry of a blocked commit is
-refused before review until a remediation record names, for each earlier
-BLOCKER it is asked to cover (from the blocked rounds of the last 14 days,
-the newest 20 rounds, up to 256 findings newest first), the invariant
-broken, the sweep made and the sites fixed, and the
-reviewer is shown those findings and the record; when the earlier rounds
-cannot be looked up, the review runs without them and says so
-(`docs/review-feedback-v1.md`).
+A review gate that runs **two independent AI agents in cross-review**:
+when one agent authors a change, the OTHER reviews it. The central
+launcher publishes a submitted change only after its review passes, and
+the private governance branch moves only through the launcher. Commits
+made on the public branch outside the launcher are not reviewed; the next
+launcher review covers only the submitted change: the proposed commit
+message, the software change staged above the public tip and the private
+governance change staged above the private branch tip
+(`docs/central-publication-v1.md`). Findings are categorized into
+BLOCKER / QUALITY / NOTE tiers with strict fail-closed semantics. Only
+BLOCKER findings block (2026-07 severity contract): QUALITY findings
+pass the gate as non-blocking findings; NOTE is informational. A passing
+review shows its non-blocking findings to the session that submitted the
+change, for that session to fix as part of the current change or drop;
+no finding is recorded as work for a later session, and a passing
+review's findings are not shown to any later review. PASS lines state
+that a review covers the source diff only, not target execution or
+deployment readiness, and a passing review also prints a reminder to
+delete any task the change completes from `TASKS.md` and every other
+task list once the change has landed, since task lists hold unfinished
+work only (`docs/review-feedback-v1.md`).
 
-This package contains the Codex and Claude backend wrappers, the optional
-central Grok fallback reviewer adapter, the shared review
-prompt template, the pre-commit hook with backend routing, commit
-wrappers that handle the cross-review env-var convention, a trend analyzer,
-an author-side mechanical pre-pass
-linter, a recurrence-ranked dispatch checklist generator, an audit protocol
-for the review surface itself, and a bootstrap script that publishes releases
-into a central runtime store, installs the store's launcher and activates a
-release.
+This package contains the central launcher and its release-local
+modules, the Codex and Claude backend wrappers, the optional central
+Grok fallback reviewer adapter, the shared review prompt template, an
+author-side mechanical pre-pass linter that the launcher runs before
+review, an audit protocol for the review surface itself, and a bootstrap
+script that publishes releases into a central runtime store, installs
+the store's launcher and activates a release.
 
 ## Why
 
@@ -222,52 +215,26 @@ can be slotted in as a backend.
   also enable the optional `grok` fallback REVIEWER (the model and effort
   of the central profile the project names, `recommended` by default),
   which reviews only after two positively identified exhaustions.
-- **`REVIEW_BACKEND` names the preferred REVIEWER** (not the committer). The
-  pre-commit hook reads `REVIEW_BACKEND` and starts with THAT backend's
-  wrapper. To get cross-review, the committer sets it to the OTHER
-  backend: Claude commits set `REVIEW_BACKEND=codex` so Codex
-  reviews; Codex commits set `REVIEW_BACKEND=claude` so Claude
-  reviews. The commit-wrapper scripts
-  (`scripts/codex/commit.ps1`, `scripts/claude/commit.ps1`) handle
-  this convention for you (each sets the env var to the OPPOSITE of
-  its own identity, saved/restored around the call; the Codex entry
-  runs the one implementation in `scripts/claude/commit.ps1`) so
-  you don't forget. Both direct wrappers and `scripts/run-gate.sh` bind the
-  current worktree by refusing ambient Git
-  repository/history/attribute/config selectors before the first Git command;
-  ordinary HOME/XDG configuration remains supported. Each direct commit entry
-  also establishes exactly one canonical `GIT_NO_REPLACE_OBJECTS=1` raw
-  environment entry before launching Git.
-  Set `REVIEW_BACKEND=both` for defense-in-depth on high-stakes commits:
-  two logical review legs run in series, and each independently makes one
-  automatic alternate-provider attempt only after positively identified
-  token exhaustion. A non-exhaustion first-leg failure short-circuits the
-  second leg. Effective providers may collapse onto one, including for
-  commit-wrapper edits; each leg still requires a separate complete passing
-  review of the same candidate. Automatic substitution requires neither a
-  Claude verdict nor distinct effective providers.
+- **`-AuthoringAgent` names the IMPLEMENTER** (not the reviewer). The
+  launcher's `-Commit` and `-Attach` take `-AuthoringAgent codex|claude`,
+  and the runtime policy selects the opposite provider as reviewer:
+  Codex-authored changes are reviewed by Claude, Claude-authored changes
+  by Codex. A change to `scripts/paired-review-session.psm1`, which
+  schedules the review legs, runs two review legs, one preferring each
+  provider, and each leg requires a separate complete passing review of
+  the same candidate. No caller option selects or skips a provider.
 - **Token-exhaustion fallback**: a wrapper exit 4 means
   POSITIVELY-IDENTIFIED token exhaustion (the wrapper recognized a
   CLI-owned limit signature and wrote a durable `.exhaustion.json`
   sidecar; anything ambiguous stays exit 3, fail-closed, never
-  fallback-eligible). The commit gate then re-runs the same review
-  once on the other backend, and the merge gate substitutes a FULL
-  panel on the other provider for its chosen panel's exhaustion —
-  unless a surviving panel child already decided the merge (a
-  BLOCKER keeps exit 2 instead of burning a substitute panel; any
-  fail-closed or unknown child exit aborts on its own arm), and a
-  codex-to-claude substitute is additionally refused when the branch
-  touches the configured consistency doc or the base's claude
-  wrapper is not confirmed to declare `-ArtifactTag` (the refusal names
-  the remedy).
+  fallback-eligible). The review leg's next attempt then runs on the
+  other provider, and, in a project whose reviewed configuration enables
+  Grok fallback, a second exhaustion moves the leg to Grok.
   Cross-review is preferred; a fallback landing on the author's own
   provider is an internally recorded self-review accepted over a stalled
-  gate. Routing is automatic, per invocation, and never changes caller
-  environment state. A successful caller sees the same provider-neutral
-  PASS shape whether substitution occurred or not; provider identity and
-  exhaustion remain in the durable verdict headers and sidecars. Provider
-  availability is not a caller option, and no skip-provider switch exists.
-  When no provider can produce a verdict, the gate fails closed.
+  gate. Routing is automatic and per operation. Provider identity and
+  exhaustion remain in the durable verdict headers and sidecars. When no
+  provider can produce a verdict, the gate fails closed.
 - **Verdict contract**: every review emits per-category enumeration
   (8 categories: PLAN-DRIFT, SILENT-FAILURE, TOMBSTONE-OR-SHIM,
   CROSS-CRATE-CONTRACT, LOADER-OR-ASSET-EDGE, CONVENTION-ADHERENCE,
@@ -306,8 +273,10 @@ can be slotted in as a backend.
   the campaign. A declaration edit is ordinary reviewed configuration and
   may land beside other work; the declaration from the trusted state before
   the change governs that review, so the candidate never selects the rules
-  used to judge itself. A malformed governing declaration produces a loud
-  warning and `shipped` fallback rather than blocking project work.
+  used to judge itself. A grammar-invalid governing declaration of at most
+  16 MiB selects `shipped` defaults, reported in the review's injected
+  project-mode block, rather than blocking project work; a larger file is
+  refused.
   Completion is argued with
   the evidence contract (date + command + observed output + named
   revision per citation; build output, captured ordinary operation, and
@@ -328,28 +297,16 @@ can be slotted in as a backend.
   the global `--attr-source=<tree>` option on `check-attr` and on
   `hash-object --path --stdin`. Bootstrap runs behavioral probes for both
   commands and refuses publication when either capability is absent.
-  The wrappers also pin `--no-relative` on every project-mode evidence diff
+  The launcher's evidence diffs also pin `--no-relative`
   (available since Git 2.28)
-- complete, unshallowed repository history for `-Scope Commit`,
-  `-Scope Branch`, and `scripts/shared/auto-merge.ps1`. A shallow clone
-  must be converted with `git fetch --unshallow` (or replaced by a full
-  clone) before those operations. `-Scope Staged` remains available on
-  both backends in a shallow clone; Codex `-Scope Uncommitted` remains
-  available too (Claude does not support Uncommitted scope)
-- a SHA-256 utility (`sha256sum` or `shasum`) on the
-  pre-commit hook's PATH — shipped with Git for Windows; the hook
-  digests the reviewed diff before any review starts and refuses the
-  commit without one
 - [Codex CLI](https://github.com/openai/codex) installed and
   authenticated, OR
 - [Claude Code CLI](https://claude.com/claude-code) 2.1.248 or later
   with an active subscription, OR (recommended) both. The Claude wrapper
   requires the restricted-mode boundary introduced in 2.1.248 and refuses
   missing, malformed, or older version output before launching a review
-- Either or both backend can run review; the trend analyzer scans
-  both backends' verdict logs by default (missing dirs are skipped, so
-  single-backend installs work); the audit protocol references both
-  backends' wrappers and the shared prompt template
+- Either or both backend can run review; the audit protocol references
+  both backends' wrappers and the shared prompt template
 
 ## Install
 
@@ -360,10 +317,6 @@ machine-local runtime store with `bootstrap.ps1`, installs the store's stable
 launcher once, activates the release, and attaches each project with the
 launcher's `-Attach`. Later compatible upgrades activate a new release
 centrally, with no per-project step.
-
-Per-project installation (hook mode) is retired. The gate's own source
-repository keeps its installed hook files until that repository is attached to
-the launcher.
 
 ## What a project prepares before Attach
 
@@ -395,46 +348,23 @@ cross-review-gate/
 ├── INSTALL.md             (installation summary)
 ├── VERSION                (authoritative package version consumed by bootstrap)
 ├── bootstrap.ps1          (central runtime publication, launcher installation and activation)
-├── .gitignore             (ignores the gate's generated logs/ tree)
-├── .gitattributes         (named checkout contracts for sh and rendered-value surfaces)
+├── .gitignore             (ignores logs/)
+├── .gitattributes         (named checkout contracts for rendered-value surfaces)
 ├── scripts/
+│   ├── central-launcher.ps1           (stable launcher, installed into the runtime store)
+│   ├── *.psm1                         (release-local launcher operation modules)
+│   ├── review-common.ps1              (shared review implementation the wrappers dot-source)
 │   ├── codex/
 │   │   ├── auto-review.ps1            (Codex backend review wrapper)
-│   │   ├── auto-merge.ps1             (legacy launcher entrypoint; forwards to shared)
-│   │   ├── commit.ps1                 (Codex-implementer entry; runs the claude/ wrapper)
 │   │   └── review-prompt-template.md  (shared prompt with rendered project values)
-│   ├── shared/
-│   │   ├── auto-merge.ps1             (shared ff-merge gate; Codex or Claude review)
-│   │   ├── analyze-blocker-trends.ps1 (trend report over verdict logs)
-│   │   ├── author-lint.ps1            (author-side mechanical pre-pass linter)
-│   │   ├── dispatch-checklist.ps1     (recurrence-ranked dispatch checklist from verdict logs)
-│   │   └── worker-audit.ps1           (per-landing process audit over the verdict logs;
-│   │                                   auto-merge runs a TRUSTED copy after a merge,
-│   │                                   non-gating; skipped with a note when
-│   │                                   no trusted source holds it or the central
-│   │                                   review-log dirs do not resolve)
 │   ├── claude/
-│   │   ├── auto-review.ps1            (Claude backend review wrapper)
-│   │   └── commit.ps1                 (the one commit wrapper; Claude implementer when run directly)
-│   ├── git-hooks/
-│   │   └── pre-commit                 (REVIEW_BACKEND-routed pre-commit hook)
-│   └── run-gate.sh                    (stable gate-firing entry point: worktree,
-│                                       message file, reviewer backend, pass count
-│                                       (codex-side) as arguments; refuses to commit
-│                                       un-gated on repository-identity mismatch or
-│                                       malformed NUL-framed staged-set evidence;
-│                                       normalizes replacement suppression, clears
-│                                       retired project-mode authorization, rejects
-│                                       raw history/attribute/repository/config
-│                                       Git-selector environment names, when
-│                                       core.hooksPath is
-│                                       configured -- classified by git's exit
-│                                       status, so a set-but-empty value counts --
-│                                       or when the dispatcher is absent, disarmed,
-│                                       or fails its digest attestation)
+│   │   └── auto-review.ps1            (Claude backend review wrapper)
+│   ├── grok/
+│   │   └── auto-review.ps1            (optional Grok fallback reviewer adapter)
+│   └── shared/
+│       └── author-lint.ps1            (author-side mechanical pre-pass linter)
 ├── docs/
 │   ├── audit-protocol.md              (periodic review-surface audit)
-│   ├── AGENTS.md.template             (rendered merge source for AGENTS.md/CLAUDE.md)
 │   └── ...                            (additional product contracts and design
 │                                       documents, not exhaustively
 │                                       listed here)

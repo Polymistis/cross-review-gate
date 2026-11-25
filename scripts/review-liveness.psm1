@@ -4,10 +4,10 @@
 # before. The review wait itself stays unbounded: this module makes a quiet
 # reviewer VISIBLE and never times out, kills or retries one.
 #
-# Trusted review copies (the pre-commit hook's HEAD extraction, the merge
-# gate's base extraction and LOCAL manifest snapshots) carry this module beside
-# the wrappers, so a candidate cannot weaken the liveness code that watches its
-# own review.
+# The launcher runs reviews from the retained payload of the release selected
+# for the operation (for Resume, the release recorded in its handoff),
+# which carries this module beside the wrappers, so a candidate cannot weaken
+# the liveness code that watches its own review.
 
 # ---------------------------------------------------------------------------
 # Heartbeat helper: pure-.NET background thread that writes
@@ -313,10 +313,6 @@ public class AdversarialReviewHeartbeatV6 {
             }
             escalated[name] = stalled;
             if (stalled) {
-                // The console line names the FULL path: concurrent runs
-                // (tagged panel children, parallel repos) interleave one
-                // console, and a bare basename cannot be correlated back
-                // to its run's announced evidence dir.
                 if (missing) {
                     stallLines.Add("[" + heartbeatLabel + "-heartbeat] STALL-SUSPECT at " + stamp + ": '" + Path.Combine(evidenceDir, name) + "' has not been created after " + ((int)quietSecs) + "s and its pass is still active (the review is NOT killed - inspect the child process)");
                 } else {

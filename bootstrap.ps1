@@ -450,28 +450,18 @@ function Set-CrgNoReplaceObjectsChildEnvironmentSingleton {
 
 $script:CrgUtf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
 
-# The per-project gate files every runtime release carries beside the central
-# modules. The installed launcher refuses a release manifest that lacks the
-# dispatch and review entrypoints among them.
+# The review wrappers and their support files every runtime release carries
+# beside the central modules. The installed launcher refuses a release manifest
+# that lacks the review entrypoints among them.
 function Get-CrgCurrentFileList {
   return @(
     @{ Src = 'scripts/codex/auto-review.ps1';            Dst = 'scripts/codex/auto-review.ps1' },
-    @{ Src = 'scripts/codex/auto-merge.ps1';             Dst = 'scripts/codex/auto-merge.ps1' },
-    @{ Src = 'scripts/shared/auto-merge.ps1';            Dst = 'scripts/shared/auto-merge.ps1' },
-    @{ Src = 'scripts/codex/commit.ps1';                 Dst = 'scripts/codex/commit.ps1' },
-    @{ Src = 'scripts/shared/analyze-blocker-trends.ps1'; Dst = 'scripts/shared/analyze-blocker-trends.ps1' },
     @{ Src = 'scripts/shared/author-lint.ps1';            Dst = 'scripts/shared/author-lint.ps1' },
-    @{ Src = 'scripts/shared/dispatch-checklist.ps1';     Dst = 'scripts/shared/dispatch-checklist.ps1' },
-    @{ Src = 'scripts/shared/worker-audit.ps1';           Dst = 'scripts/shared/worker-audit.ps1' },
     @{ Src = 'scripts/codex/review-prompt-template.md';  Dst = 'scripts/codex/review-prompt-template.md' },
     @{ Src = 'scripts/claude/auto-review.ps1';           Dst = 'scripts/claude/auto-review.ps1' },
-    @{ Src = 'scripts/claude/commit.ps1';                Dst = 'scripts/claude/commit.ps1' },
-    @{ Src = 'scripts/git-hooks/pre-commit';             Dst = 'scripts/git-hooks/pre-commit' },
-    @{ Src = 'scripts/run-gate.sh';                      Dst = 'scripts/run-gate.sh' },
     @{ Src = 'scripts/review-liveness.psm1';             Dst = 'scripts/review-liveness.psm1' },
     @{ Src = 'scripts/review-common.ps1';                Dst = 'scripts/review-common.ps1' },
-    @{ Src = 'docs/audit-protocol.md';                   Dst = 'docs/audit-protocol.md' },
-    @{ Src = 'docs/AGENTS.md.template';                  Dst = 'docs/AGENTS.md.template' }
+    @{ Src = 'docs/audit-protocol.md';                   Dst = 'docs/audit-protocol.md' }
   )
 }
 
@@ -863,9 +853,9 @@ function Get-CrgHeldPackageProvenance {
     $hpContext = New-CrgPrivateAttributeContext -ScratchRoot $ScratchRoot -ObjectIdLength $Candidate.ObjectIdLength
     $hpWriter = { param([string]$Type, [byte[]]$Bytes) Add-CrgPrivateGitObject -Context $hpContext -Type $Type -Bytes $Bytes }
     # `check-attr --all` reports a special -filter/-ident/-working-tree-encoding
-    # state as specified. Accept it only for the fixed rendered-value surfaces
+    # state as specified. Accept it only for the fixed rendered-value surface
     # after the pathspec state proof distinguishes it from literal collisions.
-    $hpInstallValuePaths = @('scripts/codex/review-prompt-template.md', 'docs/AGENTS.md.template')
+    $hpInstallValuePaths = @('scripts/codex/review-prompt-template.md')
     if (@($hpInstallValuePaths | Where-Object { -not $hpBuffers.ContainsKey($_) }).Count -ne 0) { throw 'package provenance is missing a fixed rendered install-values surface' }
     $hpAttributeTree = New-CrgGitAttributeSourceTree -AttributeBuffers $hpAttributeBuffers -ObjectIdLength $Candidate.ObjectIdLength -WriteObject $hpWriter -ProbePaths $hpInstallValuePaths
     Assert-CrgPrivateInstallValuesAttributeStates -Context $hpContext -TreeOid $hpAttributeTree -Paths $hpInstallValuePaths
@@ -3004,7 +2994,7 @@ function Read-CrgRuntimeManifestBytes {
   $rtLines = @([System.Text.Encoding]::ASCII.GetString($Bytes).Split([char]10))
   if ($rtLines.Count -lt 7 -or $rtLines.Count -gt 262 -or -not [string]::Equals($rtLines[-1], '', [System.StringComparison]::Ordinal) -or
       -not [string]::Equals($rtLines[0], 'crg-runtime-manifest v1', [System.StringComparison]::Ordinal) -or
-      -not ([Linq.Enumerable]::Contains([string[]]@('launcher-abi 1', 'launcher-abi 2', 'launcher-abi 3'), $rtLines[3], [StringComparer]::Ordinal)) -or
+      -not ([Linq.Enumerable]::Contains([string[]]@('launcher-abi 1', 'launcher-abi 2', 'launcher-abi 3', 'launcher-abi 4'), $rtLines[3], [StringComparer]::Ordinal)) -or
       -not [string]::Equals($rtLines[4], 'config-schema 1', [System.StringComparison]::Ordinal)) {
     throw 'runtime manifest header, ABI, schema, inventory count, or final LF is invalid'
   }
@@ -3038,12 +3028,19 @@ function Read-CrgRuntimeManifestBytes {
   }
   # Retained ABIs keep these dispatch/review entrypoints stable, not the publisher's
   # entire optional helper inventory. Approved manifests own release contents.
-  foreach ($rtRequired in @('VERSION', 'scripts/run-gate.sh', 'scripts/git-hooks/pre-commit',
-      'scripts/codex/auto-review.ps1', 'scripts/codex/auto-merge.ps1', 'scripts/codex/commit.ps1',
-      'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1', 'scripts/claude/commit.ps1')) {
+  # ABI 4 requires only entries that launcher dispatch and review execute or
+  # read. ABI 1-3 launchers also require the hook-mode entry points, so a
+  # manifest declaring one of those ABIs keeps them: every launcher of its
+  # declared ABI must admit it, and activation trusts that declaration.
+  $rtRequiredEntries = @('VERSION', 'scripts/codex/auto-review.ps1', 'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1')
+  if ($rtLauncherAbi -lt 4) { $rtRequiredEntries += @('scripts/run-gate.sh', 'scripts/git-hooks/pre-commit', 'scripts/codex/auto-merge.ps1', 'scripts/codex/commit.ps1', 'scripts/claude/commit.ps1') }
+  # The declaration rule needs the launcher's bytes from ABI 4 on. ABI 1
+  # foundation packages predate the launcher and stay admissible without it.
+  else { $rtRequiredEntries += 'scripts/central-launcher.ps1' }
+  foreach ($rtRequired in $rtRequiredEntries) {
     if (@($rtEntries | Where-Object { $_.Path -ceq $rtRequired }).Count -ne 1) { throw "runtime manifest lacks required entrypoint '$rtRequired'" }
   }
-  if ($rtLauncherAbi -ge 3 -and @($rtEntries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) }).Count -ne 1) { throw 'ABI 3 manifest lacks the local gate transport' }
+  if ($rtLauncherAbi -ge 3 -and @($rtEntries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) }).Count -ne 1) { throw "ABI $rtLauncherAbi manifest lacks the local gate transport" }
   return [pscustomobject]@{ Bytes = $Bytes; Id = (Get-CrgSha256HexOfBytes -Bytes $Bytes); Version = $rtVersion; Source = $rtSource; LauncherAbi = $rtLauncherAbi; Entries = $rtEntries }
 }
 
@@ -3055,7 +3052,7 @@ function Read-CrgRuntimeLauncherBytes {
   if ($text -cmatch '\Acrg-runtime-launcher v1\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\n\z') {
     return [pscustomobject]@{ Schema = 1; LauncherAbi = 1; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = '-'; PreviousHash = '-' }
   }
-  if ($text -cnotmatch '\Acrg-runtime-launcher v(?<a>[23])\nlauncher-abi \k<a>\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
+  if ($text -cnotmatch '\Acrg-runtime-launcher v(?<a>[234])\nlauncher-abi \k<a>\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
   $record = [pscustomobject]@{ Schema = [int]$Matches['a']; LauncherAbi = [int]$Matches['a']; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = $Matches['p']; PreviousHash = $Matches['s'] }
   if (($record.PreviousReleaseId -ceq '-') -ne ($record.PreviousHash -ceq '-') -or $record.PreviousReleaseId -ceq $record.ReleaseId) { throw 'launcher provenance predecessor is inconsistent' }
   return $record
@@ -3064,7 +3061,7 @@ function Read-CrgRuntimeLauncherBytes {
 function New-CrgRuntimeLauncherBytes {
   param([int]$LauncherAbi, [string]$ReleaseId, [string]$Hash, [string]$PreviousReleaseId = '-', [string]$PreviousHash = '-')
   $text = if ($LauncherAbi -eq 1) { "crg-runtime-launcher v1`nrelease $ReleaseId`nsha256 $Hash`n" }
-    elseif ($LauncherAbi -in @(2, 3)) { "crg-runtime-launcher v$LauncherAbi`nlauncher-abi $LauncherAbi`nrelease $ReleaseId`nsha256 $Hash`nprevious-release $PreviousReleaseId`nprevious-sha256 $PreviousHash`n" }
+    elseif ($LauncherAbi -in @(2, 3, 4)) { "crg-runtime-launcher v$LauncherAbi`nlauncher-abi $LauncherAbi`nrelease $ReleaseId`nsha256 $Hash`nprevious-release $PreviousReleaseId`nprevious-sha256 $PreviousHash`n" }
     else { throw 'unsupported installed launcher ABI' }
   $bytes = [Text.Encoding]::ASCII.GetBytes($text)
   $null = Read-CrgRuntimeLauncherBytes -Bytes $bytes
@@ -3081,35 +3078,225 @@ function Assert-CrgRuntimeLauncherOrigin {
       $entry.Count -ne 1 -or $entry[0].Hash -cne $Installation.Hash) { throw 'installed launcher provenance differs from its retained approved origin' }
 }
 
+# A launcher declares its ABI on its first line, after an optional UTF-8
+# byte-order mark that PowerShell runs unchanged. The grammar must stay equal to
+# the one the launcher applies to its own bytes at startup; 0 means the bytes
+# carry no recognisable declaration.
+function Get-CrgRuntimeLauncherDeclaredAbi {
+  param([byte[]]$Bytes)
+  if ($null -ne $Bytes -and [Text.Encoding]::UTF8.GetString($Bytes, 0, [Math]::Min(64, $Bytes.Length)) -cmatch '\A\uFEFF?# Stable launcher ABI (?<a>[1-9][0-9]?)\. ') { return [int]$Matches['a'] }
+  return 0
+}
+
+# Launchers of ABI 4 and later require at startup that their line-1 declaration
+# and launcher-install both name the ABI their code implements, so a manifest or
+# installation record of ABI 4 or later must name exactly the declared ABI. ABI 1-3 launchers never read
+# the declaration and their packages were admitted without one, so for those
+# ABIs only a recognisable declaration naming another ABI refuses. Every
+# maintenance entry point applies this one rule before it publishes, writes
+# provenance or changes active-release.
+function Assert-CrgRuntimeLauncherDeclaration {
+  param([int]$LauncherAbi, [byte[]]$Bytes)
+  $declared = Get-CrgRuntimeLauncherDeclaredAbi -Bytes $Bytes
+  if (($declared -ne 0 -or $LauncherAbi -ge 4) -and $declared -ne $LauncherAbi) {
+    throw "launcher bytes declare $(if ($declared -eq 0) { 'no launcher ABI' } else { "launcher ABI $declared" }) where ABI $LauncherAbi is recorded; a release's manifest and an installation's provenance must name the ABI its launcher declares"
+  }
+}
+
+# A held transition record stays the record every later check of this
+# operation reads; $null means the record is positively absent.
+function Open-CrgRuntimeLauncherTransitionRecord {
+  param([string]$Store, [object]$Owners, [int]$LauncherAbi)
+  $path = Join-Path $Store $(if ($LauncherAbi -ge 3) { "launcher-upgrade-v$LauncherAbi" } else { 'launcher-upgrade' })
+  $owner = Open-CrgPackageSourceHold -Path $path -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
+  if ($null -eq $owner) { return $null }
+  $Owners.Add($owner) | Out-Null
+  $record = Read-CrgRuntimeLauncherBytes -Bytes $owner.Bytes
+  if ($record.Schema -ne $LauncherAbi -or $record.PreviousReleaseId -ceq '-') { throw "launcher upgrade record '$path' is not an exact ABI $LauncherAbi transition" }
+  return [pscustomobject]@{ Owner = $owner; Record = $record }
+}
+
+# Installation writes launcher-install only while no launcher transition is
+# recorded, always with both predecessor fields '-', and every migration writes
+# it byte for byte equal to its own transition record. The store's records
+# therefore imply the complete installation record of an ABI, release and hash:
+# the transition record to that ABI, which must name that release and hash; the
+# first-installation form while no transition to that ABI or below is recorded;
+# and none when the newest such transition targets a lower ABI, since only a
+# recorded migration installs an ABI after a migration. Provenance is accepted
+# by these complete bytes, never by selected fields, because two records can
+# name the same release and hash with different predecessors.
+function Get-CrgRuntimeLauncherLineage {
+  param([string]$Store, [object]$Owners, [int]$LauncherAbi, [string]$ReleaseId, [string]$Hash)
+  for ($abi = $LauncherAbi; $abi -ge 2; $abi--) {
+    $transition = Open-CrgRuntimeLauncherTransitionRecord -Store $Store -Owners $Owners -LauncherAbi $abi
+    if ($null -eq $transition) { continue }
+    if ($abi -eq $LauncherAbi -and [string]::Equals($transition.Record.ReleaseId, $ReleaseId, [StringComparison]::Ordinal) -and [string]::Equals($transition.Record.Hash, $Hash, [StringComparison]::Ordinal)) { return ,[byte[]]$transition.Owner.Bytes }
+    return $null
+  }
+  return ,(New-CrgRuntimeLauncherBytes -LauncherAbi $LauncherAbi -ReleaseId $ReleaseId -Hash $Hash)
+}
+
+# The newest recorded launcher transition owns the installed pair: a later
+# record supersedes every earlier one, whose fixed leaves it replaced or will
+# replace. Activation and migration act on this one classification.
+# predecessor: launcher-install equals the preceding provenance and launcher.ps1
+# hashes to the predecessor hash. The preceding provenance is the installation
+# record the store's history implies for the transition's predecessor fields
+# (Get-CrgRuntimeLauncherLineage); for ABI 3 and later the retained
+# launcher-prior record must equal it byte for byte, while the ABI 2 transition
+# keeps no prior record. successor: launcher-install equals the transition
+# record and launcher.ps1 hashes to its hash. partial: each fixed leaf is absent
+# or one of those two sides, which only a resumed migration completes.
+# conflict: anything else. Each migration keeps its transition and prior
+# records for the life of the store, and the bootstrap of launcher ABI 3
+# required them before it reported a migration complete, so every state, the
+# successor included, also requires that history: for a transition to ABI 3 or
+# later its prior record and, while the preceding provenance is itself an
+# earlier transition record, that transition's prior record where its ABI
+# keeps one, back to the first installation. A missing or
+# differing one is a conflict and a malformed transition record refuses; the
+# earlier records are checked, never classified against the fixed leaves.
+function Get-CrgRuntimeLauncherTransition {
+  param([string]$Store, [object]$Owners, [object]$Install, [object]$Launcher)
+  foreach ($abi in @(4, 3, 2)) {
+    $transition = Open-CrgRuntimeLauncherTransitionRecord -Store $Store -Owners $Owners -LauncherAbi $abi
+    if ($null -eq $transition) { continue }
+    $owner = $transition.Owner; $record = $transition.Record
+    $predecessor = [pscustomobject]@{ LauncherAbi = $abi - 1; ReleaseId = $record.PreviousReleaseId; Hash = $record.PreviousHash }
+    $launcherHash = if ($null -ne $Launcher) { Get-CrgSha256HexOfBytes -Bytes $Launcher.Bytes } else { '-' }
+    $isSuccessor = $null -ne $Install -and [Linq.Enumerable]::SequenceEqual([byte[]]$Install.Bytes, [byte[]]$owner.Bytes)
+    $priorBytes = $null; $stepAbi = $abi; $stepRecord = $record
+    do {
+      $implied = Get-CrgRuntimeLauncherLineage -Store $Store -Owners $Owners -LauncherAbi ($stepAbi - 1) -ReleaseId $stepRecord.PreviousReleaseId -Hash $stepRecord.PreviousHash
+      if ($null -ne $implied -and $stepAbi -ge 3) {
+        $prior = Open-CrgPackageSourceHold -Path (Join-Path $Store "launcher-prior-v$stepAbi") -RelativePath 'exact preceding launcher provenance' -MaxLength 1024 -AllowAbsent
+        if ($null -ne $prior) { $Owners.Add($prior) | Out-Null }
+        if ($null -eq $prior -or -not [Linq.Enumerable]::SequenceEqual([byte[]]$prior.Bytes, [byte[]]$implied)) { $implied = $null }
+      }
+      if ($null -eq $implied) { $priorBytes = $null; break }
+      if ($null -eq $priorBytes) { $priorBytes = $implied }
+      $stepRecord = Read-CrgRuntimeLauncherBytes -Bytes $implied
+      $stepAbi = $stepRecord.LauncherAbi
+    } while (-not [string]::Equals($stepRecord.PreviousReleaseId, '-', [StringComparison]::Ordinal))
+    $isPredecessor = $null -ne $priorBytes -and $null -ne $Install -and [Linq.Enumerable]::SequenceEqual([byte[]]$Install.Bytes, [byte[]]$priorBytes)
+    $state = if ($null -eq $priorBytes) { 'conflict' }
+      elseif ($isSuccessor -and $launcherHash -ceq $record.Hash) { 'successor' }
+      elseif ($isPredecessor -and $launcherHash -ceq $predecessor.Hash) { 'predecessor' }
+      elseif (($null -eq $Install -or $isSuccessor -or $isPredecessor) -and $launcherHash -cin @('-', $record.Hash, $predecessor.Hash)) { 'partial' }
+      else { 'conflict' }
+    return [pscustomobject]@{ LauncherAbi = $abi; Owner = $owner; Record = $record; Predecessor = $predecessor; PriorBytes = $priorBytes; State = $state }
+  }
+  return $null
+}
+
 function Update-CrgRuntimeLauncherAbi {
   param([string]$Store, [object]$Release, [object]$Owners)
   $targetAbi = $Release.Manifest.LauncherAbi
-  if ($targetAbi -notin @(2, 3)) { throw 'launcher migration requires an approved successor ABI target' }
+  if ($targetAbi -notin @(2, 3, 4)) { throw 'launcher migration requires an approved successor ABI target' }
   $target = @($Release.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })
   if ($target.Count -ne 1) { throw 'launcher migration target lacks the exact launcher payload' }
+  Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $targetAbi -Bytes $target[0].Bytes
   $targetHash = Get-CrgSha256HexOfBytes -Bytes $target[0].Bytes
-  $migrationPath = Join-Path $Store $(if ($targetAbi -eq 3) { 'launcher-upgrade-v3' } else { 'launcher-upgrade' })
-  $migrationOwner = Open-CrgPackageSourceHold -Path $migrationPath -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
-  if ($null -ne $migrationOwner) { $Owners.Add($migrationOwner) | Out-Null }
+  # Each target ABI owns its record names, so a completed earlier migration's
+  # transition and prior provenance stay retained beside the new ones.
+  $migrationPath = Join-Path $Store $(if ($targetAbi -ge 3) { "launcher-upgrade-v$targetAbi" } else { 'launcher-upgrade' })
   $installOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'launcher-install') -RelativePath 'installed launcher provenance' -MaxLength 1024 -AllowAbsent
   $launcherOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'launcher.ps1') -RelativePath 'installed launcher' -AllowAbsent
   foreach ($owner in @($installOwner, $launcherOwner)) { if ($null -ne $owner) { $Owners.Add($owner) | Out-Null } }
-  if ($null -eq $migrationOwner) {
+  $transition = Get-CrgRuntimeLauncherTransition -Store $Store -Owners $Owners -Install $installOwner -Launcher $launcherOwner
+  # Resuming an earlier transition after a later one was recorded would restore
+  # provenance the later one replaced, and a new transition may follow only a
+  # completed one. Every record classified here stays held through the writes
+  # below. The store lock serializes maintenance operations only: a record a
+  # restore writes during this operation at a pathname found absent is not
+  # observed, so a restore of store files is never run during maintenance.
+  if ($null -ne $transition -and $transition.LauncherAbi -gt $targetAbi) { throw "the recorded launcher transition to ABI $($transition.LauncherAbi) owns the installation, so no migration to an earlier ABI follows it; -UpgradeRuntimeLauncher -ReleaseId $($transition.Record.ReleaseId) resumes that transition or confirms that it is complete" }
+  $recorded = $null -ne $transition -and $transition.LauncherAbi -eq $targetAbi
+  if ($recorded) {
+    if ($transition.Record.ReleaseId -cne $Release.Manifest.Id -or $transition.Record.Hash -cne $targetHash) { throw 'launcher upgrade record selects another exact transition' }
+    if ($transition.State -ceq 'successor') {
+      Assert-CrgRuntimeLauncherOrigin -Store $Store -Installation $transition.Predecessor -Owners $Owners
+      Write-Host "[bootstrap] exact ABI $targetAbi launcher migration is already complete for release $($Release.Manifest.Id); no release activated and no consumer changed."
+      return
+    }
+    if ($transition.State -ceq 'conflict') { throw 'launcher migration preserves an installed pair or preceding provenance that is neither side of its recorded transition; restore the store''s launcher files and records to one side of that transition' }
+    $predecessor = $transition.Predecessor; $previousBytes = [byte[]]$transition.PriorBytes; $desired = [byte[]]$transition.Owner.Bytes
+  } else {
+    if ($null -ne $transition -and $transition.State -cne 'successor') { throw "a new launcher migration requires the completed successor of the recorded launcher transition to ABI $($transition.LauncherAbi); the installed pair is $($transition.State); $(if ($transition.State -ceq 'conflict') { 'restore the store''s launcher files and records to one side of that transition' } else { "complete that transition first with -UpgradeRuntimeLauncher -ReleaseId $($transition.Record.ReleaseId)" })" }
     if ($null -eq $installOwner -or $null -eq $launcherOwner) { throw 'new launcher migration requires a complete verified predecessor installation' }
     $predecessor = Read-CrgRuntimeLauncherBytes -Bytes $installOwner.Bytes
     if ($predecessor.LauncherAbi -ne ($targetAbi - 1)) { throw 'launcher migration requires the immediately preceding ABI; routine releases use activation' }
-    Assert-CrgRuntimeLauncherOrigin -Store $Store -Installation $predecessor -Owners $Owners
     if ((Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -cne $predecessor.Hash) { throw 'existing launcher differs from its approved predecessor origin' }
-    if ($targetAbi -eq 3) {
-      $priorPath = Join-Path $Store 'launcher-prior-v3'
-      $priorBytes = [byte[]]$installOwner.Bytes
-      $null = Update-CrgRootedFileBytes -Path $priorPath -MaxLength 1024 -Label 'exact preceding launcher provenance' -Transform {
-        param([byte[]]$Previous)
-        if (($Previous.Length -gt 0 -or (Get-CrgPathOccupantKind -Path $priorPath) -cne 'empty') -and -not [Linq.Enumerable]::SequenceEqual([byte[]]$Previous, $priorBytes)) { throw 'preceding launcher provenance conflicts with the current verified installation' }
-        return [pscustomobject]@{ Ok = $true; Bytes = $priorBytes }
+    $previousBytes = Get-CrgRuntimeLauncherLineage -Store $Store -Owners $Owners -LauncherAbi $predecessor.LauncherAbi -ReleaseId $predecessor.ReleaseId -Hash $predecessor.Hash
+    if ($null -eq $previousBytes -or -not [Linq.Enumerable]::SequenceEqual([byte[]]$installOwner.Bytes, [byte[]]$previousBytes)) { throw 'installed launcher provenance is not the exact record the recorded launcher transitions imply; nothing was written, restore the store''s launcher files and records' }
+    $desired = New-CrgRuntimeLauncherBytes -LauncherAbi $targetAbi -ReleaseId $Release.Manifest.Id -Hash $targetHash -PreviousReleaseId $predecessor.ReleaseId -PreviousHash $predecessor.Hash
+  }
+  Assert-CrgRuntimeLauncherOrigin -Store $Store -Installation $predecessor -Owners $Owners
+  if ($null -ne $launcherOwner -and (Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -ceq $predecessor.Hash) { Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $predecessor.LauncherAbi -Bytes $launcherOwner.Bytes }
+  # The successor launcher must be able to open the release active-release
+  # names. Every launcher a migration installs refuses a release that fails
+  # verification, one of a later ABI than its own and one without the launcher
+  # capabilities; only the ABI 4 launcher applies the declaration rule, so
+  # that test runs only for an ABI 4 successor. A
+  # bootstrap from before the declaration rule could publish an ABI 4 launcher
+  # payload as ABI 3 and activate it, and the ABI 3 launcher runs it. While no
+  # fixed leaf is replaced the predecessor launcher can still settle that
+  # release's operations and activation can still change the selection, so a
+  # migration in that state refuses while the successor would reject the
+  # active release. A partial pair starts neither launcher and refuses
+  # activation until the migration completes, so refusing it would leave no
+  # way to act on the selection; a replacement this bootstrap began passed
+  # this check first. Handoffs are project state that the store does not
+  # list; the deployment guide has the operator settle the ones bound to a
+  # rejected release before migrating.
+  if (-not $recorded -or [string]::Equals($transition.State, 'predecessor', [StringComparison]::Ordinal)) {
+    $activeOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'active-release') -RelativePath 'central active release' -MaxLength 95 -AllowAbsent
+    if ($null -ne $activeOwner) {
+      $Owners.Add($activeOwner) | Out-Null
+      $activeId = Read-CrgRuntimeActiveBytes -Bytes $activeOwner.Bytes
+      $replace = "activate a release that the installed ABI $($predecessor.LauncherAbi) launcher and the ABI $targetAbi launcher both admit, and rerun the migration"
+      try {
+        $active = Open-CrgRuntimeRelease -Root (Join-Path $Store "releases/$activeId") -ExpectedId $activeId
+      } catch {
+        throw "active release $activeId does not verify ($($_.Exception.Message)); this run of the migration wrote nothing. No launcher runs a release that fails verification: restore that release's files, or $replace"
+      }
+      foreach ($owner in $active.Owners) { $Owners.Add($owner) | Out-Null }
+      if ($active.Manifest.LauncherAbi -gt $targetAbi) { throw "active release $activeId is a launcher ABI $($active.Manifest.LauncherAbi) release, which the ABI $targetAbi launcher cannot open; this run of the migration wrote nothing. To proceed, $replace" }
+      try {
+        foreach ($required in @('scripts/central-launcher.ps1', 'scripts/central-context.psm1', 'scripts/private-governance.psm1')) {
+          if (@($active.Manifest.Entries | Where-Object { [string]::Equals($_.Path, $required, [StringComparison]::Ordinal) }).Count -ne 1) { throw "release lacks launcher capability '$required'" }
+        }
+        if ($targetAbi -ge 4) { Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $active.Manifest.LauncherAbi -Bytes @($active.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [StringComparison]::Ordinal) })[0].Bytes }
+      } catch {
+        throw "the ABI $targetAbi launcher would refuse active release $activeId ($($_.Exception.Message)); this run of the migration wrote nothing. With the still-installed ABI $($predecessor.LauncherAbi) launcher, finish or resume to completion every pending project operation bound to that release, which the ABI $targetAbi launcher cannot resume, then $replace"
       }
     }
-    $desired = New-CrgRuntimeLauncherBytes -LauncherAbi $targetAbi -ReleaseId $Release.Manifest.Id -Hash $targetHash -PreviousReleaseId $predecessor.ReleaseId -PreviousHash $predecessor.Hash
+  }
+  if ($targetAbi -ge 4) { Assert-CrgRuntimeLauncherUnheld -Holds @($installOwner, $launcherOwner) }
+  if ($targetAbi -ge 3) {
+    # A startup conflict that host installation refuses after the replacements
+    # refuses here instead, before any write. Installation repeats the check on
+    # its own key handle, since the key can change in between.
+    $startup = Get-CrgRuntimeHostStartup -Store $Store
+    $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run', $false)
+    if ($null -ne $runKey) { try { $null = Test-CrgRuntimeHostStartupEntry -Key $runKey -Startup $startup } finally { $runKey.Dispose() } }
+  }
+  if (-not $recorded) {
+    if ($targetAbi -ge 3) {
+      $priorPath = Join-Path $Store "launcher-prior-v$targetAbi"
+      $null = Update-CrgRootedFileBytes -Path $priorPath -MaxLength 1024 -Label 'exact preceding launcher provenance' -Transform {
+        param([byte[]]$Previous)
+        if (($Previous.Length -gt 0 -or (Get-CrgPathOccupantKind -Path $priorPath) -cne 'empty') -and -not [Linq.Enumerable]::SequenceEqual([byte[]]$Previous, $previousBytes)) { throw 'preceding launcher provenance conflicts with the current verified installation' }
+        return [pscustomobject]@{ Ok = $true; Bytes = $previousBytes }
+      }
+      # Resumed migration and activation classify the pair against this
+      # record, so the published bytes stay held, and therefore unchanged,
+      # until the transition record and both fixed leaves are written.
+      $priorOwner = Open-CrgPackageSourceHold -Path $priorPath -RelativePath 'exact preceding launcher provenance' -MaxLength 1024
+      $Owners.Add($priorOwner) | Out-Null
+      if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$priorOwner.Bytes, [byte[]]$previousBytes)) { throw 'preceding launcher provenance readback differs from the verified installation' }
+    }
     # Retain the exact transition before replacing either fixed leaf. The
     # existing no-replace writer can leave a temporary name absent after a
     # crash; this bounded record authorizes only the recorded old/new bytes.
@@ -3121,29 +3308,7 @@ function Update-CrgRuntimeLauncherAbi {
     }
     $migrationOwner = Open-CrgPackageSourceHold -Path $migrationPath -RelativePath 'launcher upgrade record' -MaxLength 1024
     $Owners.Add($migrationOwner) | Out-Null
-  }
-  $migration = Read-CrgRuntimeLauncherBytes -Bytes $migrationOwner.Bytes
-  if ($migration.Schema -ne $targetAbi -or $migration.PreviousReleaseId -ceq '-' -or
-      $migration.ReleaseId -cne $Release.Manifest.Id -or $migration.Hash -cne $targetHash) { throw 'launcher upgrade record selects another exact transition' }
-  $predecessor = [pscustomobject]@{ LauncherAbi = ($targetAbi - 1); ReleaseId = $migration.PreviousReleaseId; Hash = $migration.PreviousHash }
-  Assert-CrgRuntimeLauncherOrigin -Store $Store -Installation $predecessor -Owners $Owners
-  if ($targetAbi -eq 3) {
-    $priorOwner = Open-CrgPackageSourceHold -Path (Join-Path $Store 'launcher-prior-v3') -RelativePath 'exact preceding launcher provenance' -MaxLength 1024
-    $Owners.Add($priorOwner) | Out-Null
-    $priorRecord = Read-CrgRuntimeLauncherBytes -Bytes $priorOwner.Bytes
-    if ($priorRecord.LauncherAbi -ne $predecessor.LauncherAbi -or $priorRecord.ReleaseId -cne $predecessor.ReleaseId -or $priorRecord.Hash -cne $predecessor.Hash) { throw 'preceding launcher provenance differs from the retained transition' }
-    $previousBytes = [byte[]]$priorOwner.Bytes
-  } else { $previousBytes = New-CrgRuntimeLauncherBytes -LauncherAbi 1 -ReleaseId $predecessor.ReleaseId -Hash $predecessor.Hash }
-  $desired = [byte[]]$migrationOwner.Bytes
-  if ($null -ne $installOwner -and
-      -not [Linq.Enumerable]::SequenceEqual([byte[]]$installOwner.Bytes, [byte[]]$previousBytes) -and
-      -not [Linq.Enumerable]::SequenceEqual([byte[]]$installOwner.Bytes, [byte[]]$desired)) { throw 'launcher migration preserves conflicting installation metadata' }
-  if ($null -ne $launcherOwner -and (Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -cnotin @($predecessor.Hash, $targetHash)) { throw 'launcher migration preserves unrecognized installed bytes' }
-  if ($null -ne $installOwner -and $null -ne $launcherOwner -and
-      [Linq.Enumerable]::SequenceEqual([byte[]]$installOwner.Bytes, [byte[]]$desired) -and
-      (Get-CrgSha256HexOfBytes -Bytes $launcherOwner.Bytes) -ceq $targetHash) {
-    Write-Host "[bootstrap] exact ABI $targetAbi launcher migration is already complete for release $($Release.Manifest.Id); no release activated and no consumer changed."
-    return
+    if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$migrationOwner.Bytes, [byte[]]$desired)) { throw 'launcher upgrade record readback differs from the approved transition' }
   }
   foreach ($owner in @($installOwner, $launcherOwner)) {
     if ($null -ne $owner) { $owner.Stream.Dispose(); $owner.Stream = $null }
@@ -3173,17 +3338,105 @@ function Update-CrgRuntimeLauncherAbi {
   Write-Host "[bootstrap] exact launcher transition retained at '$migrationPath'; preceding release $($predecessor.ReleaseId) remains required."
 }
 
-function Install-CrgRuntimeHost {
-  param([string]$Store, [object]$Release)
-  if ($Release.Manifest.LauncherAbi -lt 3) { return }
-  $transport = @($Release.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) })
-  if ($transport.Count -ne 1) { throw 'host installation requires the exact retained transport payload' }
-  Import-Module -Name $transport[0].Path -ErrorAction Stop
-  $launcher = Join-Path $Store 'launcher.ps1'
+# Every installed launcher process - the gate host of any logon or account, a
+# project command, a gate worker - holds launcher.ps1 and launcher-install,
+# sharing only reads, from startup until it exits, and an ABI 3 host can
+# neither be asked to release them nor confirm that it keeps no custody for an
+# operation. A migration to ABI 4 that still has a launcher file to replace
+# therefore ends no process and refuses while any process other than itself
+# holds either file; a rerun after the transition completed replaces nothing,
+# repairs only host registration and does not check. A holder can be keeping
+# custody for an operation whose outcome or descendant exit is unconfirmed,
+# which the list cannot tell from an idle host, so the refusal has the
+# operator resolve that custody before ending a holder and defer the
+# migration while it stays unresolved. The holder list names processes
+# of every session and account without matching names or command lines. It
+# covers only holders the migration's own read-only open can coexist with: a
+# holder that denies read sharing or holds write or delete access makes that
+# open fail with a sharing violation first, and that refusal names no process.
+# A process that opens a file after this check blocks its replacement with a
+# sharing violation unless it holds only read access and shares both reads and
+# deletion; every launcher process denies delete sharing and so blocks it.
+# Either failure leaves a state a rerun resumes.
+# An empty or short list must not read as "unheld", so each file's list has to
+# name a holder known to exist before this process is excluded from it. The
+# list omits the open the query runs through and names the process of every
+# other open, the querying process's other opens included: on 2026-11-24
+# (Windows 11, NTFS) a query through a process's only open of a file returned
+# an empty list, and named only the other process while a second process also
+# held the file; queried through a second open, it named both. Querying
+# through the migration's own hold and requiring this process in the result
+# therefore refused every migration; do not retry that. Each file is queried
+# through a separate attribute-only reopen of the hold, which keeps the hold a
+# known holder: a list that omits this process, or whose returned length
+# fits neither identifier layout for its count, refuses before any write.
+function Assert-CrgRuntimeLauncherUnheld {
+  param([object[]]$Holds)
+  # A PowerShell process keeps the first type compiled under a name, so a
+  # change to this helper's code takes a new type name.
+  if (-not ('CrgBootstrap.LauncherHoldersV3' -as [type])) {
+    Add-Type -Namespace 'CrgBootstrap' -Name 'LauncherHoldersV3' -MemberDefinition @'
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+struct IO_STATUS_BLOCK { public System.IntPtr Status, Information; }
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+static extern bool ProcessIdToSessionId(uint id, out uint session);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+static extern Microsoft.Win32.SafeHandles.SafeFileHandle ReOpenFile(System.Runtime.InteropServices.SafeHandle original, uint access, uint share, uint flags);
+[System.Runtime.InteropServices.DllImport("ntdll.dll")]
+static extern int NtQueryInformationFile(System.Runtime.InteropServices.SafeHandle file, out IO_STATUS_BLOCK status, System.IntPtr information, uint length, int informationClass);
+
+public static long SessionOf(uint id) { uint session; return ProcessIdToSessionId(id, out session) ? (long)session : -1L; }
+// FileProcessIdsUsingFileInformation names every process with the file open,
+// whatever its account or session, except through the open queried. The
+// attribute-only reopen takes part in no sharing check, so it neither fails
+// against nor blocks another open while it exists.
+public static ulong[] FileHolders(System.Runtime.InteropServices.SafeHandle hold) {
+    const int size = 65536;
+    using (Microsoft.Win32.SafeHandles.SafeFileHandle query = ReOpenFile(hold, 0x80u, 0x7u, 0x00200000u)) {
+        if (query.IsInvalid) { throw new System.IO.IOException("launcher holder enumeration could not reopen the held file (Win32 error " + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + ")"); }
+        System.IntPtr buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(size);
+        try {
+            IO_STATUS_BLOCK status;
+            int result = NtQueryInformationFile(query, out status, buffer, (uint)size, 47);
+            if (result != 0) { throw new System.IO.IOException("launcher holder enumeration failed (NTSTATUS 0x" + result.ToString("X8") + ")"); }
+            int count = System.Runtime.InteropServices.Marshal.ReadInt32(buffer);
+            int width = System.IntPtr.Size;
+            if (count < 0 || ((long)count + 1) * width > size) { throw new System.IO.IOException("launcher holder list exceeds its bound"); }
+            // The identifier array starts at pointer alignment after the count,
+            // in this process's layout. A 32-bit process on 64-bit Windows
+            // receives 4-byte identifiers while the reported length is that
+            // of the system's 8-byte layout (2026-11-25: one identifier at
+            // offset 4, reported length 16), so either length confirms the
+            // count there; the caller's own-process test confirms the read.
+            long returned = status.Information.ToInt64();
+            if (returned != ((long)count + 1) * width && !(width == 4 && returned == ((long)count + 1) * 8)) { throw new System.IO.IOException("launcher holder enumeration returned " + returned + " bytes for " + count + " holder(s), which fits no identifier layout of this process"); }
+            ulong[] ids = new ulong[count];
+            for (int i = 0; i < count; i++) { ids[i] = width == 8 ? (ulong)System.Runtime.InteropServices.Marshal.ReadInt64(buffer, (i + 1) * 8) : (ulong)(uint)System.Runtime.InteropServices.Marshal.ReadInt32(buffer, (i + 1) * 4); }
+            return ids;
+        } finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer); }
+    }
+}
+'@
+  }
+  $holders = New-Object 'System.Collections.Generic.HashSet[uint64]'
+  foreach ($hold in @($Holds | Where-Object { $null -ne $_ })) {
+    [uint64[]]$listed = [CrgBootstrap.LauncherHoldersV3]::FileHolders($hold.Stream.SafeFileHandle)
+    if ($listed -notcontains [uint64]$PID) { throw "launcher holder enumeration did not list this process's own open of the $($hold.RelativePath), so its holder list is unconfirmed; this run of the migration wrote nothing" }
+    foreach ($holder in $listed) { [void]$holders.Add($holder) }
+  }
+  $others = @($holders | Where-Object { $_ -ne [uint64]$PID } | Sort-Object)
+  if ($others.Count -gt 0) {
+    $named = @($others | ForEach-Object { $session = [CrgBootstrap.LauncherHoldersV3]::SessionOf([uint32]$_); "$_ (session $(if ($session -ge 0) { $session } else { 'unknown' }))" }) -join ', '
+    throw "the installed launcher is held by process(es) $named. Every gate host and gate command of this store, in every logon, must have exited before -UpgradeRuntimeLauncher; this run of the migration wrote nothing. End a gate host only after its operations have completed, every unknown outcome has been inspected with Status or Resume, and no unconfirmed descendant remains in its custody; while a holder cannot be resolved so, defer the migration. Rerun once those processes have exited"
+  }
+}
+
+function Get-CrgRuntimeHostStartup {
+  param([string]$Store)
   $shell = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
-  $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -Serve'
-  $startup = '"' + $shell + '" ' + $arguments
-  if ($startup.Length -gt 260) { throw 'runtime store path exceeds the Windows Run startup command bound; host installation is incomplete' }
+  $arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $Store 'launcher.ps1') + '" -Serve'
+  $command = '"' + $shell + '" ' + $arguments
+  if ($command.Length -gt 260) { throw 'runtime store path exceeds the Windows Run startup command bound; host installation is incomplete' }
   # Explorer reads the Run key at logon and stops at a value name it cannot
   # enumerate. The original name, the prefix plus the full store hash, ended
   # that enumeration at every logon from 2026-10-25 to 2026-11-13: neither the
@@ -3191,31 +3444,51 @@ function Install-CrgRuntimeHost {
   # launched. The exact limit is not established, so the name carries only a
   # store-hash prefix; do not lengthen it.
   $storeHash = Get-CrgSha256HexOfBytes -Bytes ([Text.Encoding]::UTF8.GetBytes($Store.ToUpperInvariant()))
-  $name = 'CrossReviewGate-' + $storeHash.Substring(0, 16)
-  $legacyName = 'CrossReviewGate-' + $storeHash
+  return [pscustomobject]@{ Shell = $shell; Arguments = $arguments; Command = $command; Name = ('CrossReviewGate-' + $storeHash.Substring(0, 16)); LegacyName = ('CrossReviewGate-' + $storeHash) }
+}
+
+# The one conflict predicate for the per-user startup entry. A caller that
+# writes evaluates it on the key handle it writes through, so no result of an
+# earlier, separately opened check decides whether a value is written.
+function Test-CrgRuntimeHostStartupEntry {
+  param([object]$Key, [object]$Startup)
+  # Presence comes from the value-name list: GetValue returns its default for
+  # a value whose type .NET cannot decode, which would read as absent. A
+  # failed enumeration throws and leaves the installation incomplete.
+  $present = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($valueName in $Key.GetValueNames()) { [void]$present.Add($valueName) }
+  # A remaining legacy-name entry still ends enumeration before this entry.
+  # The registry has no conditional delete: removing it here could delete a
+  # value another writer put there after validation, so installation names
+  # it and stops, and the operator removes it.
+  if ($present.Contains($Startup.LegacyName)) {
+    throw "legacy gate startup entry '$($Startup.LegacyName)' in HKCU\Software\Microsoft\Windows\CurrentVersion\Run stops Explorer before the gate host starts at logon; host installation is incomplete. Remove it with: reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v $($Startup.LegacyName), then rerun this installation"
+  }
+  if (-not $present.Contains($Startup.Name)) { return $false }
+  $installed = $Key.GetValue($Startup.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  if ($Key.GetValueKind($Startup.Name) -ne [Microsoft.Win32.RegistryValueKind]::String -or $installed -isnot [string] -or -not [string]::Equals($installed, $Startup.Command, [StringComparison]::Ordinal)) {
+    throw 'gate startup registration is occupied by a different command; preserve the existing entry'
+  }
+  return $true
+}
+
+function Install-CrgRuntimeHost {
+  param([string]$Store, [object]$Release)
+  if ($Release.Manifest.LauncherAbi -lt 3) { return }
+  $transport = @($Release.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) })
+  if ($transport.Count -ne 1) { throw 'host installation requires the exact retained transport payload' }
+  Import-Module -Name $transport[0].Path -ErrorAction Stop
+  $startup = Get-CrgRuntimeHostStartup -Store $Store
   $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
   try {
-    # Presence comes from the value-name list: GetValue returns its default for
-    # a value whose type .NET cannot decode, which would read as absent. A
-    # failed enumeration throws and leaves the installation incomplete.
-    $present = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($valueName in $key.GetValueNames()) { [void]$present.Add($valueName) }
-    # A remaining legacy-name entry still ends enumeration before this entry.
-    # The registry has no conditional delete: removing it here could delete a
-    # value another writer put there after validation, so installation names
-    # it and stops, and the operator removes it.
-    if ($present.Contains($legacyName)) {
-      throw "legacy gate startup entry '$legacyName' in HKCU\Software\Microsoft\Windows\CurrentVersion\Run stops Explorer before the gate host starts at logon; host installation is incomplete. Remove it with: reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v $legacyName, then rerun this installation"
-    }
-    if (-not $present.Contains($name)) { $key.SetValue($name, $startup, [Microsoft.Win32.RegistryValueKind]::String); $key.Flush() }
-    $installed = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    if ($key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::String -or $installed -isnot [string] -or -not [string]::Equals($installed, $startup, [StringComparison]::Ordinal)) {
-      if ($present.Contains($name)) { throw 'gate startup registration is occupied by a different command; preserve the existing entry' }
+    if (-not (Test-CrgRuntimeHostStartupEntry -Key $key -Startup $startup)) { $key.SetValue($startup.Name, $startup.Command, [Microsoft.Win32.RegistryValueKind]::String); $key.Flush() }
+    $installed = $key.GetValue($startup.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if ($key.GetValueKind($startup.Name) -ne [Microsoft.Win32.RegistryValueKind]::String -or $installed -isnot [string] -or -not [string]::Equals($installed, $startup.Command, [StringComparison]::Ordinal)) {
       throw 'gate startup registration readback differs from the installed command'
     }
   } finally { $key.Dispose() }
   if (Test-CrgHostAvailable -Store $Store) { Write-Host '[bootstrap] installed local gate host is available.'; return }
-  $process = Start-Process -FilePath $shell -ArgumentList $arguments -WorkingDirectory $Store -WindowStyle Hidden -PassThru
+  $process = Start-Process -FilePath $startup.Shell -ArgumentList $startup.Arguments -WorkingDirectory $Store -WindowStyle Hidden -PassThru
   $watch = [Diagnostics.Stopwatch]::StartNew()
   while ($watch.ElapsedMilliseconds -lt 15000) {
     if (Test-CrgHostAvailable -Store $Store) { Write-Host '[bootstrap] installed local gate host started; project commands require no sandbox exception.'; return }
@@ -3431,12 +3704,24 @@ function Invoke-CrgCentralRuntimeOperation {
       $rtSource = Get-CrgHeldPackageProvenance -Candidate $rtCandidate -VersionBytes $rtVersionOwner.Bytes -SourceOwners $rtPayloadOwners.ToArray() -ScratchRoot (Join-Path $rtStore ('.proof-' + [Guid]::NewGuid().ToString('N')))
       if ($rtSource -cne $ApprovedSourceCommit) { throw 'retained runtime bytes do not match the approved source commit' }
       $null = Assert-CrgCapturedPackageProvenanceCandidate -Candidate $rtCandidate
-      $rtLines = @('crg-runtime-manifest v1', "version $rtVersion", "source-commit $rtSource", 'launcher-abi 3', 'config-schema 1')
+      # Get-CrgRuntimePayloadPaths is the ABI 4 list: it carries none of the
+      # hook-mode entries a manifest of an earlier ABI requires, so only ABI 4
+      # source is publishable here. An earlier source revision is published
+      # with that revision's own bootstrap.
+      $rtLauncherSource = @($rtPayloadOwners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })[0]
+      $rtAbi = Get-CrgRuntimeLauncherDeclaredAbi -Bytes $rtLauncherSource.Bytes
+      if ($rtAbi -ne 4) { throw "source launcher declares $(if ($rtAbi -eq 0) { 'no launcher ABI' } else { "launcher ABI $rtAbi" }) on its first line; this bootstrap publishes only launcher ABI 4 source, and an earlier source revision is published with that revision's own bootstrap.ps1" }
+      $rtLines = @('crg-runtime-manifest v1', "version $rtVersion", "source-commit $rtSource", "launcher-abi $rtAbi", 'config-schema 1')
       foreach ($rtOwner in $rtPayloadOwners) { $rtLines += "file $(Get-CrgSha256HexOfBytes -Bytes $rtOwner.Bytes) $($rtOwner.Bytes.Length) $($rtOwner.RelativePath)" }
       $rtManifest = Read-CrgRuntimeManifestBytes -Bytes ([System.Text.Encoding]::ASCII.GetBytes(($rtLines -join "`n") + "`n"))
+      Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $rtManifest.LauncherAbi -Bytes $rtLauncherSource.Bytes
       $rtRelease = Publish-CrgRuntimeSnapshot -Store $rtStore -Manifest $rtManifest -Owners $rtPayloadOwners.ToArray()
     } elseif ($Operation -ceq 'PublishRuntimePackage') {
       $rtImported = Open-CrgRuntimeRelease -Root $rtInput -ExpectedId $ApprovedManifestSha256
+      # The manifest reader requires the launcher entry from ABI 4 on; an
+      # earlier package without one has no launcher bytes to check.
+      $rtImportedLauncher = @($rtImported.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })
+      if ($rtImportedLauncher.Count -eq 1) { Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $rtImported.Manifest.LauncherAbi -Bytes $rtImportedLauncher[0].Bytes }
       $rtRelease = Publish-CrgRuntimeSnapshot -Store $rtStore -Manifest $rtImported.Manifest -Owners $rtImported.Owners.ToArray()
     } else {
       $rtRelease = Open-CrgRuntimeRelease -Root (Join-Path $rtStore "releases/$ReleaseId") -ExpectedId $ReleaseId
@@ -3453,15 +3738,12 @@ function Invoke-CrgCentralRuntimeOperation {
         return
       }
       if ($Operation -ceq 'InstallRuntimeLauncher') {
-        foreach ($rtUpgradeName in @('launcher-upgrade', 'launcher-upgrade-v3')) {
-          $rtUpgrade = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtUpgradeName) -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
-          if ($null -ne $rtUpgrade) {
-            $rtOwners.Add($rtUpgrade) | Out-Null
-            throw 'a recorded launcher migration requires UpgradeRuntimeLauncher for retry; a completed migration needs only normal release activation'
-          }
+        if ($null -ne (Get-CrgRuntimeLauncherTransition -Store $rtStore -Owners $rtOwners -Install $null -Launcher $null)) {
+          throw 'a recorded launcher migration requires UpgradeRuntimeLauncher for retry; a completed migration needs only normal release activation'
         }
         if (@($rtMissingCapabilities).Count -gt 0) { throw "release lacks executable launcher capability: $($rtMissingCapabilities -join ', ')" }
         $rtLauncherOwner = @($rtRelease.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })[0]
+        Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $rtRelease.Manifest.LauncherAbi -Bytes $rtLauncherOwner.Bytes
         $rtLauncherHash = Get-CrgSha256HexOfBytes -Bytes $rtLauncherOwner.Bytes
         $rtInstallBuffers = @(
           [pscustomobject]@{ Name = 'launcher.ps1'; Bytes = [byte[]]$rtLauncherOwner.Bytes; Maximum = 16777216 },
@@ -3500,23 +3782,31 @@ function Invoke-CrgCentralRuntimeOperation {
         $rtExisting = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtItem) -RelativePath $rtItem -MaxLength 16777216 -AllowAbsent
         if ($null -ne $rtExisting) { $rtOwners.Add($rtExisting) | Out-Null; $rtInstalledFiles.Add($rtItem, $rtExisting) }
       }
-      foreach ($rtUpgradeName in @('launcher-upgrade', 'launcher-upgrade-v3')) {
-        $rtUpgrade = Open-CrgPackageSourceHold -Path (Join-Path $rtStore $rtUpgradeName) -RelativePath 'launcher upgrade record' -MaxLength 1024 -AllowAbsent
-        if ($null -ne $rtUpgrade) {
-          $rtOwners.Add($rtUpgrade) | Out-Null
-          $rtUpgradeRecord = Read-CrgRuntimeLauncherBytes -Bytes $rtUpgrade.Bytes
-          $rtExpectedAbi = if ([string]::Equals($rtUpgradeName, 'launcher-upgrade-v3', [StringComparison]::Ordinal)) { 3 } else { 2 }
-          if ($rtUpgradeRecord.Schema -ne $rtExpectedAbi -or $rtUpgradeRecord.PreviousReleaseId -ceq '-' -or $rtInstalledFiles.Count -ne 2) { throw 'activation requires completion of the recorded launcher migration' }
-        }
+      # A recorded transition admits activation only on its exact predecessor
+      # pair, which still executes the releases its own ABI admits, or on its
+      # successor. A partial pair refuses until the same migration completes.
+      $rtTransition = Get-CrgRuntimeLauncherTransition -Store $rtStore -Owners $rtOwners -Install $rtInstalledFiles['launcher-install'] -Launcher $rtInstalledFiles['launcher.ps1']
+      if ($null -ne $rtTransition -and $rtTransition.State -cnotin @('predecessor', 'successor')) {
+        if ($rtTransition.State -ceq 'partial') { throw "activation requires completion of the recorded launcher migration to ABI $($rtTransition.LauncherAbi); resume it with -UpgradeRuntimeLauncher -ReleaseId $($rtTransition.Record.ReleaseId)" }
+        throw "activation refuses an installed launcher pair or preceding provenance that is neither side of the latest recorded launcher transition (ABI $($rtTransition.LauncherAbi), release $($rtTransition.Record.ReleaseId)); preserve the store and restore its launcher files and records to one side of that transition"
       }
       $rtLauncherPresent = $rtInstalledFiles.Count -gt 0
       if ($rtLauncherPresent) {
         if ($rtInstalledFiles.Count -ne 2) { throw 'activation requires complete launcher installation; resume the explicit install or ABI migration' }
         $rtInstallation = Read-CrgRuntimeLauncherBytes -Bytes $rtInstalledFiles['launcher-install'].Bytes
+        $rtLineage = Get-CrgRuntimeLauncherLineage -Store $rtStore -Owners $rtOwners -LauncherAbi $rtInstallation.LauncherAbi -ReleaseId $rtInstallation.ReleaseId -Hash $rtInstallation.Hash
+        if ($null -eq $rtLineage -or -not [System.Linq.Enumerable]::SequenceEqual([byte[]]$rtInstalledFiles['launcher-install'].Bytes, [byte[]]$rtLineage)) { throw 'activation refuses launcher provenance that is not the exact record the recorded launcher transitions imply; preserve the store and restore its launcher files and records' }
         Assert-CrgRuntimeLauncherOrigin -Store $rtStore -Installation $rtInstallation -Owners $rtOwners
         if ((Get-CrgSha256HexOfBytes -Bytes $rtInstalledFiles['launcher.ps1'].Bytes) -cne $rtInstallation.Hash) { throw 'activation refuses launcher bytes outside the recorded approved origin; resume an interrupted ABI migration explicitly' }
+        Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $rtInstallation.LauncherAbi -Bytes $rtInstalledFiles['launcher.ps1'].Bytes
         if ($rtInstallation.LauncherAbi -lt $rtRelease.Manifest.LauncherAbi) { throw 'installed launcher ABI cannot execute the requested release; run the explicit UpgradeRuntimeLauncher operation first' }
       } elseif ($rtRelease.Manifest.LauncherAbi -ge 2) { throw 'executable central activation requires InstallRuntimeLauncher first' }
+      # The selector names, or keeps naming, only a release whose own launcher
+      # agrees with its manifest's ABI, whichever bootstrap published it. A
+      # release without a launcher payload is foundation data, whose activation
+      # the capability checks decide.
+      $rtSelectedLauncher = @($rtRelease.Owners | Where-Object { [string]::Equals($_.RelativePath, 'scripts/central-launcher.ps1', [System.StringComparison]::Ordinal) })
+      if ($rtSelectedLauncher.Count -eq 1) { Assert-CrgRuntimeLauncherDeclaration -LauncherAbi $rtRelease.Manifest.LauncherAbi -Bytes $rtSelectedLauncher[0].Bytes }
       [byte[]]$rtDesired = [System.Text.Encoding]::ASCII.GetBytes("crg-runtime-active v1`nrelease $ReleaseId`n")
       $rtUpdate = Update-CrgRootedFileBytes -Path (Join-Path $rtStore 'active-release') -MaxLength 95 -Label 'central active release' -Transform {
         param([byte[]]$Previous)

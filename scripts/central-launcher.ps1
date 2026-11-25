@@ -1,4 +1,8 @@
-# Stable launcher ABI 3. Project clients retain central files read-only.
+# Stable launcher ABI 4. Project clients retain central files read-only.
+# Line 1 states this launcher's ABI to bootstrap, which with the same grammar
+# refuses a manifest or installation record that names another ABI for these
+# bytes. $script:CrgLauncherAbi below states it to the executing code and must
+# stay equal to line 1.
 [CmdletBinding(DefaultParameterSetName = 'Status')]
 param(
   [Parameter(Mandatory = $true, ParameterSetName = 'Status')]
@@ -31,6 +35,11 @@ param(
   [Parameter(Mandatory = $true, ParameterSetName = 'PushCheck')][string]$PushRemoteLocation
 )
 $ErrorActionPreference = 'Stop'
+# PowerShell parses this script before startup reads launcher.ps1 again, and a
+# store restore can replace the file in between, so only this parsed value
+# identifies the code that runs. Startup refuses unless the retained file's
+# line-1 declaration and launcher-install both name it.
+$script:CrgLauncherAbi = 4
 if (-not $Serve -and ([string]::IsNullOrWhiteSpace($TargetRepo) -or $TargetRepo.Length -gt 32767 -or $TargetRepo -match '[\x00-\x1f\x7f]')) { throw 'TargetRepo is invalid' }
 if ($CrgHostExecution -ne $CrgRequestStdin -or ($Serve -and $CrgHostExecution)) { throw 'host execution requires its bounded stdin request' }
 $script:CrgLaunchOperation = if ($Stage) { 'Stage' } else { $PSCmdlet.ParameterSetName }
@@ -222,7 +231,7 @@ function Read-CrgRuntimeManifestBytes {
   }
   $rtLines = @([System.Text.Encoding]::ASCII.GetString($Bytes).Split([char]10))
   if ($rtLines.Count -lt 7 -or $rtLines.Count -gt 262 -or $rtLines[-1] -cne '' -or
-      $rtLines[0] -cne 'crg-runtime-manifest v1' -or $rtLines[3] -cnotin @('launcher-abi 1', 'launcher-abi 2', 'launcher-abi 3') -or $rtLines[4] -cne 'config-schema 1') {
+      $rtLines[0] -cne 'crg-runtime-manifest v1' -or $rtLines[3] -cnotin @('launcher-abi 1', 'launcher-abi 2', 'launcher-abi 3', 'launcher-abi 4') -or $rtLines[4] -cne 'config-schema 1') {
     throw 'runtime manifest header, ABI, schema, inventory count, or final LF is invalid'
   }
   $rtLauncherAbi = [int]$rtLines[3].Substring('launcher-abi '.Length)
@@ -256,12 +265,17 @@ function Read-CrgRuntimeManifestBytes {
   }
   # Retained ABIs keep these dispatch/review entrypoints stable, not the publisher's
   # entire optional helper inventory. Approved manifests own release contents.
-  foreach ($rtRequired in @('VERSION', 'scripts/run-gate.sh', 'scripts/git-hooks/pre-commit',
-      'scripts/codex/auto-review.ps1', 'scripts/codex/auto-merge.ps1', 'scripts/codex/commit.ps1',
-      'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1', 'scripts/claude/commit.ps1')) {
+  # ABI 4 requires only entries that launcher dispatch and review execute or
+  # read. ABI 1-3 launchers also require the hook-mode entry points, so a
+  # manifest declaring one of those ABIs keeps them: every launcher of its
+  # declared ABI must admit it, and activation trusts that declaration.
+  $rtRequiredEntries = @('VERSION', 'scripts/codex/auto-review.ps1', 'scripts/codex/review-prompt-template.md', 'scripts/claude/auto-review.ps1')
+  if ($rtLauncherAbi -lt 4) { $rtRequiredEntries += @('scripts/run-gate.sh', 'scripts/git-hooks/pre-commit', 'scripts/codex/auto-merge.ps1', 'scripts/codex/commit.ps1', 'scripts/claude/commit.ps1') }
+  else { $rtRequiredEntries += 'scripts/central-launcher.ps1' }
+  foreach ($rtRequired in $rtRequiredEntries) {
     if (@($rtEntries | Where-Object { $_.Path -ceq $rtRequired }).Count -ne 1) { throw "runtime manifest lacks required entrypoint '$rtRequired'" }
   }
-  if ($rtLauncherAbi -ge 3 -and @($rtEntries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) }).Count -ne 1) { throw 'ABI 3 manifest lacks the local gate transport' }
+  if ($rtLauncherAbi -ge 3 -and @($rtEntries | Where-Object { [string]::Equals($_.Path, 'scripts/central-transport.psm1', [StringComparison]::Ordinal) }).Count -ne 1) { throw "ABI $rtLauncherAbi manifest lacks the local gate transport" }
   return [pscustomobject]@{ Bytes = $Bytes; Id = (Get-CrgSha256HexOfBytes -Bytes $Bytes); Version = $rtVersion; Source = $rtSource; LauncherAbi = $rtLauncherAbi; Entries = $rtEntries }
 }
 
@@ -281,10 +295,16 @@ function Read-CrgRuntimeLauncherBytes {
   if ($text -cmatch '\Acrg-runtime-launcher v1\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\n\z') {
     return [pscustomobject]@{ Schema = 1; LauncherAbi = 1; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = '-'; PreviousHash = '-' }
   }
-  if ($text -cnotmatch '\Acrg-runtime-launcher v(?<a>[23])\nlauncher-abi \k<a>\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
+  if ($text -cnotmatch '\Acrg-runtime-launcher v(?<a>[234])\nlauncher-abi \k<a>\nrelease (?<r>[0-9a-f]{64})\nsha256 (?<h>[0-9a-f]{64})\nprevious-release (?<p>[0-9a-f]{64}|-)\nprevious-sha256 (?<s>[0-9a-f]{64}|-)\n\z') { throw 'launcher provenance grammar is invalid' }
   $record = [pscustomobject]@{ Schema = [int]$Matches['a']; LauncherAbi = [int]$Matches['a']; ReleaseId = $Matches['r']; Hash = $Matches['h']; PreviousReleaseId = $Matches['p']; PreviousHash = $Matches['s'] }
   if (($record.PreviousReleaseId -ceq '-') -ne ($record.PreviousHash -ceq '-') -or $record.PreviousReleaseId -ceq $record.ReleaseId) { throw 'launcher provenance predecessor is inconsistent' }
   return $record
+}
+
+function Get-CrgLaunchDeclaredAbi {
+  param([byte[]]$Bytes)
+  if ([Text.Encoding]::UTF8.GetString($Bytes, 0, [Math]::Min(64, $Bytes.Length)) -cmatch '\A\uFEFF?# Stable launcher ABI (?<a>[1-9][0-9]?)\. ') { return [int]$Matches['a'] }
+  return 0
 }
 
 function Open-CrgLaunchRelease {
@@ -303,6 +323,10 @@ function Open-CrgLaunchRelease {
   foreach ($required in @('scripts/central-launcher.ps1', 'scripts/central-context.psm1', 'scripts/private-governance.psm1')) {
     if (-not $payloads.ContainsKey($required)) { throw "selected release lacks launcher capability: '$required'" }
   }
+  # Bootstrap's declaration rule, applied to every release that reaches
+  # execution: the active one and one a handoff records.
+  $declaredAbi = Get-CrgLaunchDeclaredAbi -Bytes $payloads['scripts/central-launcher.ps1'].Bytes
+  if (($declaredAbi -ne 0 -or $manifest.LauncherAbi -ge 4) -and $declaredAbi -ne $manifest.LauncherAbi) { throw 'selected release launcher does not declare the launcher ABI its manifest names' }
   $versionBytes = $payloads['VERSION'].Bytes
   $versionOffset = if ($versionBytes.Length -ge 3 -and $versionBytes[0] -eq 239 -and $versionBytes[1] -eq 187 -and $versionBytes[2] -eq 191) { 3 } else { 0 }
   $version = [Text.Encoding]::ASCII.GetString($versionBytes, $versionOffset, $versionBytes.Length - $versionOffset)
@@ -357,9 +381,10 @@ try {
   $storeHandle = Open-CrgLaunchDirectory -Path $store
   $installation = Read-CrgLaunchFile -Path (Join-Path $store 'launcher-install') -Maximum 1024
   $installationRecord = Read-CrgRuntimeLauncherBytes -Bytes $installation.Bytes
-  if ($installationRecord.LauncherAbi -ne 3) { throw 'ABI 3 launcher requires completed ABI 3 installation provenance' }
   $installedReleaseId = $installationRecord.ReleaseId; $installedLauncherHash = $installationRecord.Hash
   $installedLauncher = Read-CrgLaunchFile -Path $PSCommandPath -Maximum 16777216
+  if ((Get-CrgLaunchDeclaredAbi -Bytes $installedLauncher.Bytes) -ne $script:CrgLauncherAbi) { throw "stable launcher file does not declare ABI $($script:CrgLauncherAbi), the ABI of the executing launcher code, on its first line" }
+  if ($installationRecord.LauncherAbi -ne $script:CrgLauncherAbi) { throw "ABI $($script:CrgLauncherAbi) launcher requires completed ABI $($script:CrgLauncherAbi) installation provenance" }
   if (-not [string]::Equals((Get-CrgSha256HexOfBytes -Bytes $installedLauncher.Bytes), $installedLauncherHash, [StringComparison]::Ordinal)) { throw 'stable launcher bytes differ from recorded first installation' }
   $originRoot = Join-Path $store "releases\$installedReleaseId"
   $originRecord = Read-CrgLaunchFile -Path (Join-Path $originRoot 'runtime-manifest') -Maximum 65536 -ProtectedRoot $originRoot

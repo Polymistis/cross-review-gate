@@ -14,9 +14,11 @@ since only the gate writes the private database. Admission accepts the public
 branch tip whatever commit it is: the preceding public result, a descendant
 reached through commits made outside the gate, an earlier commit after a reset,
 or an unrelated commit after a rewrite (operator decision 2026-11-23). Commits
-made outside the gate are not reviewed; the next review covers only the staged
-change against that tip, and a changed public result takes the tip as its sole
-parent. `-Stage` classifies literal public/private paths before either index
+made outside the gate are not reviewed; the next review covers only the
+submitted change, which is the proposed commit message, the staged software
+change against that tip and the staged private change against the private
+branch tip, and a changed public result takes the captured public branch tip
+as its sole parent. `-Stage` classifies literal public/private paths before either index
 changes. Partial staging failures report actual index state without claiming a
 two-index rollback.
 

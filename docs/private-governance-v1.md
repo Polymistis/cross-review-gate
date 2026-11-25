@@ -311,8 +311,8 @@ buffers; outputs are validated data objects, never execution/commit authority.
 No filesystem access, environment lookup, Git process, provider, module framework,
 or state publication occurs during parsing. Source/attachment custody, file
 existence, non-overlap, instruction discovery and paired enforcement are later
-integration obligations. Ship the module only through the new central payload
-inventory; frozen v2.1 `Get-CrgCurrentFileList` and consumer inventory are unchanged.
+integration obligations. Ship the module only through the central payload
+inventory, never through `Get-CrgCurrentFileList`.
 
 ## Staging and ordinary review/commit
 

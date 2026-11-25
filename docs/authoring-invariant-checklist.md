@@ -107,8 +107,8 @@ session memory recurs in the next session.
 9. **Claim-truth sweep.** Every comment and doc sentence asserting
    behavior is re-verified against the tree in the same pass that
    changes the behavior, at every mention site: staging recipes,
-   README trees and step lists, INSTALL enumerations, the AGENTS
-   template row, audit-protocol steps, and nearby code comments. A
+   README trees and step lists, INSTALL enumerations, audit-protocol
+   steps, and nearby code comments. A
    stale "exactly one line" comment beside a two-line matcher is a
    standing finding.
 
@@ -134,8 +134,8 @@ session memory recurs in the next session.
     accepted set is a `ValidatePattern('\A(?:a|b)\z', Options = 'None')`,
     or, for a user-facing parameter that keeps tab completion, a
     `ValidateSet` followed after binding by an ordinal mapping to the exact
-    listed spelling that refuses anything else (the review wrappers'
-    `-Scope`). Case-insensitive matching is not "equals its upper case":
+    listed spelling that refuses anything else (the Codex wrapper's
+    `-ReasoningEffort`). Case-insensitive matching is not "equals its upper case":
     `(?i)` matches U+212A (Kelvin sign) to `k` and OrdinalIgnoreCase does
     not, so name the exact accepted values. `[string]::Equals($null, '')` is
     true while an Ordinal comparer's `Equals($null, '')` is false; test
@@ -189,13 +189,6 @@ session memory recurs in the next session.
   violates, re-derive the mechanism against it, land one round.
 - **Round-budget tripwire**: two consecutive blocked rounds on one
   commit force a step-back derivation, never a third instance fix.
-- **Enforced at the commit gate**: a retry of a blocked staged change is
-  refused before review until its remediation record gives each prior
-  BLOCKER it is asked to cover (bounded as section 5 states) a block
-  naming the invariant, the sweep and the
-  sites, plus an approach line after two blocked rounds (section 5 of
-  `docs/review-feedback-v1.md`). Write the record from the sweep actually
-  made; the reviewer checks it against the diff.
 - **Recurrence escalation (campaign level)**: the tripwire above is
   scoped to one commit, and that scope is a known blind spot — a
   slice can burn many rounds without ever tripping it twice in a row,

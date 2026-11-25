@@ -16,8 +16,8 @@ not delivered or implicitly authorized by a successful publication or activation
    the same central release; no per-project version, pin, or upgrade command exists.
 4. An invocation captures one release before review and retains that selection
    through child reviews and commit/merge completion. Activation never redirects an
-   in-flight operation. Current releases retain launcher ABI 3 and configuration
-   schema 1; existing ABI 1 loaders require the explicit store-wide migration.
+   in-flight operation. Current releases declare launcher ABI 4 and configuration
+   schema 1; existing loaders of an earlier ABI require the explicit store-wide migration.
 
 Source approval and byte identity are distinct. An expected source commit or
 manifest digest identifies the operator-approved input; neither value manufactures
@@ -84,7 +84,7 @@ is admitted to this new format; v2.1 `unknown` records remain valid v2.1 evidenc
 crg-runtime-manifest v1
 version <semver>
 source-commit <git-oid>
-launcher-abi 3
+launcher-abi 4
 config-schema 1
 file <sha256> <decimal-byte-length> <relative-path>
 ```
@@ -100,10 +100,16 @@ both ordinal and Windows ordinal-ignore-case comparison. Components ending in `.
 or matching a Windows reserved device name refuse. File/directory prefix conflicts
 are invalid. The manifest owns the exact inventory of an imported or retained
 release; helpers can change across compatible releases without a publisher update.
-Supported launcher ABIs require exact `VERSION`, `scripts/run-gate.sh`, `scripts/git-hooks/pre-commit`,
-`scripts/codex/{auto-review,auto-merge,commit}.ps1`,
-`scripts/claude/{auto-review,commit}.ps1`, and
-`scripts/codex/review-prompt-template.md` entries (braces abbreviate this list only).
+Every supported launcher ABI requires exact `VERSION`,
+`scripts/{codex,claude}/auto-review.ps1` and
+`scripts/codex/review-prompt-template.md` entries, ABI 3 and later also
+`scripts/central-transport.psm1`, and ABI 4 and later also
+`scripts/central-launcher.ps1`, whose bytes the declaration rule reads. A
+manifest declaring ABI 1, 2 or 3
+additionally requires the hook-mode entries `scripts/run-gate.sh`,
+`scripts/git-hooks/pre-commit`, `scripts/codex/{auto-merge,commit}.ps1` and
+`scripts/claude/commit.ps1`, because loaders of those ABIs refuse a manifest
+without them; ABI 4 does not (braces abbreviate these lists only).
 Source publication uses this bootstrap's explicit `Get-CrgRuntimePayloadPaths`:
 `VERSION`, the existing `Get-CrgCurrentFileList` source paths, and the central-only
 launcher, context, governance, tree, and preparation modules. On-disk omissions,
@@ -159,8 +165,22 @@ release through execution. Project operation locks remain project-specific.
 
 Activation first retains and fully validates the named published manifest and
 payload, including launcher ABI and configuration schema support. Retained ABIs
-and schema 1 are accepted; source publication emits ABI 3. Installed launcher
-bytes, installation provenance and the retained origin manifest must agree. An
+and schema 1 are accepted. A launcher declares its ABI on its first line, after
+an optional UTF-8 byte-order mark. Source publication accepts only a source
+launcher that declares ABI 4, as this revision's launcher does, and refuses
+any other: its payload list carries none of the hook-mode entries an
+ABI 1-3 manifest requires, so an earlier source revision is published with
+that revision's own bootstrap. Source publication, package import,
+installation, migration and activation apply one rule: a manifest or
+installation record of ABI 4 or later must name exactly the ABI its launcher
+declares, and for ABI 1-3 only a declaration naming another ABI refuses, so
+retained launchers without a recognisable declaration keep their admission.
+Before changing or reaffirming `active-release`, activation applies it to the
+installed launcher against `launcher-install` and to the selected release's own
+launcher, when the release has one, against the selected manifest. Installed
+launcher bytes, installation provenance and the retained origin manifest must
+agree, and the installation provenance must be byte for byte the record the
+store's recorded launcher transitions imply ([launcher](central-launcher-v1.md)). An
 older loader cannot activate a newer ABI release; an executable release requires a complete
 installed loader. Publish the new active record through the existing retained
 stage/prior-custody/no-replace update mechanism while holding the store lock.
@@ -221,6 +241,27 @@ retains exact preceding provenance at `launcher-prior-v3` and the successor
 transition at `launcher-upgrade-v3`. Ordinary operation forms and configuration
 schema remain stable. Fresh installs register and start the host; compatible
 activation preserves the existing installation-managed endpoint.
+
+Launcher ABI 4 keeps the ABI 3 host, operation forms and configuration schema,
+and its manifests do not require the hook-mode entries. The ABI 4 loader
+still admits retained ABI 1-3 manifests. Explicit ABI 3 to ABI 4 migration
+retains exact preceding provenance at `launcher-prior-v4` and the successor
+transition at `launcher-upgrade-v4`; earlier transition records remain. Every
+gate host and command holds the launcher files while it runs, and the migration
+ends no process. The operator ends the store's gate hosts only once their
+operations have completed, unknown outcomes have been inspected and no
+unconfirmed descendant remains in their custody, and defers the migration while
+a holder stays unresolved. While the migration still has a launcher file to
+replace, it refuses before its first write while any process other than itself
+holds either file, then replaces both and starts the ABI 4 host for the current
+logon; a rerun after both are replaced only repairs host registration. The
+newest recorded transition owns the installation
+([launcher](central-launcher-v1.md)): activation requires the installed pair to
+be exactly that transition's predecessor or its successor, a new migration
+requires its successor, and a migration to an ABI below that transition's
+refuses before writing. A partial pair is completed by retrying the same
+migration; a conflicting pair refuses until the operator restores it to one
+side of the transition.
 
 Launcher ABI 2 extends ABI 1 with Attach/PushCheck arguments and the internal
 `RetainFailure` lifetime callback. Config schema remains 1. The ABI 2 loader reads
